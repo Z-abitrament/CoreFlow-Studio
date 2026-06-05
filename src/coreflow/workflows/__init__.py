@@ -10,6 +10,9 @@ from coreflow.workflows.models import (
 )
 
 __all__ = [
+    "CalibrationPreviewConfig",
+    "CalibrationPreviewWorkflow",
+    "CalibrationPreviewWorkflowResult",
     "RunSession",
     "RunStatus",
     "RunType",
@@ -17,3 +20,24 @@ __all__ = [
     "WorkflowStepStatus",
     "WorkflowStepType",
 ]
+
+
+def __getattr__(name: str) -> object:
+    if name in {
+        "CalibrationPreviewConfig",
+        "CalibrationPreviewWorkflow",
+        "CalibrationPreviewWorkflowResult",
+    }:
+        from coreflow.workflows.calibration import (
+            CalibrationPreviewConfig,
+            CalibrationPreviewWorkflow,
+            CalibrationPreviewWorkflowResult,
+        )
+
+        exports = {
+            "CalibrationPreviewConfig": CalibrationPreviewConfig,
+            "CalibrationPreviewWorkflow": CalibrationPreviewWorkflow,
+            "CalibrationPreviewWorkflowResult": CalibrationPreviewWorkflowResult,
+        }
+        return exports[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

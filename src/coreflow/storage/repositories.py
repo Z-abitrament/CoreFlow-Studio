@@ -16,7 +16,7 @@ from coreflow.storage.models import (
     AuditLogRecord,
     DeviceRecord,
 )
-from coreflow.workflows import RunSession, WorkflowStep
+from coreflow.workflows.models import RunSession, WorkflowStep
 
 
 class StorageRepository:
