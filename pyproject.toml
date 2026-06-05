@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "coreflow-studio"
+version = "0.1.0"
+description = "Windows-first desktop automation foundation for Coriolis flowmeter workflows."
+readme = "docs/PRD.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [
+  { name = "CoreFlow Studio Team" }
+]
+dependencies = [
+  "numpy>=1.26",
+  "pandas>=2.2",
+  "PySide6>=6.7",
+  "pyqtgraph>=0.13",
+  "pyserial>=3.5",
+  "pymodbus>=3.6",
+  "scipy>=1.13"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "pytest-qt>=4.4"
+]
+
+[project.scripts]
+coreflow = "coreflow.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = [
+  "--strict-markers",
+  "--strict-config"
+]

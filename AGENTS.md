@@ -16,6 +16,7 @@ Read these documents before implementation work:
 - `docs/DATA_MODEL.md`: storage model, file layout, and data traceability.
 - `docs/SIMULATION.md`: simulator requirements and hardware-free development path.
 - `docs/DEVELOPMENT_WORKFLOW.md`: local git workflow, overnight run checklist, permissions, and developer setup.
+- `docs/DEVELOPER_SETUP.md`: Windows PowerShell setup and M0 verification commands.
 
 If documents disagree, prefer this order:
 
@@ -83,6 +84,6 @@ Required safeguards:
 - Never allow simulator assumptions to silently become hardware assumptions.
 
 ## Current Repository State
-This repository currently contains documentation only. No application code exists yet. The next implementation pass should bootstrap the Python project structure described in `docs/IMPLEMENTATION_PLAN.md`.
+This repository is in M0 bootstrap. It contains the canonical documentation harness plus a minimal Python package, entry point, dependency metadata, and smoke tests. It does not yet contain M1 domain interfaces, simulator logic, workflows, storage repositories, protocol adapters, or UI implementation.
 
 Before creating code, confirm that the requested work is moving from documentation harness to implementation. If the user asks to continue documentation work, update the canonical documents and keep them internally consistent before adding any source files.

@@ -21,6 +21,7 @@ Deliverables:
 - `.gitignore` for Python, Qt, virtual environments, caches, build outputs, logs, SQLite runtime files, and generated artifacts.
 - First baseline checkpoint commit for documentation and workflow setup.
 - Developer setup instructions linked from `docs/DEVELOPMENT_WORKFLOW.md`.
+- Windows setup and verification commands in `docs/DEVELOPER_SETUP.md`.
 
 Done when:
 
