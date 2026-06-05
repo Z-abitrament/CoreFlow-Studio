@@ -1,0 +1,44 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Build and packaging outputs
+build/
+dist/
+*.egg-info/
+*.spec
+
+# Qt and local IDE state
+*.autosave
+.vscode/
+.idea/
+
+# Runtime data, logs, and generated artifacts
+CoreFlowStudioData/
+artifacts/
+logs/
+*.log
+*.sqlite
+*.sqlite3
+*.db
+
+# Reports and exports generated during local runs
+reports/
+exports/
+
+# OS files
+Thumbs.db
+Desktop.ini
