@@ -84,6 +84,6 @@ Required safeguards:
 - Never allow simulator assumptions to silently become hardware assumptions.
 
 ## Current Repository State
-This repository has completed M2 simulator foundation. It contains the canonical documentation harness, minimal Python package, entry point, dependency metadata, smoke tests, `FlowmeterDevice`, device data models, workflow status models, storage artifact models, deterministic simulator scenarios, `SimulatedFlowmeterDevice`, and a multi-device simulator manager. It does not yet contain workflow execution, storage repositories, protocol adapters, replay-file support, or UI implementation.
+This repository has completed M3 Modbus RTU protocol adapter. It contains the canonical documentation harness, minimal Python package, entry point, dependency metadata, smoke tests, `FlowmeterDevice`, device data models, workflow status models, storage artifact models, deterministic simulator scenarios, `SimulatedFlowmeterDevice`, a multi-device simulator manager, Modbus register-map models, encoding/decoding helpers, a fake-testable transport abstraction, and `ModbusRtuFlowmeterDevice`. It does not yet contain workflow execution, storage repositories, hardware acceptance, replay-file support, or UI implementation.
 
 Before creating code, confirm that the requested work is moving from documentation harness to implementation. If the user asks to continue documentation work, update the canonical documents and keep them internally consistent before adding any source files.
