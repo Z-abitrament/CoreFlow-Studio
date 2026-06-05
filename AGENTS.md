@@ -84,6 +84,6 @@ Required safeguards:
 - Never allow simulator assumptions to silently become hardware assumptions.
 
 ## Current Repository State
-This repository is in M0 bootstrap. It contains the canonical documentation harness plus a minimal Python package, entry point, dependency metadata, and smoke tests. It does not yet contain M1 domain interfaces, simulator logic, workflows, storage repositories, protocol adapters, or UI implementation.
+This repository has completed M1 core domain interfaces. It contains the canonical documentation harness, minimal Python package, entry point, dependency metadata, smoke tests, `FlowmeterDevice`, device data models, workflow status models, and storage artifact models. It does not yet contain simulator logic, workflow execution, storage repositories, protocol adapters, or UI implementation.
 
 Before creating code, confirm that the requested work is moving from documentation harness to implementation. If the user asks to continue documentation work, update the canonical documents and keep them internally consistent before adding any source files.

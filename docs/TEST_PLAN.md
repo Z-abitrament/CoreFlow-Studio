@@ -28,6 +28,19 @@ Scenarios:
 - Run the minimal application entry point and confirm it exits cleanly.
 - Confirm `git status --short` is clean after the final checkpoint commit.
 
+### M1 Core Interface Tests
+ID: TP-M1-001
+
+Goal: Verify core domain interfaces and value objects.
+
+Scenarios:
+
+- Instantiate device identity, health, measurement, configuration, communication diagnostic, and parameter-write models.
+- Instantiate workflow run and step status models.
+- Instantiate storage artifact models.
+- Implement a test `FlowmeterDevice` without importing simulator, Modbus, storage repository, or UI code.
+- Confirm existing M0 entry-point tests still pass.
+
 ### Simulator Tests
 ID: TP-SIM-001
 
