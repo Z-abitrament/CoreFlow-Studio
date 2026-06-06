@@ -46,11 +46,14 @@ Set `COREFLOW_DATA_ROOT` to override the data directory for lab validation.
 After building, launch:
 
 ```powershell
+.\dist\CoreFlowStudio\CoreFlowStudio.exe
 .\dist\CoreFlowStudio\CoreFlowStudio.exe --build-info
 .\dist\CoreFlowStudio\CoreFlowStudio.exe --write-register-map-template .\dist\CoreFlowStudio\placeholder_modbus.json
 .\dist\CoreFlowStudio\CoreFlowStudio.exe --simulator-smoke --data-root .\dist\CoreFlowStudio\smoke-data
 .\dist\CoreFlowStudio\CoreFlowStudio.exe --ui
 ```
+
+Opening `CoreFlowStudio.exe` with no command-line arguments starts the Qt desktop UI. The other commands are diagnostics for build metadata, protocol templates, and headless simulator verification.
 
 The `--simulator-smoke` command runs the simulator path headlessly: add a device, connect it, read live values, run calibration preview, run factory test, run an experiment, and generate an export package. In the UI, the same simulator workflows should be available from the main window.
 

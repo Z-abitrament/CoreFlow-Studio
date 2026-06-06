@@ -3,6 +3,8 @@
 import os
 from pathlib import Path
 
+from PyInstaller.utils.hooks import collect_dynamic_libs
+
 block_cipher = None
 
 project_root = Path(SPECPATH).parents[1]
@@ -15,7 +17,12 @@ runtime_hooks = [str(build_stamp_hook)] if build_stamp_hook.exists() else []
 a = Analysis(
     [str(src_root / "coreflow" / "__main__.py")],
     pathex=[str(src_root), str(project_root)],
-    binaries=[],
+    binaries=[
+        (src, "PySide6") for src, _dest in collect_dynamic_libs("PySide6")
+    ]
+    + [
+        (src, "PySide6") for src, _dest in collect_dynamic_libs("shiboken6")
+    ],
     datas=[],
     hiddenimports=[
         "PySide6.QtCore",
@@ -30,6 +37,11 @@ a = Analysis(
     excludes=[],
     noarchive=False,
 )
+a.binaries = [
+    binary
+    for binary in a.binaries
+    if Path(binary[0]).name.lower() not in {"icudt73.dll", "icuuc.dll"}
+]
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
 exe = EXE(

@@ -26,9 +26,10 @@ try {
     }
     $env:COREFLOW_BUILD_COMMIT = $GitCommit
     $BuildStampHook = Join-Path $ScriptDir "generated_build_stamp.py"
-    @"
+@"
 import os
 
+os.environ.setdefault("COREFLOW_PACKAGED", "1")
 os.environ.setdefault("COREFLOW_BUILD_CHANNEL", "$BuildChannel")
 os.environ.setdefault("COREFLOW_BUILD_COMMIT", "$env:COREFLOW_BUILD_COMMIT")
 "@ | Set-Content -LiteralPath $BuildStampHook -Encoding UTF8

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import sys
 from pathlib import Path
 
 from coreflow import __version__
@@ -53,7 +55,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    effective_argv = sys.argv[1:] if argv is None else argv
+    args = parser.parse_args(effective_argv)
 
     if args.version:
         print(f"CoreFlow Studio {__version__}")
@@ -79,14 +82,33 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Wrote register-map template: {args.write_register_map_template}")
     elif args.simulator_smoke:
         return run_simulator_smoke(data_root=args.data_root)
-    elif args.ui:
-        from coreflow.ui import run_app
-
-        return run_app(data_root=args.data_root)
+    elif args.ui or should_launch_packaged_ui_by_default(args):
+        return launch_ui(data_root=args.data_root)
     else:
         print("CoreFlow Studio M0 bootstrap is ready.")
 
     return 0
+
+
+def should_launch_packaged_ui_by_default(args: argparse.Namespace) -> bool:
+    """Return true when a packaged executable has no explicit CLI action."""
+
+    if os.environ.get("COREFLOW_PACKAGED") != "1":
+        return False
+    return not any(
+        (
+            args.version,
+            args.build_info,
+            args.simulator_smoke,
+            args.write_register_map_template is not None,
+        )
+    )
+
+
+def launch_ui(data_root: Path | None = None) -> int:
+    from coreflow.ui import run_app
+
+    return run_app(data_root=data_root)
 
 
 def run_simulator_smoke(data_root: Path | None = None) -> int:
