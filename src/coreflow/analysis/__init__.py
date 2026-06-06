@@ -7,11 +7,36 @@ from coreflow.analysis.calibration import (
     CalibrationReferencePoint,
     PlaceholderCalibrationCalculator,
 )
+from coreflow.analysis.error import (
+    ErrorAnalysisConfig,
+    ErrorAnalysisResult,
+    ErrorPoint,
+    ErrorPointResult,
+    NearZeroPolicy,
+    analyze_error,
+)
+from coreflow.analysis.stability import (
+    StabilityAnalysisConfig,
+    StabilityAnalysisResult,
+    analyze_stability,
+)
+from coreflow.analysis.timeseries import TimeSeriesSample, load_mass_flow_csv
 
 __all__ = [
     "CalibrationCalculator",
     "CalibrationMeasurement",
     "CalibrationPreviewResult",
     "CalibrationReferencePoint",
+    "ErrorAnalysisConfig",
+    "ErrorAnalysisResult",
+    "ErrorPoint",
+    "ErrorPointResult",
+    "NearZeroPolicy",
     "PlaceholderCalibrationCalculator",
+    "StabilityAnalysisConfig",
+    "StabilityAnalysisResult",
+    "TimeSeriesSample",
+    "analyze_error",
+    "analyze_stability",
+    "load_mass_flow_csv",
 ]
