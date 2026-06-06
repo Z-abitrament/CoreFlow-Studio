@@ -185,6 +185,7 @@ Deliverables:
 Done when:
 
 - A simple experiment can collect data, run a processing module, store outputs, and display results.
+- Verification notes are recorded in `docs/M10_VERIFICATION.md`.
 
 ### M11: Hardware Acceptance Preparation
 Prepare for physical transmitter testing.

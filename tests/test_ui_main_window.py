@@ -48,6 +48,20 @@ def test_main_window_runs_simulator_workflows(qtbot, tmp_path) -> None:
     assert history_workflows == {"calibration_preview", "automated_factory_test"}
     assert _details_contain(window, "factory_test_summary")
 
+    _click(qtbot, window.runExperimentButton)
+    qtbot.waitUntil(lambda: window.runHistoryTable.rowCount() == 3, timeout=5000)
+    history_workflows = {
+        _table_text(window.runHistoryTable, row, 1)
+        for row in range(window.runHistoryTable.rowCount())
+    }
+    assert history_workflows == {
+        "calibration_preview",
+        "automated_factory_test",
+        "flexible_experiment",
+    }
+    assert _details_contain(window, "experiment_signal_processing")
+    assert _details_contain(window, "PROCESSED")
+
     _click(qtbot, window.generateExportButton)
     qtbot.waitUntil(lambda: _details_contain(window, "EXPORT-MANIFEST"), timeout=5000)
     assert _details_contain(window, "REPORT-TXT")

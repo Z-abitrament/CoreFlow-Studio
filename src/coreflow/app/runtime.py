@@ -9,6 +9,13 @@ from pathlib import Path
 from coreflow import __version__
 from coreflow.analysis.calibration import CalibrationReferencePoint
 from coreflow.devices import CommunicationState, FlowmeterDevice, Measurement
+from coreflow.experiments import (
+    CapturePlan,
+    ExperimentDefinition,
+    FixtureAction,
+    MLInferenceConfig,
+    ProcessingModuleConfig,
+)
 from coreflow.reports import ExportPackageResult, ReportExportService
 from coreflow.simulation import (
     FlowProfile,
@@ -34,6 +41,10 @@ from coreflow.workflows.factory_test import (
     FactoryStabilityCheck,
     FactoryTestConfig,
     FactoryTestWorkflow,
+)
+from coreflow.workflows.experiment import (
+    ExperimentWorkflow,
+    ExperimentWorkflowConfig,
 )
 
 
@@ -205,6 +216,47 @@ class CoreFlowRuntime:
                     max_range=0.1,
                     max_stddev=0.1,
                 ),
+                software_version=__version__,
+            ),
+        )
+        return run_id
+
+    def run_default_experiment(self, device_id: str) -> str:
+        managed = self._managed(device_id)
+        run_id = self._next_run_id()
+        definition = ExperimentDefinition(
+            experiment_id="EXP-BASIC-STATS",
+            name="Basic signal statistics",
+            version="0.1",
+            capture_plan=CapturePlan(sample_count=6, label="ui_basic_stats"),
+            processing=(
+                ProcessingModuleConfig(module_name="basic_signal_stats"),
+            ),
+            fixture_actions=(
+                FixtureAction(
+                    action_name="fixture_placeholder",
+                    parameters={"mode": "noop"},
+                    required=False,
+                ),
+            ),
+            ml_inference=(
+                MLInferenceConfig(
+                    model_name="placeholder_model",
+                    enabled=True,
+                ),
+            ),
+            metadata={"created_by": "m10_runtime_default"},
+        )
+        workflow = ExperimentWorkflow(
+            repository=self.repository,
+            artifact_store=self.artifact_store,
+        )
+        workflow.run(
+            managed.device,
+            ExperimentWorkflowConfig(
+                run_id=run_id,
+                operator=self.operator,
+                definition=definition,
                 software_version=__version__,
             ),
         )

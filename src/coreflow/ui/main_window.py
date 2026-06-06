@@ -199,10 +199,13 @@ class MainWindow(QMainWindow):
         self.runCalibrationButton.setObjectName("runCalibrationButton")
         self.runFactoryTestButton = QPushButton("Factory Test")
         self.runFactoryTestButton.setObjectName("runFactoryTestButton")
+        self.runExperimentButton = QPushButton("Run Experiment")
+        self.runExperimentButton.setObjectName("runExperimentButton")
         self.generateExportButton = QPushButton("Generate Export")
         self.generateExportButton.setObjectName("generateExportButton")
         action_layout.addWidget(self.runCalibrationButton)
         action_layout.addWidget(self.runFactoryTestButton)
+        action_layout.addWidget(self.runExperimentButton)
         action_layout.addWidget(self.generateExportButton)
         layout.addWidget(actions)
 
@@ -257,6 +260,7 @@ class MainWindow(QMainWindow):
         self.readLiveButton.clicked.connect(self._read_live)
         self.runCalibrationButton.clicked.connect(self._run_calibration)
         self.runFactoryTestButton.clicked.connect(self._run_factory_test)
+        self.runExperimentButton.clicked.connect(self._run_experiment)
         self.generateExportButton.clicked.connect(self._generate_export)
         self.cancelWorkflowButton.clicked.connect(self._request_cancel)
         self.runHistoryTable.itemSelectionChanged.connect(self._inspect_selected_run)
@@ -322,6 +326,16 @@ class MainWindow(QMainWindow):
         else:
             self._log("Factory Test", "Select a connected channel first.")
 
+    def _run_experiment(self) -> None:
+        device_id = self._selected_device_id()
+        if device_id is not None:
+            self._start_workflow(
+                "Experiment",
+                lambda: self.runtime.run_default_experiment(device_id),
+            )
+        else:
+            self._log("Experiment", "Select a connected channel first.")
+
     def _generate_export(self) -> None:
         run_id = self._selected_run_id()
         if run_id is None:
@@ -345,6 +359,7 @@ class MainWindow(QMainWindow):
         self.cancelWorkflowButton.setEnabled(True)
         self.runCalibrationButton.setEnabled(False)
         self.runFactoryTestButton.setEnabled(False)
+        self.runExperimentButton.setEnabled(False)
         self.generateExportButton.setEnabled(False)
         self._log(label, "Started")
 
@@ -364,6 +379,7 @@ class MainWindow(QMainWindow):
         self.cancelWorkflowButton.setEnabled(False)
         self.runCalibrationButton.setEnabled(True)
         self.runFactoryTestButton.setEnabled(True)
+        self.runExperimentButton.setEnabled(True)
         self.generateExportButton.setEnabled(True)
         self._active_tasks.clear()
         self._refresh_channels()
@@ -377,6 +393,7 @@ class MainWindow(QMainWindow):
         self.cancelWorkflowButton.setEnabled(False)
         self.runCalibrationButton.setEnabled(True)
         self.runFactoryTestButton.setEnabled(True)
+        self.runExperimentButton.setEnabled(True)
         self.generateExportButton.setEnabled(True)
         self._active_tasks.clear()
         self._refresh_channels()

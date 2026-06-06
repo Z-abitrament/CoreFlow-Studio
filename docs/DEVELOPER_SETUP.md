@@ -34,6 +34,7 @@ Expected behavior:
 - The version command prints the package version.
 - The UI command launches the Qt desktop application and stores local runtime data under `CoreFlowStudioData` by default.
 - In the UI, simulator-backed completed runs can generate report and CSV export artifacts from the run history panel.
+- The UI can run a small simulator-backed experiment from the workflow panel and inspect stored processing results.
 
 ## Notes
 - The UI can be launched with `--data-root <path>` to keep SQLite data and artifacts outside the repository root during manual checks.
