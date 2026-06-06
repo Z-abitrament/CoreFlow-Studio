@@ -9,6 +9,7 @@ from coreflow.storage.models import (
     ArtifactType,
     AuditLogRecord,
     DeviceRecord,
+    RunSummary,
 )
 from coreflow.storage.repositories import StorageRepository
 
@@ -21,6 +22,7 @@ __all__ = [
     "Database",
     "DeviceRecord",
     "IntegrityIssue",
+    "RunSummary",
     "StorageRepository",
     "check_artifact_integrity",
 ]

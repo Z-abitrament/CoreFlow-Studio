@@ -24,6 +24,7 @@ Run:
 .\.venv\Scripts\python -m pytest
 .\.venv\Scripts\python -m coreflow
 .\.venv\Scripts\python -m coreflow --version
+.\.venv\Scripts\python -m coreflow --ui
 ```
 
 Expected behavior:
@@ -31,7 +32,8 @@ Expected behavior:
 - The test suite passes.
 - The default entry point prints that the M0 bootstrap is ready.
 - The version command prints the package version.
+- The UI command launches the Qt desktop application and stores local runtime data under `CoreFlowStudioData` by default.
 
 ## Notes
-- M0 does not include simulator, workflow, storage, protocol, or UI implementation.
+- The UI can be launched with `--data-root <path>` to keep SQLite data and artifacts outside the repository root during manual checks.
 - See `docs/DEVELOPMENT_WORKFLOW.md` for local git and overnight autonomous-run guidance.

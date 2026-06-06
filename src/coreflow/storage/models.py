@@ -54,6 +54,21 @@ class DeviceRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class RunSummary:
+    """Compact run-session row for history and inspection views."""
+
+    run_id: str
+    run_type: str
+    workflow_name: str
+    status: str
+    device_id: str
+    operator: str
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    software_version: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class AnalysisResultRecord:
     """Persisted analysis output summary."""
 

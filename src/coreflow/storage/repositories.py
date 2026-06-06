@@ -15,6 +15,7 @@ from coreflow.storage.models import (
     ArtifactType,
     AuditLogRecord,
     DeviceRecord,
+    RunSummary,
 )
 from coreflow.workflows.models import RunSession, WorkflowStep
 
@@ -119,6 +120,21 @@ class StorageRepository:
         if row is None:
             return None
         return str(row["status"])
+
+    def list_runs(self, limit: int | None = None) -> tuple[RunSummary, ...]:
+        query = """
+            SELECT run_id, run_type, workflow_name, status, device_id, operator,
+                   started_at, ended_at, software_version
+            FROM run_sessions
+            ORDER BY COALESCE(started_at, '') DESC, run_id DESC
+        """
+        parameters: tuple[Any, ...] = ()
+        if limit is not None:
+            query += " LIMIT ?"
+            parameters = (limit,)
+        with self._database.connect() as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        return tuple(_run_summary_from_row(row) for row in rows)
 
     def save_step(self, step: WorkflowStep) -> None:
         with self._database.connect() as connection:
@@ -307,6 +323,20 @@ def _analysis_result_from_row(row: sqlite3.Row) -> AnalysisResultRecord:
         summary_metrics=_from_json(row["summary_metrics_json"], {}),
         pass_fail_decision=row["pass_fail_decision"],
         created_at=_parse_dt(row["created_at"]),
+    )
+
+
+def _run_summary_from_row(row: sqlite3.Row) -> RunSummary:
+    return RunSummary(
+        run_id=row["run_id"],
+        run_type=row["run_type"],
+        workflow_name=row["workflow_name"],
+        status=row["status"],
+        device_id=row["device_id"],
+        operator=row["operator"],
+        started_at=_parse_dt(row["started_at"]),
+        ended_at=_parse_dt(row["ended_at"]),
+        software_version=row["software_version"],
     )
 
 

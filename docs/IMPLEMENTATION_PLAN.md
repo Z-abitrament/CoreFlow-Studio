@@ -154,6 +154,7 @@ Done when:
 
 - A user can launch the app, connect simulated devices, run calibration preview, run factory test, and inspect stored results.
 - UI tests or smoke checks verify the main paths.
+- Verification notes are recorded in `docs/M8_VERIFICATION.md`.
 
 ### M9: Reporting And Export
 Generate operator-readable outputs.
