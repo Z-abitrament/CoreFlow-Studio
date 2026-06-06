@@ -16,6 +16,7 @@ class RunType(StrEnum):
     ERROR_ANALYSIS = "error_analysis"
     STABILITY = "stability"
     EXPERIMENT = "experiment"
+    HARDWARE_ACCEPTANCE = "hardware_acceptance"
 
 
 class RunStatus(StrEnum):

@@ -203,6 +203,7 @@ Done when:
 
 - A real-device test session can be attempted without changing workflows or UI architecture.
 - Read-only hardware checks can run before any write-capable workflow is enabled.
+- Verification notes are recorded in `docs/M11_VERIFICATION.md`.
 
 ### M12: Windows Packaging
 Package the desktop app for a Windows lab or factory PC.
