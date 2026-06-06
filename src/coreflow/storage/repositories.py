@@ -121,6 +121,16 @@ class StorageRepository:
             return None
         return str(row["status"])
 
+    def get_run(self, run_id: str) -> RunSession | None:
+        with self._database.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM run_sessions WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return _run_session_from_row(row)
+
     def list_runs(self, limit: int | None = None) -> tuple[RunSummary, ...]:
         query = """
             SELECT run_id, run_type, workflow_name, status, device_id, operator,
@@ -172,6 +182,19 @@ class StorageRepository:
                 (run_id,),
             ).fetchall()
         return tuple((str(row["name"]), str(row["status"])) for row in rows)
+
+    def list_steps(self, run_id: str) -> tuple[WorkflowStep, ...]:
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM workflow_steps
+                WHERE run_id = ?
+                ORDER BY step_id
+                """,
+                (run_id,),
+            ).fetchall()
+        return tuple(_workflow_step_from_row(row) for row in rows)
 
     def save_analysis_result(self, record: AnalysisResultRecord) -> None:
         with self._database.connect() as connection:
@@ -326,6 +349,25 @@ def _analysis_result_from_row(row: sqlite3.Row) -> AnalysisResultRecord:
     )
 
 
+def _run_session_from_row(row: sqlite3.Row) -> RunSession:
+    from coreflow.workflows.models import RunStatus, RunType
+
+    return RunSession(
+        run_id=row["run_id"],
+        run_type=RunType(row["run_type"]),
+        workflow_name=row["workflow_name"],
+        workflow_version=row["workflow_version"],
+        device_id=row["device_id"],
+        operator=row["operator"],
+        status=RunStatus(row["status"]),
+        started_at=_parse_dt(row["started_at"]),
+        ended_at=_parse_dt(row["ended_at"]),
+        configuration_snapshot=_from_json(row["configuration_snapshot_json"], {}),
+        software_version=row["software_version"],
+        notes=row["notes"],
+    )
+
+
 def _run_summary_from_row(row: sqlite3.Row) -> RunSummary:
     return RunSummary(
         run_id=row["run_id"],
@@ -337,6 +379,23 @@ def _run_summary_from_row(row: sqlite3.Row) -> RunSummary:
         started_at=_parse_dt(row["started_at"]),
         ended_at=_parse_dt(row["ended_at"]),
         software_version=row["software_version"],
+    )
+
+
+def _workflow_step_from_row(row: sqlite3.Row) -> WorkflowStep:
+    from coreflow.workflows.models import WorkflowStepStatus, WorkflowStepType
+
+    return WorkflowStep(
+        step_id=row["step_id"],
+        run_id=row["run_id"],
+        name=row["name"],
+        step_type=WorkflowStepType(row["step_type"]),
+        status=WorkflowStepStatus(row["status"]),
+        started_at=_parse_dt(row["started_at"]),
+        ended_at=_parse_dt(row["ended_at"]),
+        input_configuration=_from_json(row["input_configuration_json"], {}),
+        output_summary=_from_json(row["output_summary_json"], {}),
+        error_message=row["error_message"],
     )
 
 

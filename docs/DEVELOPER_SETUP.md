@@ -33,6 +33,7 @@ Expected behavior:
 - The default entry point prints that the M0 bootstrap is ready.
 - The version command prints the package version.
 - The UI command launches the Qt desktop application and stores local runtime data under `CoreFlowStudioData` by default.
+- In the UI, simulator-backed completed runs can generate report and CSV export artifacts from the run history panel.
 
 ## Notes
 - The UI can be launched with `--data-root <path>` to keep SQLite data and artifacts outside the repository root during manual checks.

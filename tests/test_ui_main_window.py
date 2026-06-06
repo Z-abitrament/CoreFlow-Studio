@@ -48,6 +48,12 @@ def test_main_window_runs_simulator_workflows(qtbot, tmp_path) -> None:
     assert history_workflows == {"calibration_preview", "automated_factory_test"}
     assert _details_contain(window, "factory_test_summary")
 
+    _click(qtbot, window.generateExportButton)
+    qtbot.waitUntil(lambda: _details_contain(window, "EXPORT-MANIFEST"), timeout=5000)
+    assert _details_contain(window, "REPORT-TXT")
+    assert _details_contain(window, "EXPORT-METRICS")
+    assert _details_contain(window, "EXPORT-MEASUREMENTS")
+
     _click(qtbot, window.disconnectButton)
     assert _table_text(window.deviceTable, 0, 3) == "disconnected"
 

@@ -199,8 +199,11 @@ class MainWindow(QMainWindow):
         self.runCalibrationButton.setObjectName("runCalibrationButton")
         self.runFactoryTestButton = QPushButton("Factory Test")
         self.runFactoryTestButton.setObjectName("runFactoryTestButton")
+        self.generateExportButton = QPushButton("Generate Export")
+        self.generateExportButton.setObjectName("generateExportButton")
         action_layout.addWidget(self.runCalibrationButton)
         action_layout.addWidget(self.runFactoryTestButton)
+        action_layout.addWidget(self.generateExportButton)
         layout.addWidget(actions)
 
         self.statusLog = QTableWidget(0, 3)
@@ -254,6 +257,7 @@ class MainWindow(QMainWindow):
         self.readLiveButton.clicked.connect(self._read_live)
         self.runCalibrationButton.clicked.connect(self._run_calibration)
         self.runFactoryTestButton.clicked.connect(self._run_factory_test)
+        self.generateExportButton.clicked.connect(self._generate_export)
         self.cancelWorkflowButton.clicked.connect(self._request_cancel)
         self.runHistoryTable.itemSelectionChanged.connect(self._inspect_selected_run)
 
@@ -318,6 +322,20 @@ class MainWindow(QMainWindow):
         else:
             self._log("Factory Test", "Select a connected channel first.")
 
+    def _generate_export(self) -> None:
+        run_id = self._selected_run_id()
+        if run_id is None:
+            self._log("Export", "Select a completed run first.")
+            return
+        self._start_workflow(
+            "Export",
+            lambda: self._run_export(run_id),
+        )
+
+    def _run_export(self, run_id: str) -> str:
+        self.runtime.generate_export_package(run_id)
+        return run_id
+
     def _start_workflow(self, label: str, action: Callable[[], str]) -> None:
         if self._workflow_running:
             self._log(label, "A workflow is already running.")
@@ -327,6 +345,7 @@ class MainWindow(QMainWindow):
         self.cancelWorkflowButton.setEnabled(True)
         self.runCalibrationButton.setEnabled(False)
         self.runFactoryTestButton.setEnabled(False)
+        self.generateExportButton.setEnabled(False)
         self._log(label, "Started")
 
         task = WorkflowTask(action)
@@ -345,6 +364,7 @@ class MainWindow(QMainWindow):
         self.cancelWorkflowButton.setEnabled(False)
         self.runCalibrationButton.setEnabled(True)
         self.runFactoryTestButton.setEnabled(True)
+        self.generateExportButton.setEnabled(True)
         self._active_tasks.clear()
         self._refresh_channels()
         self._refresh_history(str(run_id))
@@ -357,6 +377,7 @@ class MainWindow(QMainWindow):
         self.cancelWorkflowButton.setEnabled(False)
         self.runCalibrationButton.setEnabled(True)
         self.runFactoryTestButton.setEnabled(True)
+        self.generateExportButton.setEnabled(True)
         self._active_tasks.clear()
         self._refresh_channels()
         self._refresh_history()

@@ -9,6 +9,7 @@ from pathlib import Path
 from coreflow import __version__
 from coreflow.analysis.calibration import CalibrationReferencePoint
 from coreflow.devices import CommunicationState, FlowmeterDevice, Measurement
+from coreflow.reports import ExportPackageResult, ReportExportService
 from coreflow.simulation import (
     FlowProfile,
     FlowProfileKind,
@@ -244,6 +245,13 @@ class CoreFlowRuntime:
             analysis_results=self.repository.list_analysis_results(run_id),
             artifacts=self.repository.list_artifacts(run_id),
         )
+
+    def generate_export_package(self, run_id: str) -> ExportPackageResult:
+        service = ReportExportService(
+            repository=self.repository,
+            artifact_store=self.artifact_store,
+        )
+        return service.generate_export_package(run_id)
 
     def _next_run_id(self) -> str:
         self._sequence += 1

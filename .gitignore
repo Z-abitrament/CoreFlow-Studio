@@ -36,8 +36,8 @@ logs/
 *.db
 
 # Reports and exports generated during local runs
-reports/
-exports/
+/reports/
+/exports/
 
 # OS files
 Thumbs.db

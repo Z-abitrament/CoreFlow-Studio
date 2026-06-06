@@ -169,6 +169,7 @@ Done when:
 
 - A simulator-generated run can produce report and CSV artifacts.
 - Report tests verify required fields are present.
+- Verification notes are recorded in `docs/M9_VERIFICATION.md`.
 
 ### M10: Flexible Experiment Extensions
 Add the first extension points for R&D workflows.
