@@ -19,7 +19,9 @@ ENV/
 build/
 dist/
 *.egg-info/
-*.spec
+/*.spec
+!packaging/windows/*.spec
+packaging/windows/generated_build_stamp.py
 
 # Qt and local IDE state
 *.autosave

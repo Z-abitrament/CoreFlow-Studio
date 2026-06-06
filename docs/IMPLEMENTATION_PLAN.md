@@ -219,6 +219,7 @@ Deliverables:
 Done when:
 
 - A clean Windows machine can run the packaged app with simulator workflows.
+- Verification notes are recorded in `docs/M12_VERIFICATION.md`.
 
 ## Implementation Defaults
 - Use PySide6 for Qt unless a documented blocker appears.

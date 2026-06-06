@@ -8,6 +8,7 @@ from pathlib import Path
 
 from coreflow import __version__
 from coreflow.analysis.calibration import CalibrationReferencePoint
+from coreflow.app.paths import default_user_data_root
 from coreflow.devices import CommunicationState, FlowmeterDevice, Measurement
 from coreflow.experiments import (
     CapturePlan,
@@ -92,7 +93,7 @@ class CoreFlowRuntime:
     artifact_store: ArtifactStore = field(init=False)
 
     def __post_init__(self) -> None:
-        root = self.data_root or Path.cwd() / "CoreFlowStudioData"
+        root = self.data_root or default_user_data_root()
         self.data_root = Path(root)
         self.data_root.mkdir(parents=True, exist_ok=True)
         database = Database(self.data_root / "coreflow.sqlite")

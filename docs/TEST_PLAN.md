@@ -203,6 +203,21 @@ Scenarios:
 - Store processing configuration and outputs.
 - Keep ML and fixture-control placeholders isolated from core workflows.
 
+### Packaging Tests
+ID: TP-PKG-001
+
+Goal: Verify the Windows distributable can be built and can run simulator workflows without physical hardware.
+
+Scenarios:
+
+- Build the PyInstaller distributable folder from a clean checkout or clean working tree.
+- Confirm the packaged executable prints version and build metadata.
+- Confirm the packaged executable can write the placeholder Modbus register-map template.
+- Run the packaged executable's headless simulator smoke command with an explicit data root.
+- Confirm the simulator smoke command performs connection, live read, calibration preview, factory test, experiment, and export generation.
+- Confirm runtime data is stored under `%LOCALAPPDATA%\CoreFlow Studio` by default or `COREFLOW_DATA_ROOT` when configured.
+- Confirm the package README includes USB-to-serial driver notes and packaging limits.
+
 ## Hardware Acceptance Tests
 Hardware tests are not required for the documentation harness or early simulator implementation. They become active when real transmitters, register maps, serial settings, and safety rules are available.
 

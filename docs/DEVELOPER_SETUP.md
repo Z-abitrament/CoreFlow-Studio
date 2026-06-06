@@ -25,7 +25,9 @@ Run:
 .\.venv\Scripts\python -m coreflow
 .\.venv\Scripts\python -m coreflow --version
 .\.venv\Scripts\python -m coreflow --write-register-map-template .\config\register_maps\placeholder_modbus.json
+.\.venv\Scripts\python -m coreflow --simulator-smoke --data-root .\CoreFlowStudioData\smoke
 .\.venv\Scripts\python -m coreflow --ui
+.\packaging\windows\build.ps1
 ```
 
 Expected behavior:
@@ -34,10 +36,14 @@ Expected behavior:
 - The default entry point prints that the M0 bootstrap is ready.
 - The version command prints the package version.
 - The register-map command writes a placeholder Modbus template for hardware acceptance preparation.
-- The UI command launches the Qt desktop application and stores local runtime data under `CoreFlowStudioData` by default.
+- The simulator smoke command runs headless simulator-backed calibration preview, factory test, experiment, and export generation.
+- The UI command launches the Qt desktop application and stores local runtime data under the configured user data directory by default.
+- The packaging script creates `dist\CoreFlowStudio\CoreFlowStudio.exe`.
 - In the UI, simulator-backed completed runs can generate report and CSV export artifacts from the run history panel.
 - The UI can run a small simulator-backed experiment from the workflow panel and inspect stored processing results.
 
 ## Notes
-- The UI can be launched with `--data-root <path>` to keep SQLite data and artifacts outside the repository root during manual checks.
+- Source runs can be launched with `--data-root <path>` to choose where SQLite data and artifacts are stored.
+- Packaged runs use `%LOCALAPPDATA%\CoreFlow Studio` by default, or `COREFLOW_DATA_ROOT` when that environment variable is set.
+- If PowerShell blocks local scripts, run the packaging script with process-level bypass: `powershell -ExecutionPolicy Bypass -File .\packaging\windows\build.ps1`.
 - See `docs/DEVELOPMENT_WORKFLOW.md` for local git and overnight autonomous-run guidance.
