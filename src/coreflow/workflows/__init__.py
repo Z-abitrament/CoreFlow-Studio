@@ -13,6 +13,11 @@ __all__ = [
     "CalibrationPreviewConfig",
     "CalibrationPreviewWorkflow",
     "CalibrationPreviewWorkflowResult",
+    "FactoryMeasurementCheck",
+    "FactoryStabilityCheck",
+    "FactoryTestConfig",
+    "FactoryTestWorkflow",
+    "FactoryTestWorkflowResult",
     "RunSession",
     "RunStatus",
     "RunType",
@@ -38,6 +43,29 @@ def __getattr__(name: str) -> object:
             "CalibrationPreviewConfig": CalibrationPreviewConfig,
             "CalibrationPreviewWorkflow": CalibrationPreviewWorkflow,
             "CalibrationPreviewWorkflowResult": CalibrationPreviewWorkflowResult,
+        }
+        return exports[name]
+    if name in {
+        "FactoryMeasurementCheck",
+        "FactoryStabilityCheck",
+        "FactoryTestConfig",
+        "FactoryTestWorkflow",
+        "FactoryTestWorkflowResult",
+    }:
+        from coreflow.workflows.factory_test import (
+            FactoryMeasurementCheck,
+            FactoryStabilityCheck,
+            FactoryTestConfig,
+            FactoryTestWorkflow,
+            FactoryTestWorkflowResult,
+        )
+
+        exports = {
+            "FactoryMeasurementCheck": FactoryMeasurementCheck,
+            "FactoryStabilityCheck": FactoryStabilityCheck,
+            "FactoryTestConfig": FactoryTestConfig,
+            "FactoryTestWorkflow": FactoryTestWorkflow,
+            "FactoryTestWorkflowResult": FactoryTestWorkflowResult,
         }
         return exports[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -110,6 +110,16 @@ class StorageRepository:
                 ),
             )
 
+    def get_run_status(self, run_id: str) -> str | None:
+        with self._database.connect() as connection:
+            row = connection.execute(
+                "SELECT status FROM run_sessions WHERE run_id = ?",
+                (run_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return str(row["status"])
+
     def save_step(self, step: WorkflowStep) -> None:
         with self._database.connect() as connection:
             connection.execute(
@@ -133,6 +143,19 @@ class StorageRepository:
                     step.error_message,
                 ),
             )
+
+    def list_step_statuses(self, run_id: str) -> tuple[tuple[str, str], ...]:
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT name, status
+                FROM workflow_steps
+                WHERE run_id = ?
+                ORDER BY step_id
+                """,
+                (run_id,),
+            ).fetchall()
+        return tuple((str(row["name"]), str(row["status"])) for row in rows)
 
     def save_analysis_result(self, record: AnalysisResultRecord) -> None:
         with self._database.connect() as connection:
@@ -160,6 +183,19 @@ class StorageRepository:
                     _dt(record.created_at or _utc_now()),
                 ),
             )
+
+    def list_analysis_results(self, run_id: str) -> tuple[AnalysisResultRecord, ...]:
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM analysis_results
+                WHERE run_id = ?
+                ORDER BY result_id
+                """,
+                (run_id,),
+            ).fetchall()
+        return tuple(_analysis_result_from_row(row) for row in rows)
 
     def save_artifact(self, artifact: Artifact) -> None:
         with self._database.connect() as connection:
@@ -255,6 +291,22 @@ def _artifact_from_row(row: sqlite3.Row) -> Artifact:
         checksum=row["checksum"],
         created_at=_parse_dt(row["created_at"]),
         metadata=_from_json(row["metadata_json"], {}),
+    )
+
+
+def _analysis_result_from_row(row: sqlite3.Row) -> AnalysisResultRecord:
+    return AnalysisResultRecord(
+        result_id=row["result_id"],
+        run_id=row["run_id"],
+        step_id=row["step_id"],
+        result_type=row["result_type"],
+        algorithm_name=row["algorithm_name"],
+        algorithm_version=row["algorithm_version"],
+        input_artifact_ids=tuple(_from_json(row["input_artifact_ids_json"], [])),
+        configuration_snapshot=_from_json(row["configuration_snapshot_json"], {}),
+        summary_metrics=_from_json(row["summary_metrics_json"], {}),
+        pass_fail_decision=row["pass_fail_decision"],
+        created_at=_parse_dt(row["created_at"]),
     )
 
 
