@@ -216,6 +216,8 @@ Scenarios:
 - Confirm the console diagnostics executable prints version and build metadata.
 - Confirm the console diagnostics executable can write the placeholder Modbus register-map template.
 - Run the console diagnostics executable's headless simulator smoke command with an explicit data root.
+- Run the console diagnostics executable with `--ui`, capture stdout/stderr, and confirm the UI stays alive through startup without missing-module errors.
+- Run the windowed UI executable and confirm it stays alive through startup.
 - Confirm the simulator smoke command performs connection, live read, calibration preview, factory test, experiment, and export generation.
 - Confirm runtime data is stored under `%LOCALAPPDATA%\CoreFlow Studio` by default or `COREFLOW_DATA_ROOT` when configured.
 - Confirm the package README includes USB-to-serial driver notes and packaging limits.

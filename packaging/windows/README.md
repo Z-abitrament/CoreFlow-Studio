@@ -63,7 +63,15 @@ Set `COREFLOW_DATA_ROOT` to override the data directory for lab validation.
 - The placeholder register map must be replaced or edited from transmitter firmware documentation before real device use.
 
 ## Smoke Check
-After building, launch:
+After building, run the packaged verification script:
+
+```powershell
+.\packaging\windows\verify_package.ps1
+```
+
+The script checks required files, build metadata, headless simulator smoke, the console UI startup path, and the windowed UI startup path. It fails if either UI process exits during startup or if the console UI path writes startup errors.
+
+Manual smoke commands are:
 
 ```powershell
 .\dist\CoreFlowStudio\CoreFlowStudio.exe

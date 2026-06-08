@@ -114,16 +114,19 @@ def test_windows_packaging_files_are_present() -> None:
     repo_root = Path(__file__).resolve().parents[1]
     spec = repo_root / "packaging" / "windows" / "coreflow_studio.spec"
     build_script = repo_root / "packaging" / "windows" / "build.ps1"
+    verify_script = repo_root / "packaging" / "windows" / "verify_package.ps1"
     readme = repo_root / "packaging" / "windows" / "README.md"
     environment = repo_root / "environment.yml"
     workflow_doc = repo_root / "docs" / "DEVELOPMENT_WORKFLOW.md"
 
     assert spec.exists()
     assert build_script.exists()
+    assert verify_script.exists()
     assert readme.exists()
     assert environment.exists()
     spec_text = spec.read_text(encoding="utf-8")
     script_text = build_script.read_text(encoding="utf-8")
+    verify_text = verify_script.read_text(encoding="utf-8")
     environment_text = environment.read_text(encoding="utf-8")
     workflow_text = workflow_doc.read_text(encoding="utf-8")
     assert "coreflow\" / \"__main__.py" in spec_text
@@ -155,6 +158,11 @@ def test_windows_packaging_files_are_present() -> None:
     assert "COREFLOW_PACKAGED" in script_text
     assert "USER_MANUAL.en.md" in script_text
     assert "USER_MANUAL.zh-CN.md" in script_text
+    assert "CoreFlowStudioConsole.exe" in verify_text
+    assert "--ui" in verify_text
+    assert "RedirectStandardError" in verify_text
+    assert "pyside6.cp313-win_amd64.dll" in verify_text
+    assert "shiboken6.cp313-win_amd64.dll" in verify_text
     assert "name: coreflow-studio" in environment_text
     assert "pyinstaller>=6.6" in environment_text
     assert "pytest>=8.0" in environment_text
@@ -162,6 +170,7 @@ def test_windows_packaging_files_are_present() -> None:
     assert "-e ." in environment_text
     assert "Conventional Commits" in workflow_text
     readme_text = readme.read_text(encoding="utf-8")
+    assert "verify_package.ps1" in readme_text
     assert "CoreFlowStudioConsole.exe --simulator-smoke" in readme_text
     assert "CoreFlowStudio.exe` with no command-line arguments" in readme_text
     assert "%LOCALAPPDATA%\\CoreFlow Studio" in readme_text
