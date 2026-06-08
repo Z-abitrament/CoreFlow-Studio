@@ -16,7 +16,11 @@ if (-not (Test-Path $Python)) {
 Push-Location $RepoRoot
 try {
     if (-not $SkipTests) {
-        & $Python -m pytest
+        $TestTemp = Join-Path $RepoRoot "pytest-temp"
+        $TestCache = Join-Path $RepoRoot "pytest-cache-temp"
+        $env:TMP = $RepoRoot
+        $env:TEMP = $RepoRoot
+        & $Python -m pytest --basetemp=$TestTemp -o "cache_dir=$TestCache"
     }
 
     $env:COREFLOW_BUILD_CHANNEL = $BuildChannel
@@ -39,6 +43,14 @@ os.environ.setdefault("COREFLOW_BUILD_COMMIT", "$env:COREFLOW_BUILD_COMMIT")
     $ReadmeSource = Join-Path $ScriptDir "README.md"
     $ReadmeTarget = Join-Path $RepoRoot "dist\CoreFlowStudio\README.md"
     Copy-Item -LiteralPath $ReadmeSource -Destination $ReadmeTarget -Force
+    Copy-Item `
+        -LiteralPath (Join-Path $RepoRoot "docs\USER_MANUAL.en.md") `
+        -Destination (Join-Path $RepoRoot "dist\CoreFlowStudio\USER_MANUAL.en.md") `
+        -Force
+    Copy-Item `
+        -LiteralPath (Join-Path $RepoRoot "docs\USER_MANUAL.zh-CN.md") `
+        -Destination (Join-Path $RepoRoot "dist\CoreFlowStudio\USER_MANUAL.zh-CN.md") `
+        -Force
     Remove-Item -LiteralPath $BuildStampHook -Force
 
     Write-Host "Built dist\CoreFlowStudio\CoreFlowStudio.exe"

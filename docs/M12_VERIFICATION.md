@@ -13,7 +13,9 @@ M12 implements the first Windows distributable-folder packaging path. It does no
   - home-directory, packaged-folder, current-working-directory, and temp-directory fallbacks for restricted Windows environments.
 - Build metadata via `coreflow.build_info` and `python -m coreflow --build-info`.
 - Headless packaged-app simulator smoke command via `python -m coreflow --simulator-smoke`.
-- Packaged executable opens the Qt desktop UI by default when started with no command-line action.
+- Packaged `CoreFlowStudio.exe` opens the Qt desktop UI without a console window.
+- Packaged `CoreFlowStudioConsole.exe` keeps console diagnostics available for build info, simulator smoke, and register-map template generation.
+- English and Chinese user manuals are included in the distribution folder.
 - Packaged build filters external Anaconda ICU DLLs that can break PySide6 QtWidgets loading on Windows.
 - PyInstaller runtime hook generation for packaged build commit/channel stamping.
 - `pyinstaller` added to dev dependencies.
@@ -23,23 +25,24 @@ M12 implements the first Windows distributable-folder packaging path. It does no
 .\.venv\Scripts\python -m pip install -e ".[dev]"
 .\.venv\Scripts\python -m pytest tests\test_packaging.py -q
 powershell -ExecutionPolicy Bypass -File .\packaging\windows\build.ps1
-.\dist\CoreFlowStudio\CoreFlowStudio.exe --build-info
-.\dist\CoreFlowStudio\CoreFlowStudio.exe --write-register-map-template .\dist\CoreFlowStudio\placeholder_modbus.json
-.\dist\CoreFlowStudio\CoreFlowStudio.exe --simulator-smoke --data-root .\dist\CoreFlowStudio\smoke-data
 .\dist\CoreFlowStudio\CoreFlowStudio.exe
+.\dist\CoreFlowStudio\CoreFlowStudioConsole.exe --build-info
+.\dist\CoreFlowStudio\CoreFlowStudioConsole.exe --write-register-map-template .\dist\CoreFlowStudio\placeholder_modbus.json
+.\dist\CoreFlowStudio\CoreFlowStudioConsole.exe --simulator-smoke --data-root .\dist\CoreFlowStudio\smoke-data
 ```
 
 ## Results
-- Packaging tests passed: 8 tests passed.
-- Build script ran the full test suite: 74 tests passed.
-- PyInstaller produced `dist\CoreFlowStudio\CoreFlowStudio.exe`.
-- Packaged executable started and printed build info.
-- Packaged executable wrote a placeholder register-map JSON file.
-- Packaged executable ran simulator-backed calibration preview, factory test, experiment, and export generation through the headless smoke command.
-- Packaged executable no longer exits immediately when opened without arguments; the UI process stayed running for the no-argument startup check.
+- Packaging tests passed.
+- Build script ran the full test suite.
+- PyInstaller produced `dist\CoreFlowStudio\CoreFlowStudio.exe` and `dist\CoreFlowStudio\CoreFlowStudioConsole.exe`.
+- Windowed packaged executable started without a console window.
+- Console packaged executable printed build info.
+- Console packaged executable wrote a placeholder register-map JSON file.
+- Console packaged executable ran simulator-backed calibration preview, factory test, experiment, and export generation through the headless smoke command.
+- Distribution includes `USER_MANUAL.en.md` and `USER_MANUAL.zh-CN.md`.
 
 ## Notes
 - The initial build uses a distributable folder, not an installer.
-- The package currently uses console mode so `--build-info` and other command-line diagnostics are visible during lab validation.
+- The main executable is windowed; use `CoreFlowStudioConsole.exe` for command-line diagnostics.
 - Build metadata appends a `-dirty` suffix when tracked files have uncommitted changes; final handoff builds should be created from a clean working tree.
 - PowerShell script execution may require process-level execution-policy bypass on locked-down lab PCs.

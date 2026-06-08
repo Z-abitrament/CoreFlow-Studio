@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
+pytest-temp/
+pytest-cache-temp/
+.tmp/
 .mypy_cache/
 .ruff_cache/
 .coverage

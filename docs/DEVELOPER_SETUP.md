@@ -38,7 +38,9 @@ Expected behavior:
 - The register-map command writes a placeholder Modbus template for hardware acceptance preparation.
 - The simulator smoke command runs headless simulator-backed calibration preview, factory test, experiment, and export generation.
 - The UI command launches the Qt desktop application and stores local runtime data under the configured user data directory by default.
-- The packaging script creates `dist\CoreFlowStudio\CoreFlowStudio.exe`.
+- The packaging script creates a windowed UI executable at `dist\CoreFlowStudio\CoreFlowStudio.exe`.
+- The packaging script creates a console diagnostics executable at `dist\CoreFlowStudio\CoreFlowStudioConsole.exe`.
+- The packaging script copies `USER_MANUAL.en.md` and `USER_MANUAL.zh-CN.md` into the distribution folder.
 - In the UI, simulator-backed completed runs can generate report and CSV export artifacts from the run history panel.
 - The UI can run a small simulator-backed experiment from the workflow panel and inspect stored processing results.
 

@@ -211,12 +211,14 @@ Goal: Verify the Windows distributable can be built and can run simulator workfl
 Scenarios:
 
 - Build the PyInstaller distributable folder from a clean checkout or clean working tree.
-- Confirm the packaged executable prints version and build metadata.
-- Confirm the packaged executable can write the placeholder Modbus register-map template.
-- Run the packaged executable's headless simulator smoke command with an explicit data root.
+- Confirm the main packaged executable opens the UI without a console window.
+- Confirm the console diagnostics executable prints version and build metadata.
+- Confirm the console diagnostics executable can write the placeholder Modbus register-map template.
+- Run the console diagnostics executable's headless simulator smoke command with an explicit data root.
 - Confirm the simulator smoke command performs connection, live read, calibration preview, factory test, experiment, and export generation.
 - Confirm runtime data is stored under `%LOCALAPPDATA%\CoreFlow Studio` by default or `COREFLOW_DATA_ROOT` when configured.
 - Confirm the package README includes USB-to-serial driver notes and packaging limits.
+- Confirm English and Chinese user manuals are included in the distribution folder.
 
 ## Hardware Acceptance Tests
 Hardware tests are not required for the documentation harness or early simulator implementation. They become active when real transmitters, register maps, serial settings, and safety rules are available.

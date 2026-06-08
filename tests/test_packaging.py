@@ -123,6 +123,9 @@ def test_windows_packaging_files_are_present() -> None:
     script_text = build_script.read_text(encoding="utf-8")
     assert "coreflow\" / \"__main__.py" in spec_text
     assert "generated_build_stamp.py" in spec_text
+    assert 'name="CoreFlowStudio"' in spec_text
+    assert "console=False" in spec_text
+    assert 'name="CoreFlowStudioConsole"' in spec_text
     assert "console=True" in spec_text
     assert "collect_dynamic_libs(\"PySide6\")" in spec_text
     assert "collect_dynamic_libs(\"shiboken6\")" in spec_text
@@ -131,5 +134,11 @@ def test_windows_packaging_files_are_present() -> None:
     assert "PyInstaller" in script_text
     assert "COREFLOW_BUILD_COMMIT" in script_text
     assert "COREFLOW_PACKAGED" in script_text
-    assert "--simulator-smoke" in readme.read_text(encoding="utf-8")
-    assert "%LOCALAPPDATA%\\CoreFlow Studio" in readme.read_text(encoding="utf-8")
+    assert "USER_MANUAL.en.md" in script_text
+    assert "USER_MANUAL.zh-CN.md" in script_text
+    readme_text = readme.read_text(encoding="utf-8")
+    assert "CoreFlowStudioConsole.exe --simulator-smoke" in readme_text
+    assert "CoreFlowStudio.exe` with no command-line arguments" in readme_text
+    assert "%LOCALAPPDATA%\\CoreFlow Studio" in readme_text
+    assert (repo_root / "docs" / "USER_MANUAL.en.md").exists()
+    assert (repo_root / "docs" / "USER_MANUAL.zh-CN.md").exists()

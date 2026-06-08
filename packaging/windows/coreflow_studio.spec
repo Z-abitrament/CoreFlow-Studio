@@ -44,12 +44,30 @@ a.binaries = [
 ]
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
-exe = EXE(
+gui_exe = EXE(
     pyz,
     a.scripts,
     [],
     exclude_binaries=True,
     name="CoreFlowStudio",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=True,
+    console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+)
+
+console_exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name="CoreFlowStudioConsole",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -63,7 +81,8 @@ exe = EXE(
 )
 
 coll = COLLECT(
-    exe,
+    gui_exe,
+    console_exe,
     a.binaries,
     a.datas,
     strip=False,
