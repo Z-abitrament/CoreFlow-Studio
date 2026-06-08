@@ -25,7 +25,7 @@ CoreFlowStudio.exe
 如果从源码运行：
 
 ```powershell
-.\.venv\Scripts\python -m coreflow --ui
+conda run -n coreflow-studio python -m coreflow --ui
 ```
 
 ## 数据存储

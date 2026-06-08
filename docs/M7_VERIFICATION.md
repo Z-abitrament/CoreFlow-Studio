@@ -14,7 +14,7 @@ M7 implements initial error and stability analysis modules. It does not implemen
 
 ## Commands Run
 ```powershell
-.\.venv\Scripts\python -m pytest
+conda run -n coreflow-studio python -m pytest
 ```
 
 ## Results

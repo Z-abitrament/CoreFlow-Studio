@@ -17,6 +17,8 @@ htmlcov/
 venv/
 env/
 ENV/
+.conda/
+conda-env/
 
 # Build and packaging outputs
 build/

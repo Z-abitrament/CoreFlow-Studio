@@ -22,8 +22,8 @@ M12 implements the first Windows distributable-folder packaging path. It does no
 
 ## Commands Run
 ```powershell
-.\.venv\Scripts\python -m pip install -e ".[dev]"
-.\.venv\Scripts\python -m pytest tests\test_packaging.py -q
+conda env update -f environment.yml --prune
+conda run -n coreflow-studio python -m pytest tests\test_packaging.py -q
 powershell -ExecutionPolicy Bypass -File .\packaging\windows\build.ps1
 .\dist\CoreFlowStudio\CoreFlowStudio.exe
 .\dist\CoreFlowStudio\CoreFlowStudioConsole.exe --build-info

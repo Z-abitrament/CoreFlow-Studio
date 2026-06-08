@@ -15,8 +15,8 @@ M10 implements the first flexible experiment extension points and a simulator-ba
 
 ## Commands Run
 ```powershell
-.\.venv\Scripts\python -m pytest tests\test_experiment_workflow.py tests\test_ui_main_window.py -q
-.\.venv\Scripts\python -m pytest -q
+conda run -n coreflow-studio python -m pytest tests\test_experiment_workflow.py tests\test_ui_main_window.py -q
+conda run -n coreflow-studio python -m pytest -q
 ```
 
 ## Results

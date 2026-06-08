@@ -13,7 +13,7 @@ M4 implements the local storage foundation. It does not implement workflow execu
 
 ## Commands Run
 ```powershell
-.\.venv\Scripts\python -m pytest
+conda run -n coreflow-studio python -m pytest
 ```
 
 ## Results

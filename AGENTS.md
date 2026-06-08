@@ -67,6 +67,7 @@ If documents disagree, prefer this order:
 ## Version Control And Overnight Work
 - Initialize a local git repository before implementation work if `.git` is absent.
 - Use checkpoint commits after coherent passing slices.
+- Use Conventional Commits for all non-WIP commit messages, for example `feat(ui): add simulator channel table`, `fix(packaging): hide console for UI executable`, or `docs(workflow): document conda setup`.
 - Never commit failing or half-written work unless the commit message clearly marks it as `WIP:`.
 - Never rewrite history, delete user changes, or run destructive git commands without explicit approval.
 - Do not push to a remote unless the user provides a remote and asks for it.

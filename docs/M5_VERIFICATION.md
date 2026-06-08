@@ -14,7 +14,7 @@ M5 implements calibration preview workflow foundation and application-level writ
 
 ## Commands Run
 ```powershell
-.\.venv\Scripts\python -m pytest
+conda run -n coreflow-studio python -m pytest
 ```
 
 ## Results

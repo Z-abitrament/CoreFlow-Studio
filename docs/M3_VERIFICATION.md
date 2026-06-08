@@ -15,9 +15,9 @@ M3 implements the first Modbus RTU protocol adapter behind the M1 `FlowmeterDevi
 
 ## Commands Run
 ```powershell
-.\.venv\Scripts\python -m pytest
-.\.venv\Scripts\python -m coreflow
-.\.venv\Scripts\python -m coreflow --version
+conda run -n coreflow-studio python -m pytest
+conda run -n coreflow-studio python -m coreflow
+conda run -n coreflow-studio python -m coreflow --version
 ```
 
 ## Results

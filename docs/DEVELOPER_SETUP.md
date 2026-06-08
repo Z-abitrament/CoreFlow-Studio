@@ -1,32 +1,38 @@
 # Developer Setup
 
 ## Summary
-CoreFlow Studio v1 is a Windows-first Python project. M0 uses a standard virtual environment and pip so a clean workstation can run tests and the minimal entry point before application features are added.
+CoreFlow Studio v1 is a Windows-first Python project. Development uses a conda environment so scientific, Qt, serial, test, and packaging dependencies can be reproduced consistently on lab PCs.
 
 ## Prerequisites
 - Windows PowerShell.
-- Python 3.11 or newer available as `python`.
+- Anaconda or Miniconda available as `conda`.
 - Git.
 
 ## Setup
 Run from the repository root:
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\python -m pip install --upgrade pip
-.\.venv\Scripts\python -m pip install -e ".[dev]"
+conda env create -f environment.yml
+conda activate coreflow-studio
+```
+
+If the environment already exists, update it instead:
+
+```powershell
+conda env update -f environment.yml --prune
+conda activate coreflow-studio
 ```
 
 ## Verification
 Run:
 
 ```powershell
-.\.venv\Scripts\python -m pytest
-.\.venv\Scripts\python -m coreflow
-.\.venv\Scripts\python -m coreflow --version
-.\.venv\Scripts\python -m coreflow --write-register-map-template .\config\register_maps\placeholder_modbus.json
-.\.venv\Scripts\python -m coreflow --simulator-smoke --data-root .\CoreFlowStudioData\smoke
-.\.venv\Scripts\python -m coreflow --ui
+python -m pytest
+python -m coreflow
+python -m coreflow --version
+python -m coreflow --write-register-map-template .\config\register_maps\placeholder_modbus.json
+python -m coreflow --simulator-smoke --data-root .\CoreFlowStudioData\smoke
+python -m coreflow --ui
 .\packaging\windows\build.ps1
 ```
 
@@ -47,5 +53,6 @@ Expected behavior:
 ## Notes
 - Source runs can be launched with `--data-root <path>` to choose where SQLite data and artifacts are stored.
 - Packaged runs use `%LOCALAPPDATA%\CoreFlow Studio` by default, or `COREFLOW_DATA_ROOT` when that environment variable is set.
+- The packaging script defaults to the `coreflow-studio` conda environment. Use `.\packaging\windows\build.ps1 -CondaEnv <name>` to build with another conda environment.
 - If PowerShell blocks local scripts, run the packaging script with process-level bypass: `powershell -ExecutionPolicy Bypass -File .\packaging\windows\build.ps1`.
 - See `docs/DEVELOPMENT_WORKFLOW.md` for local git and overnight autonomous-run guidance.

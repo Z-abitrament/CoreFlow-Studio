@@ -4,7 +4,21 @@
 This folder documents the M12 Windows distributable layout for CoreFlow Studio. The first packaged build is intended for simulator workflows and hardware acceptance preparation, not production calibration writes.
 
 ## Build
-Run from the repository root in Windows PowerShell:
+Create or update the conda environment first:
+
+```powershell
+conda env create -f environment.yml
+conda activate coreflow-studio
+```
+
+If the environment already exists:
+
+```powershell
+conda env update -f environment.yml --prune
+conda activate coreflow-studio
+```
+
+Then run from the repository root in Windows PowerShell:
 
 ```powershell
 .\packaging\windows\build.ps1
@@ -14,8 +28,11 @@ Useful options:
 
 ```powershell
 .\packaging\windows\build.ps1 -BuildChannel lab
+.\packaging\windows\build.ps1 -CondaEnv coreflow-studio
 .\packaging\windows\build.ps1 -SkipTests
 ```
+
+The build script defaults to the `coreflow-studio` conda environment. If that environment is already active, the script uses the active `python`; otherwise it resolves the environment path with `conda env list --json` and runs that environment's `python.exe` directly.
 
 The build script creates:
 

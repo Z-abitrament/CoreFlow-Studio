@@ -115,12 +115,17 @@ def test_windows_packaging_files_are_present() -> None:
     spec = repo_root / "packaging" / "windows" / "coreflow_studio.spec"
     build_script = repo_root / "packaging" / "windows" / "build.ps1"
     readme = repo_root / "packaging" / "windows" / "README.md"
+    environment = repo_root / "environment.yml"
+    workflow_doc = repo_root / "docs" / "DEVELOPMENT_WORKFLOW.md"
 
     assert spec.exists()
     assert build_script.exists()
     assert readme.exists()
+    assert environment.exists()
     spec_text = spec.read_text(encoding="utf-8")
     script_text = build_script.read_text(encoding="utf-8")
+    environment_text = environment.read_text(encoding="utf-8")
+    workflow_text = workflow_doc.read_text(encoding="utf-8")
     assert "coreflow\" / \"__main__.py" in spec_text
     assert "generated_build_stamp.py" in spec_text
     assert 'name="CoreFlowStudio"' in spec_text
@@ -129,13 +134,32 @@ def test_windows_packaging_files_are_present() -> None:
     assert "console=True" in spec_text
     assert "collect_dynamic_libs(\"PySide6\")" in spec_text
     assert "collect_dynamic_libs(\"shiboken6\")" in spec_text
+    assert "collect_conda_qt_binaries" in spec_text
+    assert "Library\" / \"bin\"" in spec_text
+    assert "shiboken6*.dll" in spec_text
+    assert "pyside6*.dll" in spec_text
     assert "icudt73.dll" in spec_text
     assert "icuuc.dll" in spec_text
     assert "PyInstaller" in script_text
+    assert '$CondaEnv = "coreflow-studio"' in script_text
+    assert "conda" in script_text
+    assert "Resolve-CondaPython" in script_text
+    assert "conda env list --json" in script_text
+    assert "python.exe" in script_text
+    assert "PYTHONNOUSERSITE" in script_text
+    assert "Assert-DistNotRunning" in script_text
+    assert "Close running packaged CoreFlow Studio processes before building" in script_text
+    assert ".venv" not in script_text
     assert "COREFLOW_BUILD_COMMIT" in script_text
     assert "COREFLOW_PACKAGED" in script_text
     assert "USER_MANUAL.en.md" in script_text
     assert "USER_MANUAL.zh-CN.md" in script_text
+    assert "name: coreflow-studio" in environment_text
+    assert "pyinstaller>=6.6" in environment_text
+    assert "pytest>=8.0" in environment_text
+    assert "pytest-qt>=4.4" in environment_text
+    assert "-e ." in environment_text
+    assert "Conventional Commits" in workflow_text
     readme_text = readme.read_text(encoding="utf-8")
     assert "CoreFlowStudioConsole.exe --simulator-smoke" in readme_text
     assert "CoreFlowStudio.exe` with no command-line arguments" in readme_text

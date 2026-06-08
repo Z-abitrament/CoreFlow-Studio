@@ -1,6 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 import os
+import sys
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_dynamic_libs
@@ -14,6 +15,31 @@ os.environ.setdefault("COREFLOW_BUILD_CHANNEL", "packaged")
 build_stamp_hook = Path(SPECPATH) / "generated_build_stamp.py"
 runtime_hooks = [str(build_stamp_hook)] if build_stamp_hook.exists() else []
 
+
+def collect_conda_qt_binaries():
+    """Collect conda Qt/Shiboken DLLs that wheel-oriented hooks can miss."""
+
+    library_bin = Path(sys.prefix) / "Library" / "bin"
+    if not library_bin.exists():
+        return []
+
+    names = {
+        "Qt6Core.dll",
+        "Qt6Gui.dll",
+        "Qt6Network.dll",
+        "Qt6OpenGL.dll",
+        "Qt6OpenGLWidgets.dll",
+        "Qt6Svg.dll",
+        "Qt6Test.dll",
+        "Qt6Widgets.dll",
+    }
+    patterns = ("pyside6*.dll", "shiboken6*.dll")
+    binaries = [(str(library_bin / name), ".") for name in names if (library_bin / name).exists()]
+    for pattern in patterns:
+        binaries.extend((str(path), ".") for path in library_bin.glob(pattern))
+    return binaries
+
+
 a = Analysis(
     [str(src_root / "coreflow" / "__main__.py")],
     pathex=[str(src_root), str(project_root)],
@@ -22,7 +48,8 @@ a = Analysis(
     ]
     + [
         (src, "PySide6") for src, _dest in collect_dynamic_libs("shiboken6")
-    ],
+    ]
+    + collect_conda_qt_binaries(),
     datas=[],
     hiddenimports=[
         "PySide6.QtCore",

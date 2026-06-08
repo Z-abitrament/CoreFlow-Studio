@@ -25,7 +25,7 @@ For command-line diagnostics, open PowerShell in the distribution folder and run
 From a source checkout, use:
 
 ```powershell
-.\.venv\Scripts\python -m coreflow --ui
+conda run -n coreflow-studio python -m coreflow --ui
 ```
 
 ## Data Storage

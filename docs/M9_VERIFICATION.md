@@ -15,8 +15,8 @@ M9 implements the first report and export artifact generation path for simulator
 
 ## Commands Run
 ```powershell
-.\.venv\Scripts\python -m pytest tests\test_report_export_service.py tests\test_ui_main_window.py -q
-.\.venv\Scripts\python -m pytest -q
+conda run -n coreflow-studio python -m pytest tests\test_report_export_service.py tests\test_ui_main_window.py -q
+conda run -n coreflow-studio python -m pytest -q
 ```
 
 ## Results

@@ -17,7 +17,7 @@ M6 implements the automated factory test workflow foundation. It does not implem
 
 ## Commands Run
 ```powershell
-.\.venv\Scripts\python -m pytest
+conda run -n coreflow-studio python -m pytest
 ```
 
 ## Results

@@ -5,17 +5,17 @@
 - Platform: Windows.
 - Python: 3.13.2.
 - Git: 2.47.0.windows.1.
-- Virtual environment: `.venv`.
+- Conda environment: `coreflow-studio`.
 
 ## Commands Run
 ```powershell
 python --version
-python -m venv .venv
-.\.venv\Scripts\python -m pip install -e ".[dev]"
-.\.venv\Scripts\python -m pytest
-.\.venv\Scripts\python -m coreflow
-.\.venv\Scripts\python -m coreflow --version
-.\.venv\Scripts\coreflow.exe --version
+conda env create -f environment.yml
+conda env update -f environment.yml --prune
+conda run -n coreflow-studio python -m pytest
+conda run -n coreflow-studio python -m coreflow
+conda run -n coreflow-studio python -m coreflow --version
+conda run -n coreflow-studio coreflow --version
 git status --short
 ```
 
@@ -28,4 +28,4 @@ git status --short
 
 ## Notes
 - `py --version` was not available on this machine; `python` was used instead.
-- `.venv`, caches, and editable-install metadata are intentionally ignored by git.
+- Local environment artifacts, caches, and editable-install metadata are intentionally ignored by git.

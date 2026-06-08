@@ -14,7 +14,7 @@ M2 implements the simulator foundation required before real hardware work. It ke
 
 ## Commands Run
 ```powershell
-.\.venv\Scripts\python -m pytest
+conda run -n coreflow-studio python -m pytest
 ```
 
 ## Results

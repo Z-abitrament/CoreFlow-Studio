@@ -19,13 +19,13 @@ M11 prepares for first physical transmitter testing. It does not enable automati
 - CLI command to write the placeholder register-map template:
 
 ```powershell
-.\.venv\Scripts\python -m coreflow --write-register-map-template .\config\register_maps\placeholder_modbus.json
+conda run -n coreflow-studio python -m coreflow --write-register-map-template .\config\register_maps\placeholder_modbus.json
 ```
 
 ## Commands Run
 ```powershell
-.\.venv\Scripts\python -m pytest tests\test_hardware_acceptance.py -q
-.\.venv\Scripts\python -m pytest -q
+conda run -n coreflow-studio python -m pytest tests\test_hardware_acceptance.py -q
+conda run -n coreflow-studio python -m pytest -q
 ```
 
 ## Results

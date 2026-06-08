@@ -26,10 +26,35 @@ git config user.email "codex@local.invalid"
 
 ## Branch And Commit Conventions
 - Use `main` for the local primary branch unless the user asks for another branch.
-- Use short imperative commit messages, such as `Add M0 development workflow docs`.
+- Use Conventional Commits for all non-WIP commits.
 - Commit only coherent changes that can be explained in one sentence.
 - Do not commit failing or half-written work unless the commit message clearly starts with `WIP:`.
 - Before handing back, report commit hashes and test results.
+
+Recommended commit format:
+
+```text
+<type>(optional-scope): <imperative summary>
+```
+
+Allowed common types:
+
+- `feat`: user-facing feature.
+- `fix`: bug fix.
+- `docs`: documentation-only change.
+- `test`: test-only change.
+- `refactor`: behavior-preserving code restructuring.
+- `build`: packaging, dependency, or build-system change.
+- `ci`: CI or automation change.
+- `chore`: repository maintenance.
+
+Examples:
+
+```text
+docs(workflow): document conda setup
+build(windows): use conda environment for packaging
+fix(packaging): hide console for UI executable
+```
 
 ## Overnight Autonomous Run Checklist
 Before an unattended run:
@@ -47,8 +72,7 @@ Expected safe permissions for M0:
 
 - Workspace file writes inside this repository.
 - Local git commands: `git init`, `git add`, `git commit`, `git status`, `git diff`, and `git log`.
-- Python virtual environment creation.
-- Dependency installation into `.venv` when approved.
+- Conda environment creation and updates from `environment.yml`.
 - Test execution with pytest.
 
 Commands that require explicit approval:
@@ -71,9 +95,8 @@ After an overnight run, review:
 Use Windows PowerShell from the repository root:
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\python -m pip install --upgrade pip
-.\.venv\Scripts\python -m pip install -e ".[dev]"
-.\.venv\Scripts\python -m pytest
-.\.venv\Scripts\python -m coreflow
+conda env create -f environment.yml
+conda activate coreflow-studio
+python -m pytest
+python -m coreflow
 ```

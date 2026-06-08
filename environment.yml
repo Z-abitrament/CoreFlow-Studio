@@ -1,0 +1,19 @@
+name: coreflow-studio
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.11,<3.14
+  - pip
+  - numpy>=1.26
+  - pandas>=2.2
+  - pyside6>=6.7
+  - pyqtgraph>=0.13
+  - pyserial>=3.5
+  - pymodbus>=3.6
+  - scipy>=1.13
+  - pyinstaller>=6.6
+  - pytest>=8.0
+  - pytest-qt>=4.4
+  - pygments>=2.7
+  - pip:
+      - -e .

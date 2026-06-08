@@ -22,7 +22,7 @@ Scenarios:
 
 - Confirm git is initialized locally.
 - Confirm `.gitignore` excludes virtual environments, Python caches, build outputs, logs, SQLite runtime files, and generated artifacts.
-- Create a clean virtual environment.
+- Create or update the `coreflow-studio` conda environment from `environment.yml`.
 - Install development dependencies.
 - Run the test suite with pytest.
 - Run the minimal application entry point and confirm it exits cleanly.
@@ -211,6 +211,7 @@ Goal: Verify the Windows distributable can be built and can run simulator workfl
 Scenarios:
 
 - Build the PyInstaller distributable folder from a clean checkout or clean working tree.
+- Confirm the packaging script uses the configured conda environment rather than a hard-coded local `.venv`.
 - Confirm the main packaged executable opens the UI without a console window.
 - Confirm the console diagnostics executable prints version and build metadata.
 - Confirm the console diagnostics executable can write the placeholder Modbus register-map template.

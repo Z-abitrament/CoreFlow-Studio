@@ -17,8 +17,8 @@ M8 implements the first usable Qt desktop UI for simulator-backed operation. It 
 
 ## Commands Run
 ```powershell
-.\.venv\Scripts\python -m pytest tests\test_ui_main_window.py -q
-.\.venv\Scripts\python -m pytest -q
+conda run -n coreflow-studio python -m pytest tests\test_ui_main_window.py -q
+conda run -n coreflow-studio python -m pytest -q
 ```
 
 ## Results
