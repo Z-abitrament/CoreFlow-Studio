@@ -54,6 +54,7 @@ a = Analysis(
     hiddenimports=[
         "PySide6.QtCore",
         "PySide6.QtGui",
+        "PySide6.QtOpenGL",
         "PySide6.QtWidgets",
         "pyqtgraph",
         "serial.tools.list_ports",

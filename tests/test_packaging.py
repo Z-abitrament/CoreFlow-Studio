@@ -134,6 +134,7 @@ def test_windows_packaging_files_are_present() -> None:
     assert "console=True" in spec_text
     assert "collect_dynamic_libs(\"PySide6\")" in spec_text
     assert "collect_dynamic_libs(\"shiboken6\")" in spec_text
+    assert '"PySide6.QtOpenGL"' in spec_text
     assert "collect_conda_qt_binaries" in spec_text
     assert "Library\" / \"bin\"" in spec_text
     assert "shiboken6*.dll" in spec_text
