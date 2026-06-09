@@ -52,6 +52,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Write the M11 placeholder Modbus register-map JSON template and exit.",
     )
+    parser.add_argument(
+        "--write-replay-template",
+        type=Path,
+        default=None,
+        help="Write a deterministic CSV replay template and exit.",
+    )
+    parser.add_argument(
+        "--replay-smoke",
+        type=Path,
+        default=None,
+        help="Run a headless replay-backed simulator workflow smoke check and exit.",
+    )
     return parser
 
 
@@ -82,8 +94,16 @@ def main(argv: list[str] | None = None) -> int:
             encoding="utf-8",
         )
         print(f"Wrote register-map template: {args.write_register_map_template}")
+    elif args.write_replay_template is not None:
+        from coreflow.simulation import replay_template_csv
+
+        args.write_replay_template.parent.mkdir(parents=True, exist_ok=True)
+        args.write_replay_template.write_bytes(replay_template_csv())
+        print(f"Wrote replay template: {args.write_replay_template}")
     elif args.simulator_smoke:
         return run_simulator_smoke(data_root=args.data_root)
+    elif args.replay_smoke is not None:
+        return run_replay_smoke(args.replay_smoke, data_root=args.data_root)
     elif args.ui or should_launch_packaged_ui_by_default(args):
         return launch_ui_with_startup_logging(data_root=args.data_root)
     else:
@@ -103,6 +123,8 @@ def should_launch_packaged_ui_by_default(args: argparse.Namespace) -> bool:
             args.build_info,
             args.simulator_smoke,
             args.write_register_map_template is not None,
+            args.write_replay_template is not None,
+            args.replay_smoke is not None,
         )
     )
 
@@ -206,6 +228,27 @@ def run_simulator_smoke(data_root: Path | None = None) -> int:
         f"factory_run={factory_run_id} "
         f"experiment_run={experiment_run_id} "
         f"manifest={export.manifest_artifact_id}"
+    )
+    return 0
+
+
+def run_replay_smoke(replay_path: Path, data_root: Path | None = None) -> int:
+    """Run a headless replay-backed workflow smoke check."""
+
+    from coreflow.app import CoreFlowRuntime
+
+    runtime = CoreFlowRuntime(data_root=data_root, operator="replay_smoke")
+    channel = runtime.add_replay_device(replay_path)
+    runtime.connect_device(channel.device_id)
+    first = runtime.read_live_measurement(channel.device_id)
+    experiment_run_id = runtime.run_default_experiment(channel.device_id)
+
+    print(
+        "Replay smoke passed: "
+        f"device={channel.device_id} "
+        f"mass_flow={first.mass_flow:.3f} "
+        f"experiment_run={experiment_run_id} "
+        f"source={replay_path}"
     )
     return 0
 

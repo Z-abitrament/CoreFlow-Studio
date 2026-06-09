@@ -1,7 +1,7 @@
 # M2 Verification
 
 ## Scope
-M2 implements the simulator foundation required before real hardware work. It keeps simulator behavior behind the M1 `FlowmeterDevice` interface and does not implement workflow execution, Modbus communication, storage repositories, replay files, or UI.
+M2 implements the simulator foundation required before real hardware work. It keeps simulator behavior behind the M1 `FlowmeterDevice` interface and does not implement Modbus communication, production hardware behavior, or UI replay-file selection.
 
 ## Implemented
 - `SimulatedFlowmeterDevice` implementing `FlowmeterDevice`.
@@ -11,6 +11,8 @@ M2 implements the simulator foundation required before real hardware work. It ke
 - Configurable density, temperature, zero offset, noise, drift, response delay diagnostics, and writable parameters.
 - Fault injection for timeout, disconnection, invalid values, alarm flags, response delay diagnostics, and write failure.
 - `SimulatorManager` for multi-device scenarios and fault isolation.
+- `ReplayFlowmeterDevice` for deterministic CSV replay through the same `FlowmeterDevice` interface.
+- CLI support for `--write-replay-template` and `--replay-smoke`.
 
 ## Commands Run
 ```powershell
@@ -26,4 +28,4 @@ conda run -n coreflow-studio python -m pytest
 ## Notes
 - Timeout faults do not consume a measurement sample in M2. Tests avoid relying on retry policy details, which remain a workflow/protocol concern.
 - Simulated writes validate configured permissions and ranges. Full application-level write guards and audit persistence remain planned for M5.
-- Replay-file support and high-rate signal simulation remain future simulator work.
+- Replay-file UI selection and high-rate signal simulation remain future simulator work.

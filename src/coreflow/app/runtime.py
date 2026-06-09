@@ -21,6 +21,7 @@ from coreflow.reports import ExportPackageResult, ReportExportService
 from coreflow.simulation import (
     FlowProfile,
     FlowProfileKind,
+    ReplayFlowmeterDevice,
     ScenarioParameter,
     SimulatedFlowmeterDevice,
     SimulatorScenario,
@@ -141,6 +142,28 @@ class CoreFlowRuntime:
             device_type="simulated",
         )
         return self.channel_snapshot(resolved_id)
+
+    def add_replay_device(
+        self,
+        replay_path: Path,
+        *,
+        device_id: str | None = None,
+        loop: bool = False,
+    ) -> ChannelSnapshot:
+        """Create a replay-backed virtual channel without connecting it."""
+
+        device = ReplayFlowmeterDevice(
+            replay_path,
+            device_id=device_id,
+            loop=loop,
+        )
+        identity = device.identity
+        self._devices[identity.device_id] = _ManagedDevice(
+            device=device,
+            source="Replay",
+            device_type="simulated",
+        )
+        return self.channel_snapshot(identity.device_id)
 
     def connect_device(self, device_id: str) -> ChannelSnapshot:
         managed = self._managed(device_id)

@@ -93,6 +93,13 @@ if (-not $SkipSimulatorSmoke) {
     Write-Host $Smoke
 }
 
+$ReplayTemplate = Join-Path $ResolvedDistRoot "verify-replay-template.csv"
+$ReplayRoot = Join-Path $ResolvedDistRoot "verify-replay-data"
+$ReplayTemplateOutput = Invoke-ConsoleCheck -Arguments @("--write-replay-template", $ReplayTemplate)
+Write-Host $ReplayTemplateOutput
+$ReplaySmoke = Invoke-ConsoleCheck -Arguments @("--replay-smoke", $ReplayTemplate, "--data-root", $ReplayRoot)
+Write-Host $ReplaySmoke
+
 Test-UiProcess -ExePath $ConsoleExe -Arguments @("--ui") -CaptureOutput
 Write-Host "Console UI startup check passed."
 

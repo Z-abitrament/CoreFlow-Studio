@@ -20,6 +20,8 @@ CoreFlowStudio.exe
 .\CoreFlowStudioConsole.exe --build-info
 .\CoreFlowStudioConsole.exe --simulator-smoke --data-root .\smoke-data
 .\CoreFlowStudioConsole.exe --write-register-map-template .\placeholder_modbus.json
+.\CoreFlowStudioConsole.exe --write-replay-template .\replay_template.csv
+.\CoreFlowStudioConsole.exe --replay-smoke .\replay_template.csv --data-root .\replay-smoke-data
 ```
 
 如果从源码运行：
@@ -183,6 +185,20 @@ Run History 显示已保存运行：
 .\CoreFlowStudioConsole.exe --write-register-map-template .\placeholder_modbus.json
 ```
 
+写出确定性的 replay CSV 模板：
+
+```powershell
+.\CoreFlowStudioConsole.exe --write-replay-template .\replay_template.csv
+```
+
+运行 replay 驱动的模拟器 smoke：
+
+```powershell
+.\CoreFlowStudioConsole.exe --replay-smoke .\replay_template.csv --data-root .\replay-smoke-data
+```
+
+Replay CSV 必须包含 `mass_flow` 列。可选列包括 `captured_at`、`volume_flow`、`density`、`temperature`、`status_flags` 和 `source_channel`。Replay 设备属于只读模拟器设备。
+
 ## 安全说明
 - 模拟器流程不需要硬件，属于安全路径。
 - Calibration Preview 不会写入设备参数。
@@ -227,4 +243,4 @@ $env:COREFLOW_DATA_ROOT = "D:\CoreFlowStudioData"
 - 没有真实校准参数写入流程。
 - 没有客户定制报告模板。
 - 没有真实 ML 模型执行。
-- 没有 replay 文件 UI。
+- 没有 replay 文件 UI 选择；当前 replay 通过控制台诊断和运行时 API 使用。

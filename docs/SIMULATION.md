@@ -89,10 +89,15 @@ Replay mode reads previously captured or generated data.
 
 Requirements:
 
+- Initial replay files use CSV.
+- The required column is `mass_flow`.
+- Optional columns are `captured_at` or `timestamp`, `volume_flow`, `density`, `temperature`, `status_flags`, and `source_channel`.
+- Missing timestamps are filled with deterministic 100 ms intervals from `2026-01-01T00:00:00Z`.
 - Preserve original timestamps where useful.
 - Optionally play at real time or accelerated test time.
 - Attach replay source path to run metadata.
 - Support deterministic re-analysis from stored replay files.
+- Replay devices are read-only simulator devices; they must not enable hardware writes.
 
 ## Write Behavior
 Simulated writes must follow the same application-level safety path as real writes.

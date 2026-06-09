@@ -93,6 +93,18 @@ def test_packaged_no_argument_launches_ui_by_default(monkeypatch, tmp_path) -> N
         should_launch_packaged_ui_by_default(parser.parse_args(["--build-info"]))
         is False
     )
+    assert (
+        should_launch_packaged_ui_by_default(
+            parser.parse_args(["--write-replay-template", str(tmp_path / "replay.csv")])
+        )
+        is False
+    )
+    assert (
+        should_launch_packaged_ui_by_default(
+            parser.parse_args(["--replay-smoke", str(tmp_path / "replay.csv")])
+        )
+        is False
+    )
     assert main(["--data-root", str(tmp_path)]) == 0
     assert calls == [tmp_path]
 
@@ -108,6 +120,23 @@ def test_simulator_smoke_cli_runs_workflows(tmp_path, capsys) -> None:
     assert "experiment_run=" in captured.out
     assert "manifest=" in captured.out
     assert (tmp_path / "coreflow.sqlite").exists()
+
+
+def test_replay_template_and_smoke_cli_run_workflow(tmp_path, capsys) -> None:
+    replay_path = tmp_path / "replay.csv"
+    data_root = tmp_path / "data"
+
+    assert main(["--write-replay-template", str(replay_path)]) == 0
+    assert replay_path.exists()
+    assert "mass_flow" in replay_path.read_text(encoding="utf-8")
+
+    assert main(["--replay-smoke", str(replay_path), "--data-root", str(data_root)]) == 0
+
+    captured = capsys.readouterr()
+    assert "Wrote replay template:" in captured.out
+    assert "Replay smoke passed:" in captured.out
+    assert "experiment_run=" in captured.out
+    assert (data_root / "coreflow.sqlite").exists()
 
 
 def test_windows_packaging_files_are_present() -> None:
@@ -159,6 +188,8 @@ def test_windows_packaging_files_are_present() -> None:
     assert "USER_MANUAL.en.md" in script_text
     assert "USER_MANUAL.zh-CN.md" in script_text
     assert "CoreFlowStudioConsole.exe" in verify_text
+    assert "--write-replay-template" in verify_text
+    assert "--replay-smoke" in verify_text
     assert "--ui" in verify_text
     assert "RedirectStandardError" in verify_text
     assert "pyside6.cp313-win_amd64.dll" in verify_text
@@ -172,6 +203,8 @@ def test_windows_packaging_files_are_present() -> None:
     readme_text = readme.read_text(encoding="utf-8")
     assert "verify_package.ps1" in readme_text
     assert "CoreFlowStudioConsole.exe --simulator-smoke" in readme_text
+    assert "CoreFlowStudioConsole.exe --write-replay-template" in readme_text
+    assert "CoreFlowStudioConsole.exe --replay-smoke" in readme_text
     assert "CoreFlowStudioConsole.exe --ui" in readme_text
     assert "startup.log" in readme_text
     assert "CoreFlowStudio.exe` with no command-line arguments" in readme_text

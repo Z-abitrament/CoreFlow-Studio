@@ -51,6 +51,7 @@ Implement simulated transmitters and simulator scenarios.
 Deliverables:
 
 - Deterministic `SimulatedFlowmeterDevice`.
+- CSV replay-backed simulator device for deterministic re-analysis.
 - Configurable measurement behavior for flow, density, temperature, noise, drift, and zero offset.
 - Fault injection for timeout, disconnection, invalid values, and write failure.
 - Multi-device simulator manager for 4-8 virtual devices.
@@ -59,6 +60,7 @@ Done when:
 
 - A test can run 8 virtual devices concurrently.
 - Simulator readings are deterministic with a fixed seed.
+- Replay CSV files can drive the same device interface used by workflows.
 
 ### M3: Modbus RTU Protocol Adapter
 Implement the first real-device communication path behind the device interface.

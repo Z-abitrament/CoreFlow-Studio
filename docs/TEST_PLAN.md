@@ -51,6 +51,9 @@ Scenarios:
 - Same seed and scenario produce identical readings.
 - Different scenario configuration changes readings as expected.
 - Noise, drift, delay, invalid value, timeout, and disconnection faults can be triggered.
+- CSV replay files can drive deterministic measurements through the same device interface.
+- Replay source path is attached to device/run metadata for traceability.
+- Replay devices reject configuration writes.
 
 ID: TP-SIM-002
 

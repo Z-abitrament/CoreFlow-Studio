@@ -20,6 +20,8 @@ For command-line diagnostics, open PowerShell in the distribution folder and run
 .\CoreFlowStudioConsole.exe --build-info
 .\CoreFlowStudioConsole.exe --simulator-smoke --data-root .\smoke-data
 .\CoreFlowStudioConsole.exe --write-register-map-template .\placeholder_modbus.json
+.\CoreFlowStudioConsole.exe --write-replay-template .\replay_template.csv
+.\CoreFlowStudioConsole.exe --replay-smoke .\replay_template.csv --data-root .\replay-smoke-data
 ```
 
 From a source checkout, use:
@@ -183,6 +185,20 @@ Write the placeholder Modbus register-map template:
 .\CoreFlowStudioConsole.exe --write-register-map-template .\placeholder_modbus.json
 ```
 
+Write a deterministic replay CSV template:
+
+```powershell
+.\CoreFlowStudioConsole.exe --write-replay-template .\replay_template.csv
+```
+
+Run a replay-backed simulator smoke check:
+
+```powershell
+.\CoreFlowStudioConsole.exe --replay-smoke .\replay_template.csv --data-root .\replay-smoke-data
+```
+
+Replay CSV files require a `mass_flow` column. Optional columns are `captured_at`, `volume_flow`, `density`, `temperature`, `status_flags`, and `source_channel`. Replay devices are simulator devices and are read-only.
+
 ## Safety Notes
 - Simulator workflows are safe and require no hardware.
 - Calibration Preview does not write device parameters.
@@ -227,4 +243,4 @@ $env:COREFLOW_DATA_ROOT = "D:\CoreFlowStudioData"
 - No armed calibration-parameter write workflow.
 - No customer-specific report templates.
 - No real ML model execution.
-- No replay-file UI.
+- No replay-file UI selection; replay is currently available through console diagnostics and runtime APIs.
