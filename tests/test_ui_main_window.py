@@ -3,6 +3,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 
 from coreflow.app import CoreFlowRuntime
+from coreflow.simulation import replay_template_csv
 from coreflow.ui import MainWindow
 
 
@@ -84,6 +85,50 @@ def test_serial_modbus_setup_is_visible_but_does_not_touch_hardware(qtbot, tmp_p
 
     assert window.deviceTable.rowCount() == 0
     assert _log_contains(window, "disabled until hardware acceptance")
+
+
+def test_main_window_adds_replay_csv_channel(qtbot, tmp_path) -> None:
+    replay_path = tmp_path / "replay.csv"
+    replay_path.write_bytes(replay_template_csv(sample_count=8))
+    runtime = CoreFlowRuntime(data_root=tmp_path / "data")
+    window = MainWindow(runtime=runtime)
+    qtbot.addWidget(window)
+    window.show()
+
+    window.connectionModeCombo.setCurrentText("Replay CSV")
+    assert window.addSimulatorButton.text() == "Add Replay"
+    assert window.portFieldLabel.text() == "Replay CSV"
+    assert not window.unitIdSpinBox.isEnabled()
+    window.serialPortLineEdit.setText(str(replay_path))
+    _click(qtbot, window.addSimulatorButton)
+
+    assert window.deviceTable.rowCount() == 1
+    assert _table_text(window.deviceTable, 0, 0) == "REPLAY-TEMPLATE"
+    assert _table_text(window.deviceTable, 0, 1) == "Replay"
+    assert _table_text(window.deviceTable, 0, 3) == "disconnected"
+
+    _click(qtbot, window.connectButton)
+    _click(qtbot, window.readLiveButton)
+
+    assert window.massFlowLabel.text() == "10.000"
+    assert window.live_values == (10.0,)
+
+    _click(qtbot, window.runExperimentButton)
+    qtbot.waitUntil(lambda: window.runHistoryTable.rowCount() == 1, timeout=5000)
+    assert _table_text(window.runHistoryTable, 0, 1) == "flexible_experiment"
+    assert _details_contain(window, "experiment_signal_processing")
+
+
+def test_main_window_reports_missing_replay_path(qtbot, tmp_path) -> None:
+    runtime = CoreFlowRuntime(data_root=tmp_path)
+    window = MainWindow(runtime=runtime)
+    qtbot.addWidget(window)
+
+    window.connectionModeCombo.setCurrentText("Replay CSV")
+    _click(qtbot, window.addSimulatorButton)
+
+    assert window.deviceTable.rowCount() == 0
+    assert _log_contains(window, "Enter a replay CSV path first.")
 
 
 def _details_contain(window: MainWindow, text: str) -> bool:

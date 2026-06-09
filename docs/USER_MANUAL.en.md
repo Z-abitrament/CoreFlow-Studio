@@ -73,6 +73,19 @@ The current UI workflow is simulator-first.
 
 The live reading fields and chart update from deterministic simulator data.
 
+## Replay CSV Workflow
+Replay CSV mode loads recorded or generated samples as a read-only simulated device.
+
+1. Generate or prepare a replay CSV file.
+2. Set Mode to `Replay CSV`.
+3. Enter the CSV path in the Replay CSV field.
+4. Click `Add Replay`.
+5. Select the replay channel.
+6. Click `Connect`.
+7. Click `Read Live` or run supported workflows such as `Run Experiment`.
+
+Replay CSV files require `mass_flow`. Optional columns include `captured_at`, `volume_flow`, `density`, `temperature`, `status_flags`, and `source_channel`.
+
 ## Serial Modbus RTU Mode
 `Serial Modbus RTU` is shown as a future hardware path, but real hardware UI enablement is disabled in this build.
 
@@ -243,4 +256,4 @@ $env:COREFLOW_DATA_ROOT = "D:\CoreFlowStudioData"
 - No armed calibration-parameter write workflow.
 - No customer-specific report templates.
 - No real ML model execution.
-- No replay-file UI selection; replay is currently available through console diagnostics and runtime APIs.
+- Replay file UI currently accepts a typed CSV path; it does not yet include a file browser.

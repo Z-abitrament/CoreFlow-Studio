@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime
-from pathlib import PurePath
+from pathlib import Path, PurePath
 
 import pyqtgraph as pg
 from PySide6.QtCore import Qt, QThreadPool
@@ -109,15 +109,17 @@ class MainWindow(QMainWindow):
         form = QFormLayout(setup)
         self.connectionModeCombo = QComboBox()
         self.connectionModeCombo.setObjectName("connectionModeCombo")
-        self.connectionModeCombo.addItems(["Simulator", "Serial Modbus RTU"])
+        self.connectionModeCombo.addItems(["Simulator", "Replay CSV", "Serial Modbus RTU"])
         self.serialPortLineEdit = QLineEdit("COM1")
         self.serialPortLineEdit.setObjectName("serialPortLineEdit")
+        self.portFieldLabel = QLabel("Port")
+        self.portFieldLabel.setObjectName("portFieldLabel")
         self.unitIdSpinBox = QSpinBox()
         self.unitIdSpinBox.setObjectName("unitIdSpinBox")
         self.unitIdSpinBox.setRange(1, 247)
         self.unitIdSpinBox.setValue(1)
         form.addRow("Mode", self.connectionModeCombo)
-        form.addRow("Port", self.serialPortLineEdit)
+        form.addRow(self.portFieldLabel, self.serialPortLineEdit)
         form.addRow("Unit ID", self.unitIdSpinBox)
         layout.addWidget(setup)
 
@@ -264,14 +266,46 @@ class MainWindow(QMainWindow):
         self.generateExportButton.clicked.connect(self._generate_export)
         self.cancelWorkflowButton.clicked.connect(self._request_cancel)
         self.runHistoryTable.itemSelectionChanged.connect(self._inspect_selected_run)
+        self.connectionModeCombo.currentTextChanged.connect(self._sync_connection_mode)
+        self._sync_connection_mode(self.connectionModeCombo.currentText())
 
     def _add_channel(self) -> None:
-        if self.connectionModeCombo.currentText() != "Simulator":
+        mode = self.connectionModeCombo.currentText()
+        if mode == "Replay CSV":
+            replay_text = self.serialPortLineEdit.text().strip()
+            if not replay_text:
+                self._log("Connection", "Enter a replay CSV path first.")
+                return
+            replay_path = Path(replay_text)
+            try:
+                snapshot = self.runtime.add_replay_device(replay_path)
+            except Exception as exc:
+                self._log("Connection", f"Replay CSV failed: {exc}")
+                return
+            self._log("Connection", f"Added replay {snapshot.device_id}")
+            self._refresh_channels(snapshot.device_id)
+            return
+        if mode != "Simulator":
             self._log("Connection", "Serial Modbus setup is configured but disabled until hardware acceptance.")
             return
         snapshot = self.runtime.add_simulated_device()
         self._log("Connection", f"Added {snapshot.device_id}")
         self._refresh_channels(snapshot.device_id)
+
+    def _sync_connection_mode(self, mode: str) -> None:
+        if mode == "Replay CSV":
+            self.addSimulatorButton.setText("Add Replay")
+            self.portFieldLabel.setText("Replay CSV")
+            self.serialPortLineEdit.setPlaceholderText("Path to replay CSV")
+            self.serialPortLineEdit.setText("")
+            self.unitIdSpinBox.setEnabled(False)
+            return
+        self.addSimulatorButton.setText("Add Simulator")
+        self.portFieldLabel.setText("Port")
+        self.serialPortLineEdit.setPlaceholderText("COM port")
+        self.unitIdSpinBox.setEnabled(True)
+        if mode == "Serial Modbus RTU" and not self.serialPortLineEdit.text().strip():
+            self.serialPortLineEdit.setText("COM1")
 
     def _connect_selected(self) -> None:
         device_id = self._selected_device_id()

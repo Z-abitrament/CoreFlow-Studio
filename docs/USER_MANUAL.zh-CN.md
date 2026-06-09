@@ -73,6 +73,19 @@ UI 当前分为三个主要工作区。
 
 实时读数区域和曲线会显示确定性的模拟器数据。
 
+## Replay CSV 流程
+Replay CSV 模式会把记录或生成的样本作为只读模拟器设备加载。
+
+1. 准备或生成 replay CSV 文件。
+2. 将 Mode 设置为 `Replay CSV`。
+3. 在 Replay CSV 输入框中填写 CSV 路径。
+4. 点击 `Add Replay`。
+5. 选择 replay 通道。
+6. 点击 `Connect`。
+7. 点击 `Read Live`，或运行 `Run Experiment` 等已支持流程。
+
+Replay CSV 必须包含 `mass_flow`。可选列包括 `captured_at`、`volume_flow`、`density`、`temperature`、`status_flags` 和 `source_channel`。
+
 ## Serial Modbus RTU 模式
 `Serial Modbus RTU` 目前作为未来真实硬件路径展示，但当前版本没有在 UI 中启用真实硬件操作。
 
@@ -243,4 +256,4 @@ $env:COREFLOW_DATA_ROOT = "D:\CoreFlowStudioData"
 - 没有真实校准参数写入流程。
 - 没有客户定制报告模板。
 - 没有真实 ML 模型执行。
-- 没有 replay 文件 UI 选择；当前 replay 通过控制台诊断和运行时 API 使用。
+- Replay 文件 UI 当前支持手动输入 CSV 路径，尚未提供文件浏览器。
