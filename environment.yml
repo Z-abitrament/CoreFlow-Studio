@@ -16,4 +16,4 @@ dependencies:
   - pytest-qt>=4.4
   - pygments>=2.7
   - pip:
-      - -e .
+      - -e .[asio]

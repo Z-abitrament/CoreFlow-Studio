@@ -64,6 +64,103 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Run a headless replay-backed simulator workflow smoke check and exit.",
     )
+    parser.add_argument(
+        "--asio-list-devices",
+        action="store_true",
+        help="List ASIO driver registrations and audio devices for IIS diagnostics.",
+    )
+    parser.add_argument(
+        "--asio-loopback-smoke",
+        action="store_true",
+        help="Run a headless ASIO/IIS full-duplex loopback smoke check.",
+    )
+    parser.add_argument(
+        "--asio-probe-native",
+        action="store_true",
+        help="Query a registered native Windows ASIO driver without streaming.",
+    )
+    parser.add_argument(
+        "--asio-backend",
+        choices=("auto", "sounddevice", "native", "fake"),
+        default="auto",
+        help="ASIO backend for device listing or loopback diagnostics.",
+    )
+    parser.add_argument(
+        "--asio-device",
+        default="BRAVO-HD Device Control",
+        help="Audio device name or substring for ASIO/IIS diagnostics.",
+    )
+    parser.add_argument(
+        "--asio-host-api",
+        default="ASIO",
+        help="Required audio host API for ASIO/IIS diagnostics.",
+    )
+    parser.add_argument(
+        "--asio-sample-rate",
+        type=int,
+        default=48000,
+        help="ASIO/IIS sample rate in Hz.",
+    )
+    parser.add_argument(
+        "--asio-bit-depth",
+        type=int,
+        default=32,
+        help="ASIO/IIS bit depth: 16, 24, or 32.",
+    )
+    parser.add_argument(
+        "--asio-sample-format",
+        choices=("float32", "int16", "int24", "int32"),
+        default="float32",
+        help="Python backend sample format for ASIO/IIS diagnostics.",
+    )
+    parser.add_argument(
+        "--asio-input-channels",
+        type=int,
+        default=2,
+        help="Input channel count for ASIO/IIS loopback diagnostics.",
+    )
+    parser.add_argument(
+        "--asio-output-channels",
+        type=int,
+        default=2,
+        help="Output channel count for ASIO/IIS loopback diagnostics.",
+    )
+    parser.add_argument(
+        "--asio-frame-samples",
+        type=int,
+        default=256,
+        help="Samples per IIS frame for ASIO/IIS loopback diagnostics.",
+    )
+    parser.add_argument(
+        "--asio-frame-count",
+        type=int,
+        default=64,
+        help="Number of IIS frames for ASIO/IIS loopback diagnostics.",
+    )
+    parser.add_argument(
+        "--asio-amplitude",
+        type=float,
+        default=0.25,
+        help="Normalized ASIO/IIS loopback output amplitude.",
+    )
+    parser.add_argument(
+        "--asio-min-correlation",
+        type=float,
+        default=0.95,
+        help="Minimum correlation for ASIO/IIS loopback pass/fail.",
+    )
+    parser.add_argument(
+        "--asio-max-normalized-error",
+        type=float,
+        default=0.15,
+        help="Maximum normalized error for ASIO/IIS loopback pass/fail.",
+    )
+    parser.add_argument(
+        "--asio-max-latency-samples",
+        type=int,
+        default=12000,
+        help="Maximum latency search window for ASIO/IIS loopback comparison.",
+    )
     return parser
 
 
@@ -104,6 +201,12 @@ def main(argv: list[str] | None = None) -> int:
         return run_simulator_smoke(data_root=args.data_root)
     elif args.replay_smoke is not None:
         return run_replay_smoke(args.replay_smoke, data_root=args.data_root)
+    elif args.asio_list_devices:
+        return list_asio_devices(backend_name=args.asio_backend)
+    elif args.asio_probe_native:
+        return probe_native_asio_driver(driver_name=args.asio_device)
+    elif args.asio_loopback_smoke:
+        return run_asio_loopback_cli(args)
     elif args.ui or should_launch_packaged_ui_by_default(args):
         return launch_ui_with_startup_logging(data_root=args.data_root)
     else:
@@ -125,6 +228,9 @@ def should_launch_packaged_ui_by_default(args: argparse.Namespace) -> bool:
             args.write_register_map_template is not None,
             args.write_replay_template is not None,
             args.replay_smoke is not None,
+            args.asio_list_devices,
+            args.asio_probe_native,
+            args.asio_loopback_smoke,
         )
     )
 
@@ -250,6 +356,91 @@ def run_replay_smoke(replay_path: Path, data_root: Path | None = None) -> int:
         f"experiment_run={experiment_run_id} "
         f"source={replay_path}"
     )
+    return 0
+
+
+def list_asio_devices(*, backend_name: str = "auto") -> int:
+    """List host audio devices for ASIO/IIS hardware diagnostics."""
+
+    from coreflow.protocols.asio import (
+        AsioError,
+        AsioRegistryScanner,
+        build_asio_backend,
+        format_device_listing,
+        format_registered_asio_drivers,
+    )
+
+    print("Registered Windows ASIO drivers:")
+    print(format_registered_asio_drivers(AsioRegistryScanner().list_drivers()))
+    print("")
+    print("PortAudio/sounddevice devices:")
+    try:
+        backend = build_asio_backend(backend_name)
+        devices = backend.list_devices()
+    except AsioError as exc:
+        print(f"ASIO device listing unavailable: {exc}", file=sys.stderr)
+        return 2
+    print(format_device_listing(devices))
+    return 0
+
+
+def run_asio_loopback_cli(args: argparse.Namespace) -> int:
+    """Run one headless ASIO/IIS loopback diagnostic from CLI arguments."""
+
+    from coreflow.protocols.asio import (
+        AsioError,
+        AsioIisFrameConfig,
+        AsioLoopbackThresholds,
+        build_asio_backend,
+        run_asio_loopback_smoke,
+    )
+    from coreflow.protocols.asio.loopback import loopback_result_to_json
+
+    try:
+        config = AsioIisFrameConfig(
+            device_name=args.asio_device,
+            host_api=args.asio_host_api,
+            sample_rate=args.asio_sample_rate,
+            bit_depth=args.asio_bit_depth,
+            sample_format=args.asio_sample_format,
+            input_channels=args.asio_input_channels,
+            output_channels=args.asio_output_channels,
+            samples_per_frame=args.asio_frame_samples,
+            frame_count=args.asio_frame_count,
+            amplitude=args.asio_amplitude,
+        )
+        result = run_asio_loopback_smoke(
+            config,
+            backend=build_asio_backend(args.asio_backend),
+            thresholds=AsioLoopbackThresholds(
+                min_correlation=args.asio_min_correlation,
+                max_normalized_error=args.asio_max_normalized_error,
+                max_latency_samples=args.asio_max_latency_samples,
+            ),
+        )
+    except (AsioError, ValueError) as exc:
+        print(f"ASIO/IIS loopback failed before comparison: {exc}", file=sys.stderr)
+        return 2
+
+    print(loopback_result_to_json(result))
+    return 0 if result.passed else 1
+
+
+def probe_native_asio_driver(*, driver_name: str) -> int:
+    """Query a native Windows ASIO driver registration without streaming."""
+
+    from coreflow.protocols.asio import (
+        NativeAsioDriverProbe,
+        NativeAsioError,
+        format_native_asio_capabilities,
+    )
+
+    try:
+        capabilities = NativeAsioDriverProbe(driver_name=driver_name).query_capabilities()
+    except NativeAsioError as exc:
+        print(f"Native ASIO probe failed: {exc}", file=sys.stderr)
+        return 2
+    print(format_native_asio_capabilities(capabilities))
     return 0
 
 

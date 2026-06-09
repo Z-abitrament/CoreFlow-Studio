@@ -73,7 +73,8 @@ Implementations:
 
 - `SimulatedFlowmeterDevice` for deterministic virtual transmitters.
 - `ModbusRtuFlowmeterDevice` for real USB-serial Modbus RTU transmitters.
-- Future adapters for custom UART, IIS-like data paths, Ethernet, or vendor libraries.
+- `AsioIisFrameTransport` for headless USB sound-card ASIO/IIS frame input and output tests.
+- Future adapters for custom UART, Ethernet, or vendor libraries.
 
 Device implementations must not decide whether a calibration workflow is allowed to write. They enforce device-level capabilities and parameter constraints, while workflow state, actor/source, dry-run mode, and audit requirements are coordinated by application services.
 
@@ -92,6 +93,30 @@ Responsibilities:
 Protocol code must not know about calibration workflows or UI widgets.
 
 Register maps, scaling, writable permissions, and acceptance limits must be loaded from configuration or workflow inputs. Production register addresses and calibration thresholds must not be embedded in protocol, workflow, or UI code.
+
+### ASIO/IIS Frame Stream Layer
+The ASIO/IIS module is a headless hardware I/O boundary for a USB sound-card module that appears in Windows Device Manager as `BRAVO-HD Device Control`.
+
+Responsibilities:
+
+- Discover audio devices and host APIs, and explicitly report whether an ASIO backend is available.
+- Open the selected device in full-duplex mode when supported.
+- Output deterministic frame payloads over the IIS output path.
+- Capture frame payloads from the IIS input path.
+- Keep configurable frame parameters outside UI code: sample rate, bit depth or sample format, channel counts, samples per frame, frame count, and test amplitude.
+- Run loopback verification when the board's IIS master output is wired to the IIS slave input.
+- Report diagnostics such as selected device, host API, detected latency, correlation score, normalized error, dropped or short frames, and backend errors.
+
+The ASIO/IIS module is not a calibration workflow, does not write transmitter parameters, and must not be treated as a Modbus register-map source. It can later feed flexible experiments or device adapters after the frame payload semantics are defined.
+
+The ASIO/IIS UI is a separate window with independent connection state. Connecting or disconnecting this module must not connect, disconnect, block, or reconfigure simulator, replay, serial Modbus, or future transmitter communication channels. The main ASIO/IIS window should show normal-use settings only: detected device, sample rate, bit depth/sample format, input channel count, output channel count, frame size, and drive/test amplitude. The main window should also keep a quick `Probe` action for checking device capabilities. Loopback-specific values such as frame count and latency search window belong in the test workflow or test dialog defaults, not the normal-use parameter panel.
+
+Current signal semantics:
+
+- Input frames are the flowmeter left and right signal channels after ADC conversion. LRCK distinguishes the left and right IIS channels.
+- Output frames contain one effective drive-signal channel. The hardware DAC converts that digital stream to the electrical drive signal used by the flowmeter.
+- Continuous frame streaming runs in the background. Downstream processing, storage, and live visualization of these streams are deferred until the analysis/display requirements are defined.
+- Hardware tests are launched from a separate ASIO/IIS test dialog. The dialog supports loopback and non-loopback checks, lets the user choose a test signal such as sine, square, or white noise with waveform parameters, and displays input and output on the same plot with input-only, output-only, or combined display modes.
 
 ### Safety And Write Guard Layer
 Write-capable operations pass through a dedicated guard before reaching a simulated or real device.
@@ -152,6 +177,7 @@ Files store:
 
 - Raw time-series captures.
 - High-rate signal data.
+- ASIO/IIS frame captures and loopback diagnostic artifacts.
 - Exported CSV files.
 - Generated reports.
 - Replay and simulator scenario files.

@@ -30,6 +30,7 @@ v1 must deliver the software foundation for:
 - Data capture, storage, and export using SQLite plus linked files.
 - Protocol abstraction that allows real Modbus RTU transmitters to replace simulated devices later.
 - Extension points for signal processing, fixture control, and machine learning experiments.
+- An ASIO-backed IIS frame I/O module for lab hardware tests, exposed through an independent UI window after the headless module is verified.
 
 ## Out Of Scope For v1
 - Cloud services, central servers, or multi-user network databases.
@@ -126,6 +127,7 @@ Acceptance criteria:
 | PRD-FR-009 | Export reports and data files. | M9 | TP-RPT-001 |
 | PRD-FR-010 | Provide extension points for experiments, signal processing, fixture control, and ML. | M10 | TP-EXT-001 |
 | PRD-FR-011 | Guard safety-sensitive device writes with preview, validation, dry-run support, and audit logging. | M5, M11 | TP-SAFE-001 |
+| PRD-FR-012 | Support an ASIO/IIS frame-stream module for USB sound-card hardware, including independent connection state, configurable frame format, output, input capture, status/log diagnostics, and loopback verification. | M13 | TP-ASIO-001, TP-ASIO-002, TP-UI-003 |
 
 ## Non-Functional Requirements
 - The UI must remain responsive during communication, capture, analysis, and report generation.
@@ -164,3 +166,5 @@ This repository is considered ready for first implementation when:
 - Acceptance thresholds for calibration, error, repeatability, drift, stability, and communication quality.
 - Required report format for customers, quality systems, or regulatory records.
 - Required cybersecurity or access-control policy for parameter writes.
+- Exact ASIO driver capabilities for the BRAVO-HD USB sound-card module, including supported sample rates, channel layout, sample formats, and whether the Python audio backend exposes the vendor ASIO driver directly.
+- Final production meaning of IIS frame payloads beyond loopback transport validation.

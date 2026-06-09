@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 
 from coreflow.app import ChannelSnapshot, CoreFlowRuntime, RunInspection
 from coreflow.devices import Measurement
+from coreflow.ui.asio_window import AsioIisWindow
 from coreflow.ui.workers import WorkflowTask
 
 
@@ -45,6 +46,7 @@ class MainWindow(QMainWindow):
         self._workflow_running = False
         self._cancel_requested = False
         self._active_tasks: list[WorkflowTask] = []
+        self.asioWindow: AsioIisWindow | None = None
 
         self.setWindowTitle("CoreFlow Studio")
         self.resize(1180, 760)
@@ -73,6 +75,8 @@ class MainWindow(QMainWindow):
         self.disconnectButton.setObjectName("disconnectButton")
         self.readLiveButton = QPushButton("Read Live")
         self.readLiveButton.setObjectName("readLiveButton")
+        self.asioModuleButton = QPushButton("ASIO/IIS Module")
+        self.asioModuleButton.setObjectName("asioModuleButton")
         self.cancelWorkflowButton = QPushButton("Cancel")
         self.cancelWorkflowButton.setObjectName("cancelWorkflowButton")
         self.cancelWorkflowButton.setEnabled(False)
@@ -81,6 +85,7 @@ class MainWindow(QMainWindow):
             self.connectButton,
             self.disconnectButton,
             self.readLiveButton,
+            self.asioModuleButton,
             self.cancelWorkflowButton,
         ):
             button.setMinimumHeight(30)
@@ -98,6 +103,12 @@ class MainWindow(QMainWindow):
         root.addWidget(splitter, 1)
 
         self.setCentralWidget(central)
+        self._build_menu()
+
+    def _build_menu(self) -> None:
+        modules_menu = self.menuBar().addMenu("Modules")
+        self.asioModuleAction = modules_menu.addAction("ASIO/IIS Module")
+        self.asioModuleAction.setObjectName("asioModuleAction")
 
     def _connection_panel(self) -> QWidget:
         panel = QWidget()
@@ -260,6 +271,8 @@ class MainWindow(QMainWindow):
         self.connectButton.clicked.connect(self._connect_selected)
         self.disconnectButton.clicked.connect(self._disconnect_selected)
         self.readLiveButton.clicked.connect(self._read_live)
+        self.asioModuleButton.clicked.connect(self._open_asio_window)
+        self.asioModuleAction.triggered.connect(self._open_asio_window)
         self.runCalibrationButton.clicked.connect(self._run_calibration)
         self.runFactoryTestButton.clicked.connect(self._run_factory_test)
         self.runExperimentButton.clicked.connect(self._run_experiment)
@@ -268,6 +281,16 @@ class MainWindow(QMainWindow):
         self.runHistoryTable.itemSelectionChanged.connect(self._inspect_selected_run)
         self.connectionModeCombo.currentTextChanged.connect(self._sync_connection_mode)
         self._sync_connection_mode(self.connectionModeCombo.currentText())
+
+    def _open_asio_window(self) -> None:
+        if self.asioWindow is None:
+            self.asioWindow = AsioIisWindow(
+                thread_pool=self._thread_pool,
+                parent=self,
+            )
+        self.asioWindow.show()
+        self.asioWindow.raise_()
+        self.asioWindow.activateWindow()
 
     def _add_channel(self) -> None:
         mode = self.connectionModeCombo.currentText()

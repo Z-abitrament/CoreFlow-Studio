@@ -182,6 +182,23 @@ Scenarios:
 - Open a completed run from history.
 - Display stored result tables and artifact links.
 
+ID: TP-UI-003
+
+Goal: Verify the ASIO/IIS module UI remains independent from other communication paths.
+
+Scenarios:
+
+- Open the ASIO/IIS module window from the main window.
+- Display editable ASIO/IIS normal-use parameters for detected device, sample rate, bit depth or sample format, input/output channel count up to 2, frame size, and drive/test amplitude.
+- Connect and disconnect the module through its own controls.
+- Probe the selected module from the main ASIO/IIS window and show driver capability messages.
+- Show module status and log messages for connection, diagnostics, and loopback runs.
+- Confirm ASIO/IIS connect/disconnect does not change simulator, replay, serial Modbus, or other device-channel connection state.
+- Confirm test-only settings such as frame count and latency search are not exposed in the normal-use parameter panel.
+- Open the ASIO/IIS test dialog and run loopback and non-loopback checks with plotted or tabulated data for user confirmation.
+- Choose sine, square, or white-noise test signals and edit signal parameters such as amplitude and frequency where applicable.
+- Display input, output, or input and output together on one plot.
+
 ### Report Tests
 ID: TP-RPT-001
 
@@ -206,6 +223,32 @@ Scenarios:
 - Store processing configuration and outputs.
 - Keep ML and fixture-control placeholders isolated from core workflows.
 
+### ASIO/IIS Frame Stream Tests
+ID: TP-ASIO-001
+
+Goal: Verify the headless ASIO/IIS module without physical hardware.
+
+Scenarios:
+
+- Validate frame format configuration for sample rate, bit depth or sample format, channel count, and samples per frame.
+- Reject unsupported or unsafe frame settings before opening hardware.
+- Use a fake loopback backend to transmit deterministic frame payloads and capture them through the same API.
+- Detect frame delay, correlation score, normalized error, and pass/fail status from captured loopback data.
+- Report backend-unavailable diagnostics without importing optional ASIO dependencies at application startup.
+
+ID: TP-ASIO-002
+
+Goal: Verify the BRAVO-HD ASIO/IIS hardware loopback path on the lab PC.
+
+Scenarios:
+
+- Enumerate Windows audio devices and host APIs and confirm the selected device name includes `BRAVO-HD Device Control` or the configured alias.
+- Confirm an ASIO host API is available before running the loopback test.
+- Open the selected device in full-duplex mode with configured sample rate, bit depth or sample format, channel counts, and frame size.
+- Output deterministic IIS frames through the master IIS path while capturing the connected slave IIS input path.
+- Pass when captured data matches the generated payload within configured correlation and error thresholds after latency compensation.
+- Fail with a clear diagnostic when the device, ASIO backend, channel configuration, or loopback signal is missing.
+
 ### Packaging Tests
 ID: TP-PKG-001
 
@@ -228,7 +271,7 @@ Scenarios:
 - Confirm English and Chinese user manuals are included in the distribution folder.
 
 ## Hardware Acceptance Tests
-Hardware tests are not required for the documentation harness or early simulator implementation. They become active when real transmitters, register maps, serial settings, and safety rules are available.
+Hardware tests are not required for the documentation harness or early simulator implementation. Modbus transmitter tests become active when real transmitters, register maps, serial settings, and safety rules are available. ASIO/IIS loopback tests become active when the BRAVO-HD USB sound-card driver and Python ASIO backend are available on the lab PC.
 
 Planned scenarios:
 
@@ -239,6 +282,8 @@ Planned scenarios:
 - Run read-only factory test steps.
 - Validate write guards before calibration parameter writes.
 - Perform a controlled parameter write only after approval and audit logging are implemented.
+- Enumerate the BRAVO-HD ASIO device.
+- Run the ASIO/IIS headless loopback smoke test with the paired IIS master output and slave input wiring.
 
 ## Documentation Harness Verification
 Before implementation begins, verify:

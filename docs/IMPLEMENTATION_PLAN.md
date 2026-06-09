@@ -223,6 +223,28 @@ Done when:
 - A clean Windows machine can run the packaged app with simulator workflows.
 - Verification notes are recorded in `docs/M12_VERIFICATION.md`.
 
+### M13: ASIO/IIS Frame Stream Module
+Implement the first USB sound-card ASIO/IIS hardware module with a dedicated UI window that remains independent from transmitter communication channels.
+
+Deliverables:
+
+- ASIO/IIS frame-format and stream-configuration models.
+- Optional ASIO backend that can discover Windows audio devices and clearly report when the ASIO host API or selected BRAVO-HD device is unavailable.
+- Fake loopback backend for deterministic automated tests without physical hardware.
+- Headless frame output and input capture APIs with configurable sample rate, bit depth or sample format, channel counts, samples per frame, frame count, and amplitude.
+- Headless loopback acceptance runner for the BRAVO-HD device when IIS master output is wired to IIS slave input.
+- CLI diagnostics for ASIO device listing and loopback smoke testing.
+- Dedicated ASIO/IIS window with connect/disconnect control, parameter editing, module status, and log messages.
+- Documentation updates for optional dependencies, hardware permissions, and hardware test commands.
+
+Done when:
+
+- Unit tests pass without ASIO hardware.
+- The fake backend proves frame ordering, validation, and loopback metrics deterministically.
+- On the lab PC, the CLI can detect the configured ASIO device or report the exact missing backend/driver condition.
+- With the two IIS groups physically connected, the loopback smoke test passes against the BRAVO-HD hardware. The current verified hardware command uses native ASIO at 44100 Hz, ASIOSTInt24LSB, 2 input channels, 2 output channels, and 4410 samples per frame.
+- The UI can open the ASIO/IIS window, edit parameters, connect and disconnect the module, and report status/log messages without changing other device-channel connection state.
+
 ## Implementation Defaults
 - Use PySide6 for Qt unless a documented blocker appears.
 - Use pytest for tests.

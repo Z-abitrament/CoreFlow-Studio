@@ -131,6 +131,95 @@ def test_main_window_reports_missing_replay_path(qtbot, tmp_path) -> None:
     assert _log_contains(window, "Enter a replay CSV path first.")
 
 
+def test_main_window_opens_independent_asio_iis_window(qtbot, tmp_path) -> None:
+    runtime = CoreFlowRuntime(data_root=tmp_path)
+    window = MainWindow(runtime=runtime)
+    qtbot.addWidget(window)
+    window.show()
+
+    _click(qtbot, window.asioModuleButton)
+
+    assert window.asioWindow is not None
+    asio_window = window.asioWindow
+    assert asio_window.isVisible()
+    assert asio_window.statusValueLabel.text() == "Disconnected"
+    assert asio_window.deviceCombo.count() >= 1
+    assert asio_window.device_name()
+    assert asio_window.sampleRateSpinBox.value() == 44100
+    assert asio_window.sampleFormatCombo.currentText() == "int24"
+    assert asio_window.inputChannelsCombo.currentText() == "2"
+    assert asio_window.outputChannelsCombo.currentText() == "2"
+    assert asio_window.probeButton.text() == "Probe"
+    assert not hasattr(asio_window, "frameCountSpinBox")
+    assert not hasattr(asio_window, "maxLatencySpinBox")
+    assert window.deviceTable.rowCount() == 0
+
+    window.asioWindow.close()
+    window.asioWindow = None
+    window.asioModuleAction.trigger()
+    assert window.asioWindow is not None
+    assert window.asioWindow.isVisible()
+
+
+def test_asio_iis_window_fake_connection_does_not_change_device_channels(qtbot, tmp_path) -> None:
+    runtime = CoreFlowRuntime(data_root=tmp_path)
+    window = MainWindow(runtime=runtime)
+    qtbot.addWidget(window)
+    window.show()
+
+    _click(qtbot, window.addSimulatorButton)
+    _click(qtbot, window.connectButton)
+    assert _table_text(window.deviceTable, 0, 3) == "connected"
+
+    _click(qtbot, window.asioModuleButton)
+    assert window.asioWindow is not None
+    asio_window = window.asioWindow
+    asio_window.backendCombo.setCurrentText("fake")
+    asio_window.deviceCombo.setCurrentText("BRAVO-HD Device Control")
+    asio_window.sampleRateSpinBox.setValue(48000)
+    asio_window.bitDepthCombo.setCurrentText("32")
+    asio_window.sampleFormatCombo.setCurrentText("float32")
+    asio_window.frameSamplesSpinBox.setValue(64)
+
+    _click(qtbot, asio_window.connectButton)
+    qtbot.waitUntil(lambda: asio_window.statusValueLabel.text() == "Connected", timeout=5000)
+    assert _plain_log_contains(asio_window, "Backend ready")
+    assert _table_text(window.deviceTable, 0, 3) == "connected"
+
+    _click(qtbot, asio_window.openTestButton)
+    assert asio_window.testWindow is not None
+    test_window = asio_window.testWindow
+    assert test_window.signalTypeCombo.currentText() == "Sine"
+    test_window.signalTypeCombo.setCurrentText("Square")
+    test_window.signalFrequencySpinBox.setValue(250.0)
+    test_window.displayModeCombo.setCurrentText("Input + Output")
+
+    _click(qtbot, test_window.loopbackTestButton)
+    qtbot.waitUntil(
+        lambda: "Loopback passed" in test_window.summaryTextEdit.toPlainText(),
+        timeout=5000,
+    )
+    assert len(test_window.signalPlot.listDataItems()) >= 2
+    curve_names = {item.name() for item in test_window.signalPlot.listDataItems()}
+    assert any(name.startswith("output:") for name in curve_names)
+    assert any(name.startswith("input:") for name in curve_names)
+    assert test_window.signalPlot.plotItem.legend is not None
+
+    test_window.signalTypeCombo.setCurrentText("White Noise")
+    test_window.displayModeCombo.setCurrentText("Input Only")
+    _click(qtbot, test_window.liveTestButton)
+    qtbot.waitUntil(
+        lambda: "Non-loopback check completed" in test_window.summaryTextEdit.toPlainText(),
+        timeout=5000,
+    )
+    assert test_window.signalPlot.listDataItems()
+    assert _table_text(window.deviceTable, 0, 3) == "connected"
+
+    _click(qtbot, asio_window.disconnectButton)
+    assert asio_window.statusValueLabel.text() == "Disconnected"
+    assert _table_text(window.deviceTable, 0, 3) == "connected"
+
+
 def _details_contain(window: MainWindow, text: str) -> bool:
     for row in range(window.resultDetails.rowCount()):
         for column in range(window.resultDetails.columnCount()):
@@ -145,3 +234,7 @@ def _log_contains(window: MainWindow, text: str) -> bool:
             if text in _table_text(window.statusLog, row, column):
                 return True
     return False
+
+
+def _plain_log_contains(window, text: str) -> bool:
+    return text in window.logTextEdit.toPlainText()

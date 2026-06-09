@@ -80,6 +80,7 @@ Commands that require explicit approval:
 - Network dependency installation if sandboxed network access fails.
 - Destructive commands such as `git reset --hard`, `git clean`, or file deletion outside generated caches.
 - Any command that accesses physical hardware or writes device parameters.
+- ASIO/IIS hardware diagnostics that enumerate or open Windows audio devices, including the BRAVO-HD USB sound-card module.
 
 ## Next-Morning Review Checklist
 After an overnight run, review:

@@ -12,13 +12,22 @@ The first concrete hardware communication path is Modbus RTU over USB-to-serial.
 - Configurable Modbus unit IDs.
 - Configurable register maps.
 
+### Post-M12 Hardware Frame Stream
+- ASIO-backed USB sound-card frame I/O for IIS lab testing.
+- Windows Device Manager name: `BRAVO-HD Device Control`.
+- Full-duplex output and input when the driver exposes compatible channels.
+- Configurable sample rate, bit depth or sample format, input/output channel counts, samples per frame, frame count, and signal amplitude.
+- Headless diagnostics first; UI controls are deferred until the hardware module passes acceptance tests.
+- On the current lab PC, the registered native BRAVO-HD ASIO driver reports 44100 Hz, 2 input channels, 2 output channels, ASIOSTInt24LSB sample data, and a preferred 4410-sample buffer.
+
 ### Future Protocol Adapters
 - Custom UART frame protocol.
-- IIS-like or streaming signal path if required by hardware.
 - Ethernet or TCP-based protocol.
 - Vendor DLL or SDK adapter.
 
 Future adapters must implement the same application-level device interface.
+
+The ASIO/IIS frame stream is lower-level than the `FlowmeterDevice` interface until payload semantics are defined. It should expose a transport-style frame API and may later be wrapped by an experiment module or device adapter.
 
 ## Device Interface Expectations
 Protocol adapters must support these device-level operations where the transmitter and register map allow them:
@@ -153,9 +162,43 @@ Future protocol adapters must:
 - Avoid direct UI dependencies.
 - Include fake or simulator-backed tests before hardware tests.
 
+## ASIO/IIS Frame Stream Contract
+The ASIO/IIS module must keep hardware settings explicit and traceable.
+
+Configuration fields:
+
+- Device name or alias.
+- Required host API, normally `ASIO`.
+- Sample rate in Hz.
+- Sample format or bit depth.
+- Input and output channel counts.
+- Input and output channel offsets when needed.
+- Samples per frame.
+- Number of frames for a test run.
+- Test amplitude and acceptance thresholds.
+
+Runtime behavior:
+
+- Optional ASIO dependencies are imported lazily.
+- Missing dependencies, missing ASIO host API, missing device, and incompatible channel counts are distinct errors.
+- Hardware access is headless and must not block the Qt UI thread when integrated later.
+- Loopback tests use deterministic payloads and compensate for hardware latency before comparing captured input with generated output.
+- Captured raw data and diagnostics should be stored as artifacts when run from an acceptance workflow.
+- The UI-facing connection state belongs to the ASIO/IIS module only and is independent from transmitter communication adapters.
+- Device selection in the UI should be populated from discovered ASIO drivers or audio backend devices rather than typed manually.
+- Normal-use UI channel selection should be presented as choices up to 2 channels. Test-only values, including frame count and latency search window, should be owned by test dialogs or defaults.
+- The ASIO/IIS test dialog should generate explicit test signals, initially sine, square, and white noise, and show input/output traces on the same plot so users can visually confirm signal path behavior.
+
+Signal semantics:
+
+- IIS input carries two ADC-derived flowmeter signal channels, left and right, separated by LRCK.
+- IIS output carries one effective digital drive-signal channel; after DAC conversion this becomes the flowmeter electrical drive signal.
+- Until processing and visualization requirements are finalized, continuous stream data stays behind the ASIO/IIS module boundary and is summarized only as status and diagnostics.
+
 ## Known Unknowns
 - Final transmitter register map.
 - Required Modbus function codes.
 - Serial defaults for production hardware.
 - Device write commit/apply semantics.
-- Whether high-rate signal capture uses Modbus, UART, IIS-like streaming, or another path.
+- Whether production high-rate signal capture uses Modbus, UART, ASIO/IIS frame streaming, or another path.
+- Whether BRAVO-HD ASIO sample formats, channel ordering, and stable device alias remain the same across driver revisions and other lab PCs.

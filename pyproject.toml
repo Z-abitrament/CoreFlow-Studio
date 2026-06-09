@@ -28,6 +28,9 @@ dev = [
   "pytest>=8.0",
   "pytest-qt>=4.4"
 ]
+asio = [
+  "sounddevice>=0.5"
+]
 
 [project.scripts]
 coreflow = "coreflow.__main__:main"

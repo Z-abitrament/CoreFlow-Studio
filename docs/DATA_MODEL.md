@@ -191,11 +191,12 @@ Initial formats:
 
 - CSV for simple tabular exports.
 - JSON for configuration snapshots, simulator scenarios, and workflow templates.
+- JSON for ASIO/IIS loopback diagnostics.
 - SQLite for metadata and small structured results.
 - Plain text or JSON lines for diagnostic logs.
 - PDF, HTML, or DOCX can be considered for reports after report requirements are known.
 
-For high-rate or long-duration data, choose between CSV and Parquet during implementation. Use CSV first unless measured performance requires Parquet.
+For high-rate or long-duration data, choose between CSV and Parquet during implementation. Use CSV first unless measured performance requires Parquet. ASIO/IIS frame captures may use `.npy` for deterministic numeric arrays during hardware acceptance, with a JSON sidecar for configuration and metrics.
 
 ## Run Directory Naming
 Use stable run IDs and human-sortable folders.
