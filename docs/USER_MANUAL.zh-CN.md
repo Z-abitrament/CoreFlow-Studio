@@ -199,6 +199,20 @@ Run History 显示已保存运行：
 
 如果 smoke 通过但 UI 不显示，请检查是否有系统安全策略阻止 GUI 程序执行。
 
+如果窗口版 UI 在显示前退出，打包启动异常会追加写入：
+
+```text
+%LOCALAPPDATA%\CoreFlow Studio\logs\startup.log
+```
+
+如果设置了 `COREFLOW_DATA_ROOT`，日志会写入：
+
+```text
+<COREFLOW_DATA_ROOT>\logs\startup.log
+```
+
+需要查看可见控制台诊断时，请在 PowerShell 中运行 `.\CoreFlowStudioConsole.exe --ui`。
+
 如果 `%LOCALAPPDATA%` 无法写入，CoreFlow Studio 会自动尝试其他可写位置。也可以强制指定数据目录：
 
 ```powershell

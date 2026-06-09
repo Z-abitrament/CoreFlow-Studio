@@ -16,6 +16,7 @@ M12 implements the first Windows distributable-folder packaging path. It does no
 - Headless packaged-app simulator smoke command via `python -m coreflow --simulator-smoke`.
 - Packaged `CoreFlowStudio.exe` opens the Qt desktop UI without a console window.
 - Packaged `CoreFlowStudioConsole.exe` keeps console diagnostics available for build info, simulator smoke, and register-map template generation.
+- Packaged UI startup failures are logged to `<data-root>\logs\startup.log` before the process exits.
 - English and Chinese user manuals are included in the distribution folder.
 - Packaged build filters external Anaconda ICU DLLs that can break PySide6 QtWidgets loading on Windows.
 - PyInstaller runtime hook generation for packaged build commit/channel stamping.

@@ -172,7 +172,13 @@ def test_windows_packaging_files_are_present() -> None:
     readme_text = readme.read_text(encoding="utf-8")
     assert "verify_package.ps1" in readme_text
     assert "CoreFlowStudioConsole.exe --simulator-smoke" in readme_text
+    assert "CoreFlowStudioConsole.exe --ui" in readme_text
+    assert "startup.log" in readme_text
     assert "CoreFlowStudio.exe` with no command-line arguments" in readme_text
     assert "%LOCALAPPDATA%\\CoreFlow Studio" in readme_text
-    assert (repo_root / "docs" / "USER_MANUAL.en.md").exists()
-    assert (repo_root / "docs" / "USER_MANUAL.zh-CN.md").exists()
+    english_manual = repo_root / "docs" / "USER_MANUAL.en.md"
+    chinese_manual = repo_root / "docs" / "USER_MANUAL.zh-CN.md"
+    assert english_manual.exists()
+    assert chinese_manual.exists()
+    assert "startup.log" in english_manual.read_text(encoding="utf-8")
+    assert "startup.log" in chinese_manual.read_text(encoding="utf-8")

@@ -84,6 +84,21 @@ Opening `CoreFlowStudio.exe` with no command-line arguments starts the Qt deskto
 
 The `--simulator-smoke` command runs the simulator path headlessly: add a device, connect it, read live values, run calibration preview, run factory test, run an experiment, and generate an export package. In the UI, the same simulator workflows should be available from the main window.
 
+## Troubleshooting Startup
+If `CoreFlowStudio.exe` exits or reports an error before the window appears, run the console UI path from PowerShell:
+
+```powershell
+.\dist\CoreFlowStudio\CoreFlowStudioConsole.exe --ui
+```
+
+Packaged UI startup failures are also appended to:
+
+```text
+%LOCALAPPDATA%\CoreFlow Studio\logs\startup.log
+```
+
+When `COREFLOW_DATA_ROOT` is set, the log is written under `<COREFLOW_DATA_ROOT>\logs\startup.log`.
+
 ## Known Limits
 - No installer is produced yet; M12 creates a distributable folder.
 - Armed hardware writes remain disabled outside explicit future workflows.

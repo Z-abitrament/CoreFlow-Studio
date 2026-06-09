@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import traceback
+from datetime import UTC, datetime
 from pathlib import Path
 
 from coreflow import __version__
@@ -83,7 +85,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.simulator_smoke:
         return run_simulator_smoke(data_root=args.data_root)
     elif args.ui or should_launch_packaged_ui_by_default(args):
-        return launch_ui(data_root=args.data_root)
+        return launch_ui_with_startup_logging(data_root=args.data_root)
     else:
         print("CoreFlow Studio M0 bootstrap is ready.")
 
@@ -109,6 +111,73 @@ def launch_ui(data_root: Path | None = None) -> int:
     from coreflow.ui import run_app
 
     return run_app(data_root=data_root)
+
+
+def launch_ui_with_startup_logging(data_root: Path | None = None) -> int:
+    """Launch the UI and preserve packaged startup failures in a local log."""
+
+    try:
+        return launch_ui(data_root=data_root)
+    except Exception as exc:
+        if os.environ.get("COREFLOW_PACKAGED") != "1":
+            raise
+        try:
+            log_path = write_startup_exception(exc, data_root=data_root)
+        except Exception as log_exc:  # pragma: no cover - last-resort diagnostics
+            print(
+                "CoreFlow Studio UI startup failed before the window opened.",
+                file=sys.stderr,
+            )
+            print(f"Startup log could not be written: {log_exc}", file=sys.stderr)
+        else:
+            print(
+                "CoreFlow Studio UI startup failed before the window opened. "
+                f"Details were written to: {log_path}",
+                file=sys.stderr,
+            )
+        return 1
+
+
+def write_startup_exception(
+    exc: BaseException,
+    *,
+    data_root: Path | None = None,
+) -> Path:
+    from coreflow.build_info import current_build_info
+
+    log_path = startup_log_path(data_root=data_root)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    build_info = current_build_info()
+    formatted_traceback = "".join(
+        traceback.format_exception(type(exc), exc, exc.__traceback__)
+    )
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write("=" * 72)
+        handle.write("\n")
+        handle.write(f"timestamp={datetime.now(UTC).isoformat()}\n")
+        handle.write(
+            "build="
+            f"version={build_info.version} "
+            f"commit={build_info.commit} "
+            f"channel={build_info.build_channel}\n"
+        )
+        handle.write(f"executable={sys.executable}\n")
+        handle.write(f"argv={sys.argv!r}\n")
+        handle.write("traceback:\n")
+        handle.write(formatted_traceback)
+        if not formatted_traceback.endswith("\n"):
+            handle.write("\n")
+    return log_path
+
+
+def startup_log_path(data_root: Path | None = None) -> Path:
+    if data_root is not None:
+        root = data_root
+    else:
+        from coreflow.app.paths import default_user_data_root
+
+        root = default_user_data_root()
+    return root / "logs" / "startup.log"
 
 
 def run_simulator_smoke(data_root: Path | None = None) -> int:

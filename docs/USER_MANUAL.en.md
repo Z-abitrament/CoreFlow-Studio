@@ -199,6 +199,20 @@ If the UI does not open, run the console smoke command:
 
 If the smoke command passes but the UI does not show, check whether another security policy is blocking GUI execution.
 
+If the windowed UI exits before a window appears, packaged startup failures are appended to:
+
+```text
+%LOCALAPPDATA%\CoreFlow Studio\logs\startup.log
+```
+
+If `COREFLOW_DATA_ROOT` is set, the log is written under:
+
+```text
+<COREFLOW_DATA_ROOT>\logs\startup.log
+```
+
+Run `.\CoreFlowStudioConsole.exe --ui` from PowerShell when you want the same startup path with visible console diagnostics.
+
 If data cannot be written under `%LOCALAPPDATA%`, CoreFlow Studio falls back through other writable locations. You can force a data directory:
 
 ```powershell
