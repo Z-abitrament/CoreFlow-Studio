@@ -64,7 +64,18 @@ class ModbusRtuFlowmeterDevice(FlowmeterDevice):
             self._record_success()
         else:
             self._state = CommunicationState.FAULTED
-            self._last_error = "Unable to open Modbus RTU transport."
+            last_error = getattr(self._transport, "last_error", None)
+            self._last_error = (
+                last_error
+                if isinstance(last_error, str) and last_error
+                else (
+                    "Unable to open Modbus RTU transport "
+                    f"on {self._config.port} "
+                    f"({self._config.baudrate} baud, "
+                    f"{self._config.data_bits}{self._config.parity}{self._config.stop_bits}, "
+                    f"timeout={self._config.read_timeout_s:g}s)."
+                )
+            )
             raise ConnectionError(self._last_error)
 
     def disconnect(self) -> None:

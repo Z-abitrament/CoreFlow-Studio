@@ -126,11 +126,12 @@ Calibration Preview 会根据内置参考点采集模拟器样本并保存预览
 - `Connect` 只会在连接弹窗中打开所选的 Modbus RTU 串口。连接完成后可以手动关闭弹窗，模块窗口会保持已连接状态。
 - 连接后可使用每行的 `Read` 主动查询一个变量，并刷新 `Value` 显示列。可写变量可填写 `Write Value` 后点击 `Write`；不可写变量会禁用写入控件。写入仍会经过 write guard 和审计日志。
 - 勾选变量行的 `Poll` 后点击 `Start Polling`，会每秒轮询一次选中的变量。每轮轮询会按变量逐个读；同一 Modbus 表内相邻地址会尽量合并成一次读请求。
-- 使用 `Operations` 菜单执行 `Sample Variables`、`Zero Cal`、`K Factor`、`Repeatability` 和 `Calibration History`。当前版本隐藏 `K Factor Inputs` 区域；现有 K Factor 操作路径保留，后续再接入对应弹窗。
+- 使用 `Operations` 菜单执行 `Sample Variables`、`Zero Cal`、`K Factor`、`Repeatability` 和 `Calibration History`。当前版本隐藏旧的 `K Factor Inputs` 区域；`K Factor` 会打开独立弹窗。
 - 通信数据码表会实时显示读写操作的 TX/RX Modbus 数据码。
 - `Sample Variables` 会逐个读取配置变量，把成功读取的累积质量、Delta T、零点偏移、K factor 和低阈值等值连同时间戳写入数据库，刷新 `Value` 列，并对无响应变量记录 warning。
 - `Zero Cal` 会打开独立弹窗，点击 `Start` 后先读取 `zero_offset` 和 `delta_t`，再通过 write guard 将 `zero_calibration_start` 置 1，等待 3 秒后读取 coil 完成状态，并显示校准前后的 `zero_offset` 和 `delta_t`，供操作员自行判断结果。Variable Map 的 `Value` 列会刷新校准后的值，包括最终的 `zero_calibration_start` coil 状态。
-- `Calibration History` 会打开独立历史窗口，可与校准弹窗同时存在。它支持显示全部校准操作或单独筛选某一类操作，表格包含具体时间，并允许操作员编辑备注。`K Factor` 和 `Repeatability` 的专用弹窗仍属于后续 UI 工作。
+- `K Factor` 会打开独立弹窗，当前启用 Simple 模式，Advanced 模式先保留选项。Simple 模式会像 Zero Cal 一样先采集用户选择的预快照变量，读取配置的流量累积量和当前 K factor，然后通过配置的瞬时流量变量检测一次从非零流量到回零的流量段；流量段结束后等待用户输入标准称重量，计算 `K1`，并可按用户选择写入从机，写入后会再次回读确认。点击 `Save Configuration` 可保存变量对应、轮询间隔和预快照勾选，下次打开 K Factor 时自动恢复；是否写入从机不会被保存。校准历史会记录此次操作是否请求写入、是否写入成功以及是否回读验证通过。
+- `Calibration History` 会打开独立历史窗口，可与校准弹窗同时存在。它支持显示全部校准操作或单独筛选某一类操作，表格包含具体时间，并在参数栏汇总 K factor 写入状态等关键信息，同时允许操作员编辑备注。点击 `Export...` 后可先选择操作类型以及可选的开始/结束时间段，再导出方便其他电脑导入的 JSON 历史包；点击 `Import...` 可导入该历史包。重复运行记录会跳过；如果不同电脑产生了相同 run ID 但内容不同，导入时会自动使用新的 imported run ID 保留下来。Excel 导出入口先保留到后续版本。`Repeatability` 的专用弹窗仍属于后续 UI 工作。
 
 当前模块在没有工程提供验证寄存器表时仍使用占位寄存器表模板。不要把占位寄存器表当作生产发射机文档使用。
 
@@ -265,6 +266,8 @@ Replay CSV 必须包含 `mass_flow` 列。可选列包括 `captured_at`、`volum
 ```
 
 需要查看可见控制台诊断时，请在 PowerShell 中运行 `.\CoreFlowStudioConsole.exe --ui`。
+
+如果 Modbus Module 提示 `Unable to open Modbus RTU transport`，先确认连接弹窗里选中的是 USB 转串口适配器，而不是蓝牙或虚拟 COM 口；再检查该电脑是否安装了适配器驱动、该 COM 口是否已经被串口助手或另一个程序占用，以及波特率、校验位、停止位、Unit ID、超时和字/字节顺序是否与从机设置一致。连接失败信息会包含当前选择的 COM 口和串口参数，方便定位。
 
 如果 `%LOCALAPPDATA%` 无法写入，CoreFlow Studio 会自动尝试其他可写位置。也可以强制指定数据目录：
 

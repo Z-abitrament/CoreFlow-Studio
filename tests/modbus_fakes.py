@@ -19,6 +19,7 @@ class FakeModbusTransport:
     connected: bool = False
     read_delay_s: float = 0.0
     read_errors: dict[int, str] = field(default_factory=dict)
+    read_sequences: dict[int, list[list[int]]] = field(default_factory=dict)
     reads: list[tuple[RegisterKind, int, int, int]] = field(default_factory=list)
     writes: list[tuple[int, list[int], int]] = field(default_factory=list)
     coil_writes: list[tuple[int, bool, int]] = field(default_factory=list)
@@ -42,6 +43,10 @@ class FakeModbusTransport:
         self.reads.append((kind, address, count, unit_id))
         if address in self.read_errors:
             return TransportResponse(error=self.read_errors[address])
+        if address in self.read_sequences and self.read_sequences[address]:
+            values = self.read_sequences[address].pop(0)
+            self.registers[address] = list(values)
+            return TransportResponse(values=values[:count])
         values: list[int] = []
         cursor = address
         while len(values) < count:

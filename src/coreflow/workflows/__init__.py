@@ -13,6 +13,8 @@ __all__ = [
     "CalibrationPreviewConfig",
     "CalibrationPreviewWorkflow",
     "CalibrationPreviewWorkflowResult",
+    "FlowSegmentCaptureConfig",
+    "FlowSegmentCaptureResult",
     "KFactorCalibrationConfig",
     "KFactorCalibrationWorkflow",
     "KFactorCalibrationWorkflowResult",
@@ -22,6 +24,7 @@ __all__ = [
     "ZeroCalibrationConfig",
     "ZeroCalibrationWorkflow",
     "ZeroCalibrationWorkflowResult",
+    "capture_flow_segment",
     "FactoryMeasurementCheck",
     "FactoryStabilityCheck",
     "FactoryTestConfig",
@@ -44,6 +47,8 @@ def __getattr__(name: str) -> object:
         "CalibrationPreviewConfig",
         "CalibrationPreviewWorkflow",
         "CalibrationPreviewWorkflowResult",
+        "FlowSegmentCaptureConfig",
+        "FlowSegmentCaptureResult",
         "KFactorCalibrationConfig",
         "KFactorCalibrationWorkflow",
         "KFactorCalibrationWorkflowResult",
@@ -53,11 +58,14 @@ def __getattr__(name: str) -> object:
         "ZeroCalibrationConfig",
         "ZeroCalibrationWorkflow",
         "ZeroCalibrationWorkflowResult",
+        "capture_flow_segment",
     }:
         from coreflow.workflows.calibration import (
             CalibrationPreviewConfig,
             CalibrationPreviewWorkflow,
             CalibrationPreviewWorkflowResult,
+            FlowSegmentCaptureConfig,
+            FlowSegmentCaptureResult,
             KFactorCalibrationConfig,
             KFactorCalibrationWorkflow,
             KFactorCalibrationWorkflowResult,
@@ -67,12 +75,15 @@ def __getattr__(name: str) -> object:
             ZeroCalibrationConfig,
             ZeroCalibrationWorkflow,
             ZeroCalibrationWorkflowResult,
+            capture_flow_segment,
         )
 
         exports = {
             "CalibrationPreviewConfig": CalibrationPreviewConfig,
             "CalibrationPreviewWorkflow": CalibrationPreviewWorkflow,
             "CalibrationPreviewWorkflowResult": CalibrationPreviewWorkflowResult,
+            "FlowSegmentCaptureConfig": FlowSegmentCaptureConfig,
+            "FlowSegmentCaptureResult": FlowSegmentCaptureResult,
             "KFactorCalibrationConfig": KFactorCalibrationConfig,
             "KFactorCalibrationWorkflow": KFactorCalibrationWorkflow,
             "KFactorCalibrationWorkflowResult": KFactorCalibrationWorkflowResult,
@@ -82,6 +93,7 @@ def __getattr__(name: str) -> object:
             "ZeroCalibrationConfig": ZeroCalibrationConfig,
             "ZeroCalibrationWorkflow": ZeroCalibrationWorkflow,
             "ZeroCalibrationWorkflowResult": ZeroCalibrationWorkflowResult,
+            "capture_flow_segment": capture_flow_segment,
         }
         return exports[name]
     if name in {

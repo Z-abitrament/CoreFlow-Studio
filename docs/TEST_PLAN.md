@@ -123,9 +123,10 @@ Scenarios:
 
 - Run zero calibration against a fake or simulator device with configurable start coil/parameter, before/after `zero_offset`, before/after `delta_t`, and completion polling.
 - Confirm zero calibration writes only through `WriteGuardService` in an explicit write-capable state and creates an audit record.
-- Run K factor calibration from accumulated-mass before/after values, standard mass, and current K factor.
+- Run simple K factor calibration from selected pre-operation variables, one reusable non-zero-to-zero flow segment, accumulated-mass before/after values, standard mass, and current K factor.
+- Confirm the K Factor dialog can persist and reload selected variables, polling interval, and pre-operation snapshot selections without persisting write-to-device intent.
 - Confirm corrected K factor is calculated as `k_s = k_r / m_r * m_s`.
-- Confirm K factor apply writes only through the write guard and stores run, step, analysis, and audit records.
+- Confirm K factor apply writes only through the write guard, rereads the configured K factor parameter for verification, and stores run, analysis, and audit records with write-request/apply/verify status.
 
 ID: TP-WF-002
 
@@ -183,6 +184,7 @@ Scenarios:
 - Confirm missing artifacts are reported clearly.
 - Confirm audit log records parameter-write attempts.
 - Store timestamped variable samples with device identity, variable name, value, unit, source channel, and optional run/step references.
+- Export standalone Modbus calibration history to a portable JSON package with optional operation and started-at time-range filters, import it into another local repository, preserve notes and metrics, skip duplicate runs, and rename conflicting imported run IDs without overwriting local records.
 
 ### Safety And Write-Guard Tests
 ID: TP-SAFE-001
@@ -251,6 +253,7 @@ Scenarios:
 - Generate a factory test report from simulator data.
 - Export measurement and metric CSV files.
 - Confirm reports include device identity, run configuration, timestamps, results, and artifact references.
+- Confirm the standalone Modbus calibration-history window exposes JSON import/export, lets the operator choose an export operation and started-at time range, and reserves Excel export for a later report/export implementation.
 
 ### Extension Tests
 ID: TP-EXT-001

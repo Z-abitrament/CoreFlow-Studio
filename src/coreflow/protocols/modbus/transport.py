@@ -7,6 +7,7 @@ from typing import Protocol
 
 from pymodbus.client import ModbusSerialClient
 from pymodbus.exceptions import ModbusException
+from serial import SerialException
 
 from coreflow.protocols.modbus.models import RegisterKind, SerialConfig
 
@@ -67,9 +68,23 @@ class PymodbusSerialTransport:
             timeout=config.read_timeout_s,
             retries=config.retry_count,
         )
+        self._last_error: str | None = None
 
     def connect(self) -> bool:
-        return bool(self._client.connect())
+        try:
+            connected = bool(self._client.connect())
+        except (OSError, SerialException, ModbusException) as exc:
+            self._last_error = _format_open_error(self._config, str(exc))
+            return False
+        if connected:
+            self._last_error = None
+            return True
+        self._last_error = _format_open_error(self._config, None)
+        return False
+
+    @property
+    def last_error(self) -> str | None:
+        return self._last_error
 
     def close(self) -> None:
         self._client.close()
@@ -80,7 +95,7 @@ class PymodbusSerialTransport:
             connected = connected()
         if connected:
             return True
-        return bool(self._client.connect())
+        return self.connect()
 
     def read_registers(
         self,
@@ -90,7 +105,7 @@ class PymodbusSerialTransport:
         unit_id: int,
     ) -> TransportResponse:
         if not self._ensure_connected():
-            return TransportResponse(error="Unable to open Modbus RTU transport.")
+            return TransportResponse(error=self._open_error())
         try:
             if kind is RegisterKind.HOLDING:
                 response = self._client.read_holding_registers(
@@ -144,7 +159,7 @@ class PymodbusSerialTransport:
         unit_id: int,
     ) -> TransportResponse:
         if not self._ensure_connected():
-            return TransportResponse(error="Unable to open Modbus RTU transport.")
+            return TransportResponse(error=self._open_error())
         try:
             response = self._client.write_registers(
                 address,
@@ -167,7 +182,7 @@ class PymodbusSerialTransport:
         unit_id: int,
     ) -> TransportResponse:
         if not self._ensure_connected():
-            return TransportResponse(error="Unable to open Modbus RTU transport.")
+            return TransportResponse(error=self._open_error())
         try:
             response = self._client.write_coil(
                 address,
@@ -182,6 +197,24 @@ class PymodbusSerialTransport:
         if hasattr(response, "isError") and response.isError():
             return TransportResponse(error=str(response))
         return TransportResponse(values=[1 if value else 0])
+
+    def _open_error(self) -> str:
+        return self._last_error or _format_open_error(self._config, None)
+
+
+def _format_open_error(config: SerialConfig, detail: str | None) -> str:
+    message = (
+        "Unable to open Modbus RTU transport "
+        f"on {config.port} "
+        f"({config.baudrate} baud, {config.data_bits}{config.parity}{config.stop_bits}, "
+        f"timeout={config.read_timeout_s:g}s)."
+    )
+    if detail:
+        return f"{message} {detail}"
+    return (
+        f"{message} Check that the USB-to-serial driver is installed, "
+        "the COM port is not already open in another program, and the selected port matches the adapter."
+    )
 
 
 def _decode_bit_response(response: object, count: int) -> list[int] | None:

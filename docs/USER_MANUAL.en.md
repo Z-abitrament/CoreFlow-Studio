@@ -126,11 +126,12 @@ Open the Modbus Module from the main toolbar or `Modules` menu. The module has i
 - `Connect` opens the selected Modbus RTU port only from the connection dialog. After the connection succeeds, the dialog can be closed manually while the module window remains connected.
 - After connecting, use each row's `Read` button to query one variable and refresh the `Value` column. Writable rows can use `Write Value` and `Write`; non-writable rows disable write controls. Writes still go through the write guard and audit log.
 - Select row `Poll` checkboxes and click `Start Polling` to poll selected variables once per second. Each polling cycle reads selected variables sequentially, and adjacent variables with the same Modbus table are merged into one read request where possible.
-- Use the `Operations` menu for `Sample Variables`, `Zero Cal`, `K Factor`, `Repeatability`, and `Calibration History`. The K Factor input panel is hidden in this build; the existing K Factor operation path is retained for later dialog work.
+- Use the `Operations` menu for `Sample Variables`, `Zero Cal`, `K Factor`, `Repeatability`, and `Calibration History`. The old inline K Factor input panel is hidden; K Factor now opens its own dialog.
 - The communication-frame table shows live TX/RX Modbus data codes for reads and writes.
 - `Sample Variables` reads the configured variables one by one, stores successful values such as accumulated mass, Delta T, zero offset, K factor, and low threshold with timestamps, updates the `Value` column, and logs warnings for variables that do not respond.
 - `Zero Cal` opens a dialog with a `Start` button. Starting reads `zero_offset` and `delta_t`, writes `zero_calibration_start` to 1 through the write guard, waits 3 seconds, reads the coil completion state, then displays before/after `zero_offset` and `delta_t` values for operator judgment. The Variable Map `Value` column is refreshed with the after values, including the final `zero_calibration_start` coil state.
-- `Calibration History` opens an independent table that can remain open beside calibration dialogs. It can show all calibration operations or one operation type, includes timestamps, and lets the operator edit notes. `K Factor` and `Repeatability` dedicated dialogs are still future UI work.
+- `K Factor` opens a dialog with Simple mode enabled and Advanced mode reserved. Simple mode captures the same selectable pre-calibration snapshot style as Zero Cal, reads the configured flow accumulator and current K factor, detects one non-zero flow segment from the configured flow-rate variable, waits for the operator's standard-scale mass input, calculates `K1`, and can optionally write `K1` back to the device with readback verification. Use `Save Configuration` to persist the selected variables, polling interval, and snapshot selections for the next K Factor session; the write-to-device choice is not persisted. Calibration history records whether the write was requested, applied, and verified.
+- `Calibration History` opens an independent table that can remain open beside calibration dialogs. It can show all calibration operations or one operation type, includes timestamps, summarizes key parameters such as K factor write status, and lets the operator edit notes. Use `Export...` to choose an operation type and optional started-at time range, then write a portable JSON history package for another PC. Use `Import...` to load one. Duplicate runs are skipped; conflicting imported run IDs are kept under new imported IDs. Excel export is reserved for a later release. `Repeatability` dedicated dialog work is still future UI work.
 
 The current module still uses the placeholder register-map template unless engineering supplies a validated map. Do not use the placeholder map as production transmitter documentation.
 
@@ -265,6 +266,8 @@ If `COREFLOW_DATA_ROOT` is set, the log is written under:
 ```
 
 Run `.\CoreFlowStudioConsole.exe --ui` from PowerShell when you want the same startup path with visible console diagnostics.
+
+If the Modbus Module reports `Unable to open Modbus RTU transport`, first confirm that the selected port is the USB-to-serial adapter, not a Bluetooth or virtual COM port. Then check that the adapter driver is installed, the port is not already open in another terminal or serial-monitor program, and the baud rate, parity, stop bits, unit ID, timeout, and byte/word order match the transmitter setup. The connection error includes the selected COM port and serial parameters to make this check easier.
 
 If data cannot be written under `%LOCALAPPDATA%`, CoreFlow Studio falls back through other writable locations. You can force a data directory:
 

@@ -176,6 +176,7 @@ def test_main_window_opens_independent_modbus_window(qtbot, tmp_path) -> None:
     assert modbus_window.isWindow()
     assert modbus_window.statusValueLabel.text() == "Disconnected"
     assert not modbus_window.sampleVariablesAction.isEnabled()
+    assert not modbus_window.kFactorAction.isEnabled()
     assert not hasattr(modbus_window, "sampleVariablesButton")
     assert modbus_window.menuBar.objectName() == "modbusMenuBar"
     assert modbus_window.kFactorInputsGroup.isHidden()

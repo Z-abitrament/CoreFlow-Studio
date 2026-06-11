@@ -107,7 +107,7 @@ Deliverables:
 - Dry-run execution path for write-capable calibration steps.
 - Write-guard service that validates workflow state, writable permission, value ranges, and actor/source before any parameter write is allowed.
 - Headless zero calibration workflow using a configured start coil/parameter and before/after `zero_offset` and `delta_t` records.
-- Headless K factor calibration workflow using manual accumulated-mass and standard-mass inputs, guarded K factor write, and audit record.
+- Headless K factor calibration workflow using a reusable flow-segment capture, operator standard-mass input, guarded K factor write, and audit record.
 
 Done when:
 

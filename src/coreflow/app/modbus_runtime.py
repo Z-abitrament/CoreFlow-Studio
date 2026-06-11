@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from coreflow import __version__
-from coreflow.analysis.calibration import RepeatabilityTrial, ZeroCalibrationRecord
+from coreflow.analysis.calibration import (
+    KFactorCalibrationInput,
+    RepeatabilityTrial,
+    ZeroCalibrationRecord,
+    calculate_k_factor,
+)
 from coreflow.app.variable_sampling import VariableSample
 from coreflow.app.write_guard import WriteGuardService
 from coreflow.devices import (
@@ -37,14 +44,25 @@ from coreflow.protocols.modbus import (
     TransportResponse,
 )
 from coreflow.storage import StorageRepository
-from coreflow.storage.models import DeviceRecord, VariableSampleRecord
+from coreflow.storage.models import AnalysisResultRecord, DeviceRecord, VariableSampleRecord
 from coreflow.workflows.calibration import (
+    FlowSegmentCaptureConfig,
+    FlowSegmentCaptureResult,
     KFactorCalibrationConfig,
     KFactorCalibrationWorkflow,
     RepeatabilityTestConfig,
     RepeatabilityTestWorkflow,
     ZeroCalibrationConfig,
     ZeroCalibrationWorkflow,
+    capture_flow_segment,
+)
+from coreflow.workflows.models import (
+    RunSession,
+    RunStatus,
+    RunType,
+    WorkflowStep,
+    WorkflowStepStatus,
+    WorkflowStepType,
 )
 
 
@@ -104,6 +122,61 @@ class ModbusZeroCalibrationResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ModbusKFactorSimpleCapture:
+    """Captured device data before operator standard-mass entry."""
+
+    run_id: str
+    flow_rate_parameter: str
+    flow_acc_parameter: str
+    k_factor_parameter: str
+    pre_snapshot: dict[str, object]
+    pre_snapshot_captured_at: datetime | None
+    mass_acc_before: float
+    mass_acc_after: float
+    current_k_factor: float
+    segment: FlowSegmentCaptureResult
+    poll_interval_s: float
+
+    @property
+    def measured_mass_delta(self) -> float:
+        return self.mass_acc_after - self.mass_acc_before
+
+
+@dataclass(frozen=True, slots=True)
+class ModbusKFactorSimpleResult:
+    """UI-ready result for one simple K factor calibration trial."""
+
+    run_id: str
+    flow_rate_parameter: str
+    flow_acc_parameter: str
+    k_factor_parameter: str
+    pre_snapshot: dict[str, object]
+    pre_snapshot_captured_at: datetime | None
+    mass_acc_before: float
+    mass_acc_after: float
+    standard_mass: float
+    current_k_factor: float
+    corrected_k_factor: float
+    measured_mass_delta: float
+    mean_flow: float
+    instant_flow: float
+    flow_started_at: datetime
+    flow_instant_at: datetime
+    flow_ended_at: datetime
+    poll_interval_s: float
+    history_saved: bool
+    write_requested: bool = False
+    write_status: str = "not_requested"
+    write_verified: bool = False
+    readback_k_factor: float | None = None
+    audit_id: str | None = None
+
+    @property
+    def duration_s(self) -> float:
+        return (self.flow_ended_at - self.flow_started_at).total_seconds()
+
+
+@dataclass(frozen=True, slots=True)
 class ModbusCalibrationHistoryEntry:
     """One historical Modbus calibration operation."""
 
@@ -118,9 +191,35 @@ class ModbusCalibrationHistoryEntry:
     notes: str = ""
 
 
+@dataclass(frozen=True, slots=True)
+class ModbusCalibrationHistoryExportResult:
+    """Summary of one Modbus calibration-history export file."""
+
+    path: Path
+    run_count: int
+    analysis_result_count: int
+    workflow_step_count: int
+    format_version: int
+
+
+@dataclass(frozen=True, slots=True)
+class ModbusCalibrationHistoryImportResult:
+    """Summary of one Modbus calibration-history import operation."""
+
+    path: Path
+    imported_runs: int
+    skipped_runs: int
+    renamed_runs: int
+    imported_analysis_results: int
+    imported_workflow_steps: int
+    errors: tuple[str, ...] = ()
+
+
 TransportFactory = Callable[[SerialConfig], ModbusTransport | None]
 FrameLogger = Callable[[str, str, str], None]
 
+_CALIBRATION_HISTORY_EXPORT_FORMAT = "coreflow.modbus.calibration_history"
+_CALIBRATION_HISTORY_EXPORT_VERSION = 1
 _CALIBRATION_HISTORY_WORKFLOWS = {
     "zero_calibration",
     "k_factor_calibration",
@@ -140,6 +239,8 @@ class ModbusModuleRuntime:
         transport_factory: TransportFactory | None = None,
         operator: str = "operator",
         zero_calibration_wait_s: float = 3.0,
+        k_factor_post_start_sample_s: float = 3.0,
+        k_factor_post_stop_delay_s: float = 3.0,
     ) -> None:
         self._repository = repository
         self._register_map = register_map or build_placeholder_register_map()
@@ -147,6 +248,8 @@ class ModbusModuleRuntime:
         self._frame_logger: FrameLogger | None = None
         self._operator = operator
         self._zero_calibration_wait_s = zero_calibration_wait_s
+        self._k_factor_post_start_sample_s = k_factor_post_start_sample_s
+        self._k_factor_post_stop_delay_s = k_factor_post_stop_delay_s
         self._device: FlowmeterDevice | None = None
         self._device_id: str | None = None
         self._identity: DeviceIdentity | None = None
@@ -379,6 +482,220 @@ class ModbusModuleRuntime:
             pre_snapshot_captured_at=result.pre_snapshot_captured_at,
         )
 
+    def capture_k_factor_simple_trial(
+        self,
+        *,
+        snapshot_variable_names: tuple[str, ...] = (),
+        flow_rate_parameter: str = "mass_rate",
+        flow_acc_parameter: str = "mass_acc",
+        k_factor_parameter: str = "k_factor",
+        poll_interval_s: float = 1.0,
+        nonzero_threshold: float = 0.0,
+        post_start_sample_s: float | None = None,
+        post_stop_delay_s: float | None = None,
+        max_wait_start_polls: int = 600,
+        max_wait_stop_polls: int = 600,
+        cancel_requested: Callable[[], bool] | None = None,
+    ) -> ModbusKFactorSimpleCapture:
+        run_id = self._next_run_id()
+        device = self._require_device()
+        identity = self._require_identity()
+        self._repository.save_device(
+            DeviceRecord(
+                device_id=identity.device_id,
+                device_type=identity.device_type.value,
+                serial_number=identity.serial_number,
+                model=identity.model,
+                firmware_version=identity.firmware_version,
+                hardware_version=identity.hardware_version,
+                protocol_address=identity.protocol_address,
+                connection_metadata=identity.metadata,
+            )
+        )
+        pre_snapshot, pre_snapshot_captured_at = _pre_calibration_snapshot(
+            device,
+            _unique_names(snapshot_variable_names),
+        )
+        before_parameters = _read_selected_parameters(
+            device,
+            (flow_acc_parameter, k_factor_parameter),
+            merge_adjacent=False,
+        )
+        mass_acc_before = float(_find_parameter(before_parameters, flow_acc_parameter).value)
+        current_k_factor = float(_find_parameter(before_parameters, k_factor_parameter).value)
+        segment = capture_flow_segment(
+            device,
+            FlowSegmentCaptureConfig(
+                flow_rate_parameter=flow_rate_parameter,
+                poll_interval_s=poll_interval_s,
+                nonzero_threshold=nonzero_threshold,
+                post_start_sample_s=self._k_factor_post_start_sample_s
+                if post_start_sample_s is None
+                else post_start_sample_s,
+                post_stop_delay_s=self._k_factor_post_stop_delay_s
+                if post_stop_delay_s is None
+                else post_stop_delay_s,
+                max_wait_start_polls=max_wait_start_polls,
+                max_wait_stop_polls=max_wait_stop_polls,
+                cancel_requested=cancel_requested,
+            ),
+        )
+        after_parameters = _read_selected_parameters(
+            device,
+            (flow_acc_parameter,),
+            merge_adjacent=False,
+        )
+        mass_acc_after = float(_find_parameter(after_parameters, flow_acc_parameter).value)
+        return ModbusKFactorSimpleCapture(
+            run_id=run_id,
+            flow_rate_parameter=flow_rate_parameter,
+            flow_acc_parameter=flow_acc_parameter,
+            k_factor_parameter=k_factor_parameter,
+            pre_snapshot=pre_snapshot,
+            pre_snapshot_captured_at=pre_snapshot_captured_at,
+            mass_acc_before=mass_acc_before,
+            mass_acc_after=mass_acc_after,
+            current_k_factor=current_k_factor,
+            segment=segment,
+            poll_interval_s=poll_interval_s,
+        )
+
+    def calculate_k_factor_simple_result(
+        self,
+        capture: ModbusKFactorSimpleCapture,
+        *,
+        standard_mass: float,
+        save_history: bool = True,
+    ) -> ModbusKFactorSimpleResult:
+        if standard_mass <= 0:
+            raise ValueError("K factor calibration requires positive standard mass.")
+        calibration = calculate_k_factor(
+            KFactorCalibrationInput(
+                mass_acc_before=capture.mass_acc_before,
+                mass_acc_after=capture.mass_acc_after,
+                standard_mass=standard_mass,
+                current_k_factor=capture.current_k_factor,
+            )
+        )
+        mean_flow = (
+            calibration.measured_mass_delta / capture.segment.duration_s
+            if capture.segment.duration_s > 0
+            else 0.0
+        )
+        result = ModbusKFactorSimpleResult(
+            run_id=capture.run_id,
+            flow_rate_parameter=capture.flow_rate_parameter,
+            flow_acc_parameter=capture.flow_acc_parameter,
+            k_factor_parameter=capture.k_factor_parameter,
+            pre_snapshot=capture.pre_snapshot,
+            pre_snapshot_captured_at=capture.pre_snapshot_captured_at,
+            mass_acc_before=capture.mass_acc_before,
+            mass_acc_after=capture.mass_acc_after,
+            standard_mass=standard_mass,
+            current_k_factor=capture.current_k_factor,
+            corrected_k_factor=calibration.corrected_k_factor,
+            measured_mass_delta=calibration.measured_mass_delta,
+            mean_flow=mean_flow,
+            instant_flow=capture.segment.instant_flow,
+            flow_started_at=capture.segment.started_at,
+            flow_instant_at=capture.segment.instant_flow_at,
+            flow_ended_at=capture.segment.ended_at,
+            poll_interval_s=capture.poll_interval_s,
+            history_saved=save_history,
+        )
+        if save_history:
+            self._save_k_factor_simple_history(result, status=RunStatus.PASSED)
+        return result
+
+    def apply_k_factor_simple_result(
+        self,
+        result: ModbusKFactorSimpleResult,
+    ) -> ModbusKFactorSimpleResult:
+        device = self._require_device()
+        register = self._register_map.by_name(result.k_factor_parameter)
+        parameter = ConfigurationParameter(
+            name=register.name,
+            value=result.current_k_factor,
+            unit=register.unit,
+            writable=register.writable,
+            minimum=register.minimum,
+            maximum=register.maximum,
+            metadata={
+                "register_kind": register.kind.value,
+                "address": register.address,
+                "word_count": register.word_count,
+                "data_type": register.data_type.value,
+                "source": "k_factor_simple_calibration",
+            },
+        )
+        write_method = getattr(device, "write_configuration_without_pre_read", None)
+        write_device = (
+            _NoPreReadWriteDevice(device)
+            if callable(write_method)
+            else device
+        )
+        decision = WriteGuardService(
+            self._repository,
+            write_capable_states=("calibration_write_armed",),
+        ).evaluate_known_parameter(
+            write_device,
+            ParameterWriteRequest(
+                parameter_name=result.k_factor_parameter,
+                new_value=result.corrected_k_factor,
+                mode=WriteMode.ARMED,
+                actor=self._operator,
+                workflow_state="calibration_write_armed",
+                run_id=result.run_id if result.history_saved else None,
+                metadata={"calibration": "k_factor_simple"},
+            ),
+            parameter,
+        )
+        readback = None
+        verified = False
+        if decision.result.status.value == "applied":
+            parameters = _read_selected_parameters(
+                device,
+                (result.k_factor_parameter,),
+                merge_adjacent=False,
+            )
+            readback = float(_find_parameter(parameters, result.k_factor_parameter).value)
+            verified = abs(readback - result.corrected_k_factor) <= max(
+                1e-9,
+                abs(result.corrected_k_factor) * 1e-6,
+            )
+        updated = ModbusKFactorSimpleResult(
+            run_id=result.run_id,
+            flow_rate_parameter=result.flow_rate_parameter,
+            flow_acc_parameter=result.flow_acc_parameter,
+            k_factor_parameter=result.k_factor_parameter,
+            pre_snapshot=result.pre_snapshot,
+            pre_snapshot_captured_at=result.pre_snapshot_captured_at,
+            mass_acc_before=result.mass_acc_before,
+            mass_acc_after=result.mass_acc_after,
+            standard_mass=result.standard_mass,
+            current_k_factor=result.current_k_factor,
+            corrected_k_factor=result.corrected_k_factor,
+            measured_mass_delta=result.measured_mass_delta,
+            mean_flow=result.mean_flow,
+            instant_flow=result.instant_flow,
+            flow_started_at=result.flow_started_at,
+            flow_instant_at=result.flow_instant_at,
+            flow_ended_at=result.flow_ended_at,
+            poll_interval_s=result.poll_interval_s,
+            history_saved=result.history_saved,
+            write_requested=True,
+            write_status=decision.result.status.value,
+            write_verified=verified,
+            readback_k_factor=readback,
+            audit_id=decision.audit_id,
+        )
+        if updated.history_saved:
+            self._save_k_factor_simple_history(
+                updated,
+                status=RunStatus.PASSED if verified else RunStatus.FAILED,
+            )
+        return updated
+
     def run_k_factor_calibration(
         self,
         *,
@@ -463,6 +780,261 @@ class ModbusModuleRuntime:
     def update_calibration_history_note(self, run_id: str, notes: str) -> None:
         self._repository.update_run_notes(run_id, notes)
 
+    def export_calibration_history(
+        self,
+        path: str | Path,
+        *,
+        operation: str | None = None,
+        started_from: datetime | None = None,
+        started_to: datetime | None = None,
+    ) -> ModbusCalibrationHistoryExportResult:
+        """Export Modbus calibration history as a portable JSON package."""
+
+        export_path = Path(path)
+        suffix = export_path.suffix.lower()
+        if suffix in {".xlsx", ".xls"}:
+            raise ValueError(
+                "Excel export is reserved for a future release; choose JSON for now."
+            )
+        if suffix != ".json":
+            export_path = export_path.with_suffix(".json")
+
+        entries: list[dict[str, object]] = []
+        analysis_count = 0
+        step_count = 0
+        for history_entry in self.list_calibration_history(operation=operation):
+            if not _history_entry_in_time_range(
+                history_entry,
+                started_from=started_from,
+                started_to=started_to,
+            ):
+                continue
+            run = self._repository.get_run(history_entry.run_id)
+            if run is None:
+                continue
+            device = self._repository.get_device(run.device_id)
+            steps = self._repository.list_steps(run.run_id)
+            analysis_results = self._repository.list_analysis_results(run.run_id)
+            analysis_count += len(analysis_results)
+            step_count += len(steps)
+            entries.append(
+                {
+                    "device": _device_record_to_history_payload(device)
+                    if device is not None
+                    else None,
+                    "run": _run_session_to_history_payload(run),
+                    "workflow_steps": [
+                        _workflow_step_to_history_payload(step) for step in steps
+                    ],
+                    "analysis_results": [
+                        _analysis_result_to_history_payload(result)
+                        for result in analysis_results
+                    ],
+                }
+            )
+
+        payload = {
+            "format": _CALIBRATION_HISTORY_EXPORT_FORMAT,
+            "format_version": _CALIBRATION_HISTORY_EXPORT_VERSION,
+            "exported_at": datetime.now(UTC).isoformat(),
+            "software_version": __version__,
+            "operation_filter": operation or "all",
+            "started_from": started_from.isoformat()
+            if started_from is not None
+            else None,
+            "started_to": started_to.isoformat()
+            if started_to is not None
+            else None,
+            "future_exports": {
+                "excel": "reserved",
+            },
+            "entries": entries,
+        }
+        export_path.parent.mkdir(parents=True, exist_ok=True)
+        export_path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True, default=str),
+            encoding="utf-8",
+        )
+        return ModbusCalibrationHistoryExportResult(
+            path=export_path,
+            run_count=len(entries),
+            analysis_result_count=analysis_count,
+            workflow_step_count=step_count,
+            format_version=_CALIBRATION_HISTORY_EXPORT_VERSION,
+        )
+
+    def import_calibration_history(
+        self,
+        path: str | Path,
+    ) -> ModbusCalibrationHistoryImportResult:
+        """Import a portable Modbus calibration-history JSON package."""
+
+        import_path = Path(path)
+        payload = json.loads(import_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("Calibration history import file must contain an object.")
+        if payload.get("format") != _CALIBRATION_HISTORY_EXPORT_FORMAT:
+            raise ValueError("Unsupported calibration history import format.")
+        if payload.get("format_version") != _CALIBRATION_HISTORY_EXPORT_VERSION:
+            raise ValueError(
+                "Unsupported calibration history import format version."
+            )
+        raw_entries = payload.get("entries")
+        if not isinstance(raw_entries, list):
+            raise ValueError("Calibration history import file has no entries list.")
+
+        imported_runs = 0
+        skipped_runs = 0
+        renamed_runs = 0
+        imported_analysis_results = 0
+        imported_workflow_steps = 0
+        errors: list[str] = []
+        for index, raw_entry in enumerate(raw_entries, start=1):
+            try:
+                if not isinstance(raw_entry, dict):
+                    raise ValueError("entry must be an object")
+                run = _run_session_from_history_payload(raw_entry.get("run"))
+                if run.workflow_name not in _CALIBRATION_HISTORY_WORKFLOWS:
+                    raise ValueError(f"unsupported workflow: {run.workflow_name}")
+                status = getattr(run.status, "value", str(run.status))
+                if status not in _CALIBRATION_HISTORY_STATUSES:
+                    raise ValueError(f"unsupported status: {status}")
+                if self._repository.get_run(run.run_id) is not None:
+                    analysis_results = _analysis_results_from_history_payload(
+                        raw_entry.get("analysis_results")
+                    )
+                    if _history_run_already_imported(
+                        self._repository,
+                        run,
+                        analysis_results,
+                    ):
+                        skipped_runs += 1
+                        continue
+                    original_run_id = run.run_id
+                    new_run_id = self._next_imported_run_id(original_run_id)
+                    imported_at = datetime.now(UTC).isoformat()
+                    run = _remap_imported_run(
+                        run,
+                        original_run_id=original_run_id,
+                        new_run_id=new_run_id,
+                        imported_at=imported_at,
+                    )
+                    steps = _workflow_steps_from_history_payload(
+                        raw_entry.get("workflow_steps")
+                    )
+                    step_id_map = _import_step_id_map(
+                        steps,
+                        original_run_id=original_run_id,
+                        new_run_id=new_run_id,
+                    )
+                    steps = tuple(
+                        _remap_imported_workflow_step(
+                            step,
+                            original_run_id=original_run_id,
+                            new_run_id=new_run_id,
+                            step_id_map=step_id_map,
+                            imported_at=imported_at,
+                        )
+                        for step in steps
+                    )
+                    analysis_results = tuple(
+                        _remap_imported_analysis_result(
+                            result,
+                            original_run_id=original_run_id,
+                            new_run_id=new_run_id,
+                            step_id_map=step_id_map,
+                            imported_at=imported_at,
+                        )
+                        for result in analysis_results
+                    )
+                    renamed_runs += 1
+                else:
+                    steps = _workflow_steps_from_history_payload(
+                        raw_entry.get("workflow_steps")
+                    )
+                    analysis_results = _analysis_results_from_history_payload(
+                        raw_entry.get("analysis_results")
+                    )
+
+                device = _device_record_from_history_payload(raw_entry.get("device"))
+                if device is None:
+                    device = DeviceRecord(
+                        device_id=run.device_id,
+                        device_type=DeviceType.MODBUS_RTU.value,
+                    )
+                if self._repository.get_device(device.device_id) is None:
+                    self._repository.save_device(device)
+                self._repository.save_run(run)
+
+                for step in steps:
+                    self._repository.save_step(step)
+                imported_workflow_steps += len(steps)
+
+                for result in analysis_results:
+                    self._repository.save_analysis_result(result)
+                imported_analysis_results += len(analysis_results)
+                imported_runs += 1
+            except Exception as exc:
+                errors.append(f"entry {index}: {exc}")
+
+        return ModbusCalibrationHistoryImportResult(
+            path=import_path,
+            imported_runs=imported_runs,
+            skipped_runs=skipped_runs,
+            renamed_runs=renamed_runs,
+            imported_analysis_results=imported_analysis_results,
+            imported_workflow_steps=imported_workflow_steps,
+            errors=tuple(errors),
+        )
+
+    def _save_k_factor_simple_history(
+        self,
+        result: ModbusKFactorSimpleResult,
+        *,
+        status: RunStatus,
+    ) -> None:
+        identity = self._require_identity()
+        metrics = _k_factor_simple_metrics(result)
+        self._repository.save_run(
+            RunSession(
+                run_id=result.run_id,
+                run_type=RunType.CALIBRATION,
+                workflow_name="k_factor_calibration",
+                workflow_version="0.2-simple",
+                device_id=identity.device_id,
+                operator=self._operator,
+                status=status,
+                started_at=result.flow_started_at,
+                ended_at=result.flow_ended_at,
+                configuration_snapshot={
+                    "mode": "simple",
+                    "flow_rate_parameter": result.flow_rate_parameter,
+                    "flow_acc_parameter": result.flow_acc_parameter,
+                    "k_factor_parameter": result.k_factor_parameter,
+                    "poll_interval_s": result.poll_interval_s,
+                    "pre_snapshot_variable_count": len(result.pre_snapshot),
+                },
+                software_version=__version__,
+            )
+        )
+        self._repository.save_analysis_result(
+            AnalysisResultRecord(
+                result_id=f"{result.run_id}-KFACTOR",
+                run_id=result.run_id,
+                step_id=None,
+                result_type="k_factor_calibration",
+                algorithm_name="simple_flow_segment_k_factor",
+                algorithm_version="0.2",
+                configuration_snapshot={
+                    "formula": "K1 = K0 / (m2 - m1) * standard_mass",
+                    "mean_flow_formula": "(m2 - m1) / (t2 - t1)",
+                },
+                summary_metrics=metrics,
+                pass_fail_decision="passed" if status is RunStatus.PASSED else "failed",
+                created_at=datetime.now(UTC),
+            )
+        )
+
     def _require_device(self) -> FlowmeterDevice:
         if self._device is None:
             raise ConnectionError("Connect the Modbus module first.")
@@ -476,6 +1048,13 @@ class ModbusModuleRuntime:
     def _next_run_id(self) -> str:
         self._sequence += 1
         return f"RUN-{datetime.now(UTC):%Y%m%d}-{self._sequence:06d}"
+
+    def _next_imported_run_id(self, original_run_id: str) -> str:
+        for _attempt in range(100):
+            candidate = f"IMPORTED-{original_run_id}-{uuid4().hex[:8]}"
+            if self._repository.get_run(candidate) is None:
+                return candidate
+        raise RuntimeError(f"Unable to create imported run ID for {original_run_id}.")
 
 
 class _SelectedParameterDevice(FlowmeterDevice):
@@ -738,6 +1317,399 @@ def _sample_one_variable(
         )
     )
     return sample
+
+
+def _pre_calibration_snapshot(
+    device: FlowmeterDevice,
+    names: tuple[str, ...],
+) -> tuple[dict[str, object], datetime | None]:
+    unique_names = _unique_names(names)
+    if not unique_names:
+        return {}, None
+    parameters = _read_selected_parameters(
+        device,
+        unique_names,
+        merge_adjacent=False,
+    )
+    captured_at = datetime.now(UTC)
+    return (
+        {
+            name: _json_metric_value(_find_parameter(parameters, name).value)
+            for name in unique_names
+        },
+        captured_at,
+    )
+
+
+def _k_factor_simple_metrics(result: ModbusKFactorSimpleResult) -> dict[str, object]:
+    metrics: dict[str, object] = {
+        "mode": "simple",
+        "flow_rate_parameter": result.flow_rate_parameter,
+        "flow_acc_parameter": result.flow_acc_parameter,
+        "k_factor_parameter": result.k_factor_parameter,
+        "mass_acc_before": result.mass_acc_before,
+        "mass_acc_after": result.mass_acc_after,
+        "measured_mass_delta": result.measured_mass_delta,
+        "standard_mass": result.standard_mass,
+        "current_k_factor": result.current_k_factor,
+        "corrected_k_factor": result.corrected_k_factor,
+        "mean_flow": result.mean_flow,
+        "instant_flow": result.instant_flow,
+        "duration_s": result.duration_s,
+        "flow_started_at": result.flow_started_at.isoformat(),
+        "flow_instant_at": result.flow_instant_at.isoformat(),
+        "flow_ended_at": result.flow_ended_at.isoformat(),
+        "poll_interval_s": result.poll_interval_s,
+        "write_requested": result.write_requested,
+        "write_status": result.write_status,
+        "write_verified": result.write_verified,
+        "history_saved": result.history_saved,
+    }
+    if result.readback_k_factor is not None:
+        metrics["readback_k_factor"] = result.readback_k_factor
+    if result.audit_id:
+        metrics["audit_id"] = result.audit_id
+    if result.pre_snapshot:
+        metrics["pre_snapshot"] = result.pre_snapshot
+    if result.pre_snapshot_captured_at is not None:
+        metrics["pre_snapshot_captured_at"] = result.pre_snapshot_captured_at.isoformat()
+    return metrics
+
+
+def _json_metric_value(value: object) -> object:
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    return str(value)
+
+
+def _device_record_to_history_payload(record: DeviceRecord) -> dict[str, object]:
+    return {
+        "device_id": record.device_id,
+        "device_type": record.device_type,
+        "serial_number": record.serial_number,
+        "model": record.model,
+        "firmware_version": record.firmware_version,
+        "hardware_version": record.hardware_version,
+        "protocol_address": record.protocol_address,
+        "connection_metadata": record.connection_metadata,
+        "created_at": _datetime_to_history_payload(record.created_at),
+        "updated_at": _datetime_to_history_payload(record.updated_at),
+    }
+
+
+def _device_record_from_history_payload(value: object) -> DeviceRecord | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("device must be an object")
+    device_id = _required_history_str(value, "device_id")
+    device_type = _history_str(value, "device_type") or DeviceType.MODBUS_RTU.value
+    return DeviceRecord(
+        device_id=device_id,
+        device_type=device_type,
+        serial_number=_history_str(value, "serial_number"),
+        model=_history_str(value, "model"),
+        firmware_version=_history_str(value, "firmware_version"),
+        hardware_version=_history_str(value, "hardware_version"),
+        protocol_address=_history_str(value, "protocol_address"),
+        connection_metadata=_history_dict(value, "connection_metadata"),
+        created_at=_history_datetime(value.get("created_at")),
+        updated_at=_history_datetime(value.get("updated_at")),
+    )
+
+
+def _run_session_to_history_payload(run: RunSession) -> dict[str, object]:
+    return {
+        "run_id": run.run_id,
+        "run_type": run.run_type.value,
+        "workflow_name": run.workflow_name,
+        "workflow_version": run.workflow_version,
+        "device_id": run.device_id,
+        "operator": run.operator,
+        "status": run.status.value,
+        "started_at": _datetime_to_history_payload(run.started_at),
+        "ended_at": _datetime_to_history_payload(run.ended_at),
+        "configuration_snapshot": run.configuration_snapshot,
+        "software_version": run.software_version,
+        "notes": run.notes,
+    }
+
+
+def _run_session_from_history_payload(value: object) -> RunSession:
+    if not isinstance(value, dict):
+        raise ValueError("run must be an object")
+    return RunSession(
+        run_id=_required_history_str(value, "run_id"),
+        run_type=RunType(_required_history_str(value, "run_type")),
+        workflow_name=_required_history_str(value, "workflow_name"),
+        workflow_version=_required_history_str(value, "workflow_version"),
+        device_id=_required_history_str(value, "device_id"),
+        operator=_required_history_str(value, "operator"),
+        status=RunStatus(_required_history_str(value, "status")),
+        started_at=_history_datetime(value.get("started_at")),
+        ended_at=_history_datetime(value.get("ended_at")),
+        configuration_snapshot=_history_dict(value, "configuration_snapshot"),
+        software_version=_history_str(value, "software_version"),
+        notes=_history_str(value, "notes"),
+    )
+
+
+def _workflow_step_to_history_payload(step: WorkflowStep) -> dict[str, object]:
+    return {
+        "step_id": step.step_id,
+        "run_id": step.run_id,
+        "name": step.name,
+        "step_type": step.step_type.value,
+        "status": step.status.value,
+        "started_at": _datetime_to_history_payload(step.started_at),
+        "ended_at": _datetime_to_history_payload(step.ended_at),
+        "input_configuration": step.input_configuration,
+        "output_summary": step.output_summary,
+        "error_message": step.error_message,
+    }
+
+
+def _workflow_steps_from_history_payload(value: object) -> tuple[WorkflowStep, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ValueError("workflow_steps must be a list")
+    return tuple(_workflow_step_from_history_payload(item) for item in value)
+
+
+def _workflow_step_from_history_payload(value: object) -> WorkflowStep:
+    if not isinstance(value, dict):
+        raise ValueError("workflow step must be an object")
+    return WorkflowStep(
+        step_id=_required_history_str(value, "step_id"),
+        run_id=_required_history_str(value, "run_id"),
+        name=_required_history_str(value, "name"),
+        step_type=WorkflowStepType(_required_history_str(value, "step_type")),
+        status=WorkflowStepStatus(_required_history_str(value, "status")),
+        started_at=_history_datetime(value.get("started_at")),
+        ended_at=_history_datetime(value.get("ended_at")),
+        input_configuration=_history_dict(value, "input_configuration"),
+        output_summary=_history_dict(value, "output_summary"),
+        error_message=_history_str(value, "error_message"),
+    )
+
+
+def _analysis_result_to_history_payload(
+    result: AnalysisResultRecord,
+) -> dict[str, object]:
+    return {
+        "result_id": result.result_id,
+        "run_id": result.run_id,
+        "step_id": result.step_id,
+        "result_type": result.result_type,
+        "algorithm_name": result.algorithm_name,
+        "algorithm_version": result.algorithm_version,
+        "input_artifact_ids": list(result.input_artifact_ids),
+        "configuration_snapshot": result.configuration_snapshot,
+        "summary_metrics": result.summary_metrics,
+        "pass_fail_decision": result.pass_fail_decision,
+        "created_at": _datetime_to_history_payload(result.created_at),
+    }
+
+
+def _analysis_results_from_history_payload(
+    value: object,
+) -> tuple[AnalysisResultRecord, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ValueError("analysis_results must be a list")
+    return tuple(_analysis_result_from_history_payload(item) for item in value)
+
+
+def _analysis_result_from_history_payload(value: object) -> AnalysisResultRecord:
+    if not isinstance(value, dict):
+        raise ValueError("analysis result must be an object")
+    input_artifact_ids = value.get("input_artifact_ids", [])
+    if not isinstance(input_artifact_ids, list):
+        raise ValueError("input_artifact_ids must be a list")
+    return AnalysisResultRecord(
+        result_id=_required_history_str(value, "result_id"),
+        run_id=_required_history_str(value, "run_id"),
+        step_id=_history_str(value, "step_id"),
+        result_type=_required_history_str(value, "result_type"),
+        algorithm_name=_required_history_str(value, "algorithm_name"),
+        algorithm_version=_required_history_str(value, "algorithm_version"),
+        input_artifact_ids=tuple(str(item) for item in input_artifact_ids),
+        configuration_snapshot=_history_dict(value, "configuration_snapshot"),
+        summary_metrics=_history_dict(value, "summary_metrics"),
+        pass_fail_decision=_history_str(value, "pass_fail_decision"),
+        created_at=_history_datetime(value.get("created_at")),
+    )
+
+
+def _history_run_already_imported(
+    repository: StorageRepository,
+    run: RunSession,
+    analysis_results: tuple[AnalysisResultRecord, ...],
+) -> bool:
+    existing = repository.get_run(run.run_id)
+    if existing is None:
+        return False
+    existing_results = repository.list_analysis_results(run.run_id)
+    return (
+        existing.workflow_name == run.workflow_name
+        and getattr(existing.status, "value", str(existing.status))
+        == getattr(run.status, "value", str(run.status))
+        and existing.started_at == run.started_at
+        and [result.summary_metrics for result in existing_results]
+        == [result.summary_metrics for result in analysis_results]
+    )
+
+
+def _history_entry_in_time_range(
+    entry: ModbusCalibrationHistoryEntry,
+    *,
+    started_from: datetime | None,
+    started_to: datetime | None,
+) -> bool:
+    if entry.started_at is None:
+        return started_from is None and started_to is None
+    started_at = _datetime_as_utc(entry.started_at)
+    if started_from is not None and started_at < _datetime_as_utc(started_from):
+        return False
+    if started_to is not None and started_at > _datetime_as_utc(started_to):
+        return False
+    return True
+
+
+def _remap_imported_run(
+    run: RunSession,
+    *,
+    original_run_id: str,
+    new_run_id: str,
+    imported_at: str,
+) -> RunSession:
+    configuration = dict(run.configuration_snapshot)
+    configuration["imported_from_run_id"] = original_run_id
+    configuration["imported_at"] = imported_at
+    notes = run.notes or ""
+    import_note = f"Imported from {original_run_id}"
+    notes = f"{notes}\n{import_note}" if notes else import_note
+    return replace(
+        run,
+        run_id=new_run_id,
+        configuration_snapshot=configuration,
+        notes=notes,
+    )
+
+
+def _import_step_id_map(
+    steps: tuple[WorkflowStep, ...],
+    *,
+    original_run_id: str,
+    new_run_id: str,
+) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for index, step in enumerate(steps, start=1):
+        if step.step_id.startswith(original_run_id):
+            mapping[step.step_id] = step.step_id.replace(original_run_id, new_run_id, 1)
+        else:
+            mapping[step.step_id] = f"{new_run_id}-STEP-{index:03d}"
+    return mapping
+
+
+def _remap_imported_workflow_step(
+    step: WorkflowStep,
+    *,
+    original_run_id: str,
+    new_run_id: str,
+    step_id_map: dict[str, str],
+    imported_at: str,
+) -> WorkflowStep:
+    input_configuration = dict(step.input_configuration)
+    input_configuration["imported_from_run_id"] = original_run_id
+    input_configuration["imported_at"] = imported_at
+    return replace(
+        step,
+        step_id=step_id_map.get(step.step_id, f"{new_run_id}-{uuid4().hex[:8]}"),
+        run_id=new_run_id,
+        input_configuration=input_configuration,
+    )
+
+
+def _remap_imported_analysis_result(
+    result: AnalysisResultRecord,
+    *,
+    original_run_id: str,
+    new_run_id: str,
+    step_id_map: dict[str, str],
+    imported_at: str,
+) -> AnalysisResultRecord:
+    configuration = dict(result.configuration_snapshot)
+    configuration["imported_from_run_id"] = original_run_id
+    configuration["imported_at"] = imported_at
+    metrics = dict(result.summary_metrics)
+    metrics["imported_from_run_id"] = original_run_id
+    return replace(
+        result,
+        result_id=_remap_imported_result_id(
+            result.result_id,
+            original_run_id=original_run_id,
+            new_run_id=new_run_id,
+        ),
+        run_id=new_run_id,
+        step_id=step_id_map.get(result.step_id) if result.step_id is not None else None,
+        configuration_snapshot=configuration,
+        summary_metrics=metrics,
+    )
+
+
+def _remap_imported_result_id(
+    result_id: str,
+    *,
+    original_run_id: str,
+    new_run_id: str,
+) -> str:
+    if result_id.startswith(original_run_id):
+        return result_id.replace(original_run_id, new_run_id, 1)
+    return f"{new_run_id}-{result_id}"
+
+
+def _datetime_to_history_payload(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+def _datetime_as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _history_datetime(value: object) -> datetime | None:
+    if value in (None, ""):
+        return None
+    if not isinstance(value, str):
+        raise ValueError("datetime value must be a string")
+    return datetime.fromisoformat(value)
+
+
+def _history_str(payload: dict[str, object], key: str) -> str | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    return str(value)
+
+
+def _required_history_str(payload: dict[str, object], key: str) -> str:
+    value = _history_str(payload, key)
+    if not value:
+        raise ValueError(f"missing {key}")
+    return value
+
+
+def _history_dict(payload: dict[str, object], key: str) -> dict[str, Any]:
+    value = payload.get(key)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"{key} must be an object")
+    return dict(value)
 
 
 def _unique_names(names: tuple[str, ...]) -> tuple[str, ...]:

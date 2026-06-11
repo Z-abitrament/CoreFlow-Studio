@@ -133,7 +133,7 @@ Required behavior:
 - Every write attempt must be logged with timestamp, device identity, register name, previous value when available, new value, result, and operator or automation source.
 - Simulator write behavior must match the same code path used for real devices at the application level.
 - Zero calibration must treat the configured start coil or parameter as write-capable and must poll only configured read-capable variables for completion.
-- K factor calibration must calculate the proposed value from recorded accumulated-mass inputs and standard mass, then use a guarded write to the configured K factor parameter.
+- K factor calibration must calculate the proposed value from recorded flow-segment accumulated-mass inputs and standard mass, then use a guarded write to the configured K factor parameter.
 
 Write-capable workflows should use these states:
 
@@ -177,7 +177,7 @@ The Modbus master module supports these headless workflow contracts before UI wi
 
 - Variable sampling: read configured logical variables and persist the value, timestamp, device identity, source channel, and optional run/step reference.
 - Zero calibration: record `zero_offset` and `delta_t` before start, write the configured start coil/parameter through the write guard, poll until the configured completion state is read, then record `zero_offset`, `delta_t`, completion state, and timestamps.
-- K factor calibration: record accumulated mass before/after manual valve operation, accept standard mass from the operator, read or receive current K factor, calculate `k_s = k_r / m_r * m_s`, and apply the new value only through the write guard.
+- K factor calibration: capture selected pre-operation variables, read accumulated mass `m1` and current K factor, poll the configured flow-rate variable until a non-zero flow segment starts and then returns to zero, record the instantaneous flow sample and ending accumulated mass `m2`, accept standard mass from the operator, calculate `k_s = k_r / m_r * m_s`, and apply the new value only through the write guard with readback verification when requested.
 - Error/repeatability: for three configured flow points and three trials per point, calculate trial percent error and per-flow-point repeatability standard deviation from stored inputs.
 
 ## Modbus Listener Diagnostics

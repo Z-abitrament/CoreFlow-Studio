@@ -148,7 +148,7 @@ Fields:
 - Preview or applied status.
 - Write audit references.
 - Zero calibration before/after `zero_offset`, `delta_t`, timestamps, control parameter, and completion status.
-- K factor calibration accumulated-mass before/after, measured mass delta, standard mass, current K factor, corrected K factor, and write result.
+- K factor calibration pre-operation snapshot values, flow-rate segment timestamps, instantaneous flow sample, accumulated-mass before/after, measured mass delta, standard mass, current K factor, corrected K factor, mean flow, write request/apply/verify status, and readback value when available.
 - Manual repeatability test flow points, trial inputs, percent errors, and per-flow-point repeatability standard deviations.
 
 ### Artifact
@@ -209,6 +209,7 @@ Initial formats:
 
 - CSV for simple tabular exports.
 - JSON for configuration snapshots, simulator scenarios, and workflow templates.
+- JSON for standalone Modbus calibration-history transfer packages between lab PCs.
 - JSON for ASIO/IIS loopback diagnostics.
 - SQLite for metadata and small structured results.
 - Plain text or JSON lines for diagnostic logs.
@@ -246,6 +247,16 @@ v1 is local-first. A complete run package should be portable by copying:
 - Report/export files.
 
 Full backup and restore tools are future work.
+
+Standalone Modbus calibration history can also be moved between PCs with a
+module-specific JSON package. That package stores completed Modbus calibration
+run metadata, workflow steps, analysis metrics, notes, and device metadata for
+zero calibration, K factor calibration, and repeatability records. Import skips
+identical run IDs and preserves conflicting imported runs under a new imported
+run ID so independent test PCs do not overwrite each other's local history. The
+package metadata records the selected operation filter and optional started-at
+time range used for export. Excel export is reserved for a later
+reporting/export pass; JSON remains the portable interchange format for now.
 
 ## Known Unknowns
 - Final report file format.

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from serial import SerialException
+
 from coreflow.protocols.modbus import RegisterKind, SerialConfig
 from coreflow.protocols.modbus.transport import PymodbusSerialTransport
 
@@ -66,6 +68,16 @@ class _DisconnectedClient:
         return _RegisterPayloadResponse()
 
 
+class _FailingOpenClient:
+    connected = False
+
+    def connect(self) -> bool:
+        raise SerialException("Access is denied.")
+
+    def close(self) -> None:
+        return None
+
+
 def test_pymodbus_transport_decodes_bit_payload_when_bits_is_empty() -> None:
     transport = PymodbusSerialTransport(SerialConfig(port="COM1", unit_id=1))
     transport._client = _ClientWithEmptyBits()
@@ -97,3 +109,28 @@ def test_pymodbus_transport_reconnects_before_request_when_client_closed() -> No
     assert response.values == [0x1234]
     assert client.connect_count == 1
     assert client.read_count == 1
+
+
+def test_pymodbus_transport_reports_serial_open_details() -> None:
+    transport = PymodbusSerialTransport(
+        SerialConfig(
+            port="COM42",
+            unit_id=1,
+            baudrate=9600,
+            parity="E",
+            stop_bits=2,
+            read_timeout_s=1.5,
+        )
+    )
+    transport._client = _FailingOpenClient()
+
+    assert transport.connect() is False
+    assert transport.last_error is not None
+    assert "COM42" in transport.last_error
+    assert "9600 baud" in transport.last_error
+    assert "8E2" in transport.last_error
+    assert "Access is denied." in transport.last_error
+
+    response = transport.read_registers(RegisterKind.HOLDING, 4, 1, 1)
+
+    assert response.error == transport.last_error

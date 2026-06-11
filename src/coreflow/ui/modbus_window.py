@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+import json
 from datetime import UTC, datetime
+from pathlib import Path
+from threading import Event
 
 from shiboken6 import isValid
-from PySide6.QtCore import QMimeData, Qt, QThreadPool, QTimer
+from PySide6.QtCore import QDateTime, QMimeData, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QAction, QDrag, QKeySequence
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -15,7 +17,9 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -32,12 +36,17 @@ from PySide6.QtWidgets import (
     QTextEdit,
     QVBoxLayout,
     QWidget,
+    QDateTimeEdit,
 )
 
 from coreflow.analysis.calibration import RepeatabilityTrial
 from coreflow.app.modbus_runtime import (
     ModbusCalibrationHistoryEntry,
+    ModbusCalibrationHistoryExportResult,
+    ModbusCalibrationHistoryImportResult,
     ModbusConnectionSettings,
+    ModbusKFactorSimpleCapture,
+    ModbusKFactorSimpleResult,
     ModbusModuleRuntime,
     ModbusVariableSampleResult,
     ModbusZeroCalibrationResult,
@@ -438,8 +447,480 @@ class ZeroCalibrationDialog(QDialog):
         self.resultTable.setItem(row, column, item)
 
 
+class KFactorCalibrationDialog(QDialog):
+    """Operator-facing K factor simple calibration dialog."""
+
+    cancelRequested = Signal()
+
+    def __init__(self, *, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("K Factor Calibration")
+        self.setModal(False)
+        self.setSizeGripEnabled(True)
+        self.resize(860, 720)
+        self.setMinimumSize(680, 520)
+        self._capture: ModbusKFactorSimpleCapture | None = None
+        self._result: ModbusKFactorSimpleResult | None = None
+        self._build_ui()
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt override name
+        self.cancelRequested.emit()
+        super().closeEvent(event)
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(10)
+
+        self.statusLabel = QLabel("Ready")
+        self.statusLabel.setObjectName("modbusKFactorStatusLabel")
+        root.addWidget(self.statusLabel)
+
+        settings_group = QGroupBox("Simple Mode")
+        settings = QFormLayout(settings_group)
+        self.modeCombo = QComboBox()
+        self.modeCombo.setObjectName("modbusKFactorModeCombo")
+        self.modeCombo.addItem("Simple", "simple")
+        self.modeCombo.addItem("Advanced (reserved)", "advanced")
+        self.modeCombo.model().item(1).setEnabled(False)
+        settings.addRow("Mode", self.modeCombo)
+        self.flowRateCombo = QComboBox()
+        self.flowRateCombo.setObjectName("modbusKFactorFlowRateCombo")
+        settings.addRow("Flow Rate", self.flowRateCombo)
+        self.flowAccCombo = QComboBox()
+        self.flowAccCombo.setObjectName("modbusKFactorFlowAccCombo")
+        settings.addRow("Flow Acc", self.flowAccCombo)
+        self.kFactorCombo = QComboBox()
+        self.kFactorCombo.setObjectName("modbusKFactorParameterCombo")
+        settings.addRow("K Factor", self.kFactorCombo)
+        self.pollIntervalSpinBox = QDoubleSpinBox()
+        self.pollIntervalSpinBox.setObjectName("modbusKFactorPollIntervalSpinBox")
+        self.pollIntervalSpinBox.setRange(0.05, 30.0)
+        self.pollIntervalSpinBox.setDecimals(2)
+        self.pollIntervalSpinBox.setSingleStep(0.1)
+        self.pollIntervalSpinBox.setValue(1.0)
+        settings.addRow("Poll Interval (s)", self.pollIntervalSpinBox)
+        self.standardMassSpinBox = _float_input(12.6)
+        self.standardMassSpinBox.setObjectName("modbusKFactorStandardMassSpinBox")
+        self.standardMassSpinBox.setMinimum(0.000001)
+        settings.addRow("Standard Mass", self.standardMassSpinBox)
+        self.saveHistoryCheckBox = QCheckBox("Record calibration history")
+        self.saveHistoryCheckBox.setObjectName("modbusKFactorSaveHistoryCheckBox")
+        self.saveHistoryCheckBox.setChecked(True)
+        settings.addRow("", self.saveHistoryCheckBox)
+        self.writeToDeviceCheckBox = QCheckBox("Write K1 to device after calculation")
+        self.writeToDeviceCheckBox.setObjectName("modbusKFactorWriteToDeviceCheckBox")
+        settings.addRow("", self.writeToDeviceCheckBox)
+        root.addWidget(settings_group, 1)
+
+        snapshot_group = QGroupBox("Pre-calibration Snapshot")
+        snapshot_layout = QVBoxLayout(snapshot_group)
+        self.snapshotTable = QTableWidget(0, 5)
+        self.snapshotTable.setObjectName("modbusKFactorSnapshotTable")
+        self.snapshotTable.setHorizontalHeaderLabels(
+            ["Capture", "Variable", "Kind", "Address", "Type"]
+        )
+        self.snapshotTable.verticalHeader().setVisible(False)
+        self.snapshotTable.setAlternatingRowColors(True)
+        self.snapshotTable.setSelectionMode(
+            QAbstractItemView.SelectionMode.NoSelection
+        )
+        self.snapshotTable.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
+        self.snapshotTable.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+        )
+        snapshot_layout.addWidget(self.snapshotTable)
+        root.addWidget(snapshot_group, 2)
+
+        self.resultTable = QTableWidget(0, 2)
+        self.resultTable.setObjectName("modbusKFactorResultTable")
+        self.resultTable.setHorizontalHeaderLabels(["Metric", "Value"])
+        self.resultTable.verticalHeader().setVisible(False)
+        self.resultTable.setAlternatingRowColors(True)
+        self.resultTable.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectItems
+        )
+        self.resultTable.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        self.resultTable.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
+        self.resultTable.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+        )
+        root.addWidget(self.resultTable, 2)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        self.startButton = QPushButton("Start")
+        self.startButton.setObjectName("modbusKFactorStartButton")
+        self.calculateButton = QPushButton("Calculate")
+        self.calculateButton.setObjectName("modbusKFactorCalculateButton")
+        self.calculateButton.setEnabled(False)
+        self.writeButton = QPushButton("Write K1")
+        self.writeButton.setObjectName("modbusKFactorWriteButton")
+        self.writeButton.setEnabled(False)
+        self.saveConfigButton = QPushButton("Save Configuration")
+        self.saveConfigButton.setObjectName("modbusKFactorSaveConfigButton")
+        self.closeButton = QPushButton("Close")
+        self.closeButton.setObjectName("modbusKFactorCloseButton")
+        self.closeButton.clicked.connect(self.close)
+        buttons.addWidget(self.startButton)
+        buttons.addWidget(self.calculateButton)
+        buttons.addWidget(self.writeButton)
+        buttons.addWidget(self.saveConfigButton)
+        buttons.addWidget(self.closeButton)
+        root.addLayout(buttons)
+
+    def set_registers(
+        self,
+        registers: tuple[ModbusRegister, ...],
+        *,
+        selected_names: tuple[str, ...] | None = None,
+    ) -> None:
+        names = tuple(register.name for register in registers)
+        self._set_combo_items(self.flowRateCombo, names, ("flow_rate", "mass_rate", "mass_flow"))
+        self._set_combo_items(self.flowAccCombo, names, ("flow_acc", "mass_acc"))
+        self._set_combo_items(self.kFactorCombo, names, ("k_factor",))
+        if selected_names is None:
+            selected_names = self.selected_snapshot_variable_names()
+        if not selected_names:
+            selected_names = _default_zero_snapshot_names(registers)
+        selected = set(selected_names)
+        self.snapshotTable.setRowCount(len(registers))
+        for row, register in enumerate(registers):
+            check_item = QTableWidgetItem("")
+            check_item.setFlags(
+                Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable
+            )
+            check_item.setCheckState(
+                Qt.CheckState.Checked
+                if register.name in selected
+                else Qt.CheckState.Unchecked
+            )
+            self.snapshotTable.setItem(row, 0, check_item)
+            values = (
+                register.name,
+                register.kind.value,
+                str(register.address),
+                register.data_type.value,
+            )
+            for offset, value in enumerate(values, start=1):
+                item = QTableWidgetItem(value)
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self.snapshotTable.setItem(row, offset, item)
+
+    def selected_snapshot_variable_names(self) -> tuple[str, ...]:
+        names: list[str] = []
+        for row in range(self.snapshotTable.rowCount()):
+            check_item = self.snapshotTable.item(row, 0)
+            if check_item is None or check_item.checkState() != Qt.CheckState.Checked:
+                continue
+            name = _table_text(self.snapshotTable, row, 1)
+            if name:
+                names.append(name)
+        return tuple(names)
+
+    def set_ready(self, *, connected: bool) -> None:
+        self.startButton.setEnabled(connected)
+        self.calculateButton.setEnabled(connected and self._capture is not None)
+        self.writeButton.setEnabled(connected and self._result is not None)
+        self.saveConfigButton.setEnabled(True)
+        self._set_inputs_enabled(connected)
+        if connected and self.statusLabel.text() == "Running...":
+            self.statusLabel.setText("Ready")
+
+    def set_running(self) -> None:
+        self.statusLabel.setText("Running...")
+        self.startButton.setEnabled(False)
+        self.calculateButton.setEnabled(False)
+        self.writeButton.setEnabled(False)
+        self.saveConfigButton.setEnabled(False)
+        self._set_inputs_enabled(False)
+
+    def set_canceling(self) -> None:
+        self.statusLabel.setText("Canceling...")
+        self.startButton.setEnabled(False)
+        self.calculateButton.setEnabled(False)
+        self.writeButton.setEnabled(False)
+        self.saveConfigButton.setEnabled(False)
+        self._set_inputs_enabled(False)
+
+    def set_captured(self, capture: ModbusKFactorSimpleCapture) -> None:
+        self._capture = capture
+        self._result = None
+        self.statusLabel.setText(
+            "Captured flow segment. Enter standard mass and click Calculate."
+        )
+        self.calculateButton.setEnabled(True)
+        self.writeButton.setEnabled(False)
+        self.saveConfigButton.setEnabled(True)
+        self._set_inputs_enabled(True)
+        self._populate_rows(
+            [
+                ("run_id", capture.run_id),
+                ("m1", capture.mass_acc_before),
+                ("m2", capture.mass_acc_after),
+                ("delta_m", capture.measured_mass_delta),
+                ("K0", capture.current_k_factor),
+                ("t1", _format_datetime(capture.segment.started_at)),
+                ("t2", _format_datetime(capture.segment.ended_at)),
+                ("duration_s", capture.segment.duration_s),
+                ("v1", capture.segment.instant_flow),
+            ]
+        )
+
+    def set_result(self, result: ModbusKFactorSimpleResult) -> None:
+        self._result = result
+        self.statusLabel.setText(f"Calculated {result.run_id}")
+        self.calculateButton.setEnabled(True)
+        self.writeButton.setEnabled(True)
+        self.saveConfigButton.setEnabled(True)
+        self._set_inputs_enabled(True)
+        self._populate_result(result)
+
+    def set_write_result(self, result: ModbusKFactorSimpleResult) -> None:
+        self._result = result
+        self.statusLabel.setText(
+            f"Write {result.write_status}; verified: {result.write_verified}"
+        )
+        self.writeButton.setEnabled(False)
+        self.saveConfigButton.setEnabled(True)
+        self._set_inputs_enabled(True)
+        self._populate_result(result)
+
+    def set_error(self, message: str) -> None:
+        self.statusLabel.setText(f"Failed: {message}")
+        self.startButton.setEnabled(True)
+        self.calculateButton.setEnabled(self._capture is not None)
+        self.writeButton.setEnabled(self._result is not None)
+        self.saveConfigButton.setEnabled(True)
+        self._set_inputs_enabled(True)
+
+    def capture_settings(self) -> dict[str, object]:
+        return {
+            "snapshot_variable_names": self.selected_snapshot_variable_names(),
+            "flow_rate_parameter": self.flowRateCombo.currentText(),
+            "flow_acc_parameter": self.flowAccCombo.currentText(),
+            "k_factor_parameter": self.kFactorCombo.currentText(),
+            "poll_interval_s": self.pollIntervalSpinBox.value(),
+        }
+
+    def apply_configuration(self, settings: dict[str, object]) -> None:
+        self._set_combo_text(self.flowRateCombo, settings.get("flow_rate_parameter"))
+        self._set_combo_text(self.flowAccCombo, settings.get("flow_acc_parameter"))
+        self._set_combo_text(self.kFactorCombo, settings.get("k_factor_parameter"))
+        poll_interval = settings.get("poll_interval_s")
+        if isinstance(poll_interval, (int, float)):
+            self.pollIntervalSpinBox.setValue(float(poll_interval))
+        snapshot_names = settings.get("snapshot_variable_names")
+        if isinstance(snapshot_names, (list, tuple)):
+            selected = {str(name) for name in snapshot_names}
+            for row in range(self.snapshotTable.rowCount()):
+                check_item = self.snapshotTable.item(row, 0)
+                if check_item is None:
+                    continue
+                name = _table_text(self.snapshotTable, row, 1)
+                check_item.setCheckState(
+                    Qt.CheckState.Checked
+                    if name in selected
+                    else Qt.CheckState.Unchecked
+                )
+
+    def standard_mass(self) -> float:
+        return self.standardMassSpinBox.value()
+
+    def save_history(self) -> bool:
+        return self.saveHistoryCheckBox.isChecked()
+
+    def should_write_to_device(self) -> bool:
+        return self.writeToDeviceCheckBox.isChecked()
+
+    def current_capture(self) -> ModbusKFactorSimpleCapture | None:
+        return self._capture
+
+    def current_result(self) -> ModbusKFactorSimpleResult | None:
+        return self._result
+
+    def _populate_result(self, result: ModbusKFactorSimpleResult) -> None:
+        rows = [
+            ("run_id", result.run_id),
+            ("m1", result.mass_acc_before),
+            ("m2", result.mass_acc_after),
+            ("delta_m", result.measured_mass_delta),
+            ("standard_mass", result.standard_mass),
+            ("K0", result.current_k_factor),
+            ("K1", result.corrected_k_factor),
+            ("v_mean", result.mean_flow),
+            ("v1", result.instant_flow),
+            ("t1", _format_datetime(result.flow_started_at)),
+            ("t2", _format_datetime(result.flow_ended_at)),
+            ("duration_s", result.duration_s),
+            ("history_saved", result.history_saved),
+            ("write_status", result.write_status),
+            ("write_verified", result.write_verified),
+        ]
+        if result.readback_k_factor is not None:
+            rows.append(("readback_k_factor", result.readback_k_factor))
+        self._populate_rows(rows)
+
+    def _populate_rows(self, rows: list[tuple[str, object]]) -> None:
+        self.resultTable.setRowCount(len(rows))
+        for row, (name, value) in enumerate(rows):
+            for column, text in enumerate((name, _format_value(value))):
+                item = QTableWidgetItem(text)
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self.resultTable.setItem(row, column, item)
+
+    def _set_combo_items(
+        self,
+        combo: QComboBox,
+        names: tuple[str, ...],
+        preferred: tuple[str, ...],
+    ) -> None:
+        current = combo.currentText()
+        combo.clear()
+        combo.addItems(names)
+        target = current if current in names else ""
+        if not target:
+            target = next((name for name in preferred if name in names), names[0] if names else "")
+        if target:
+            combo.setCurrentText(target)
+
+    def _set_combo_text(self, combo: QComboBox, value: object) -> None:
+        if not isinstance(value, str):
+            return
+        index = combo.findText(value)
+        if index >= 0:
+            combo.setCurrentIndex(index)
+
+    def _set_inputs_enabled(self, enabled: bool) -> None:
+        for widget in (
+            self.modeCombo,
+            self.flowRateCombo,
+            self.flowAccCombo,
+            self.kFactorCombo,
+            self.pollIntervalSpinBox,
+            self.standardMassSpinBox,
+            self.saveHistoryCheckBox,
+            self.writeToDeviceCheckBox,
+            self.snapshotTable,
+        ):
+            widget.setEnabled(enabled)
+
+
+class CalibrationHistoryExportDialog(QDialog):
+    """Select operation and started-at range before exporting history."""
+
+    def __init__(
+        self,
+        *,
+        operation: str | None = "all",
+        entries: tuple[ModbusCalibrationHistoryEntry, ...] = (),
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Export Calibration History")
+        self.setModal(True)
+        self.setMinimumWidth(460)
+        self._build_ui()
+        self.set_operation(operation)
+        self.set_default_range(entries)
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(10)
+
+        form = QFormLayout()
+        self.operationCombo = QComboBox()
+        self.operationCombo.setObjectName("modbusHistoryExportOperationCombo")
+        for label, value in CalibrationHistoryDialog.OPERATIONS:
+            self.operationCombo.addItem(label, value)
+        form.addRow("Operation", self.operationCombo)
+
+        self.fromCheckBox = QCheckBox("From")
+        self.fromCheckBox.setObjectName("modbusHistoryExportFromCheckBox")
+        self.fromDateTimeEdit = QDateTimeEdit()
+        self.fromDateTimeEdit.setObjectName("modbusHistoryExportFromDateTime")
+        self.fromDateTimeEdit.setCalendarPopup(True)
+        self.fromDateTimeEdit.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
+        from_row = QHBoxLayout()
+        from_row.addWidget(self.fromCheckBox)
+        from_row.addWidget(self.fromDateTimeEdit, 1)
+        form.addRow("Started", from_row)
+
+        self.toCheckBox = QCheckBox("To")
+        self.toCheckBox.setObjectName("modbusHistoryExportToCheckBox")
+        self.toDateTimeEdit = QDateTimeEdit()
+        self.toDateTimeEdit.setObjectName("modbusHistoryExportToDateTime")
+        self.toDateTimeEdit.setCalendarPopup(True)
+        self.toDateTimeEdit.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
+        to_row = QHBoxLayout()
+        to_row.addWidget(self.toCheckBox)
+        to_row.addWidget(self.toDateTimeEdit, 1)
+        form.addRow("", to_row)
+        root.addLayout(form)
+
+        self.fromCheckBox.toggled.connect(self.fromDateTimeEdit.setEnabled)
+        self.toCheckBox.toggled.connect(self.toDateTimeEdit.setEnabled)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+    def set_operation(self, operation: str | None) -> None:
+        operation_value = operation if operation not in (None, "") else "all"
+        index = self.operationCombo.findData(operation_value)
+        if index >= 0:
+            self.operationCombo.setCurrentIndex(index)
+
+    def set_default_range(
+        self,
+        entries: tuple[ModbusCalibrationHistoryEntry, ...],
+    ) -> None:
+        started_values = [entry.started_at for entry in entries if entry.started_at]
+        if started_values:
+            from_value = min(started_values)
+            to_value = max(started_values)
+        else:
+            now = datetime.now().astimezone()
+            from_value = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            to_value = now
+        self.fromDateTimeEdit.setDateTime(_qt_datetime_from_datetime(from_value))
+        self.toDateTimeEdit.setDateTime(_qt_datetime_from_datetime(to_value))
+        self.fromCheckBox.setChecked(False)
+        self.toCheckBox.setChecked(False)
+        self.fromDateTimeEdit.setEnabled(False)
+        self.toDateTimeEdit.setEnabled(False)
+
+    def selected_operation(self) -> str:
+        value = self.operationCombo.currentData()
+        return str(value) if value else "all"
+
+    def selected_started_from(self) -> datetime | None:
+        if not self.fromCheckBox.isChecked():
+            return None
+        return _datetime_from_qt_datetime(self.fromDateTimeEdit.dateTime())
+
+    def selected_started_to(self) -> datetime | None:
+        if not self.toCheckBox.isChecked():
+            return None
+        return _datetime_from_qt_datetime(self.toDateTimeEdit.dateTime())
+
+
 class CalibrationHistoryDialog(QDialog):
     """Historical calibration run table with editable notes."""
+
+    exportRequested = Signal(object)
+    importRequested = Signal()
 
     TIME_COLUMN = 0
     OPERATION_COLUMN = 1
@@ -486,8 +967,14 @@ class CalibrationHistoryDialog(QDialog):
             self.operationCombo.addItem(label, value)
         self.refreshButton = QPushButton("Refresh")
         self.refreshButton.setObjectName("modbusHistoryRefreshButton")
+        self.importButton = QPushButton("Import...")
+        self.importButton.setObjectName("modbusHistoryImportButton")
+        self.exportButton = QPushButton("Export...")
+        self.exportButton.setObjectName("modbusHistoryExportButton")
         filters.addWidget(self.operationCombo)
         filters.addStretch(1)
+        filters.addWidget(self.importButton)
+        filters.addWidget(self.exportButton)
         filters.addWidget(self.refreshButton)
         root.addLayout(filters)
 
@@ -560,6 +1047,10 @@ class CalibrationHistoryDialog(QDialog):
     def _connect_signals(self) -> None:
         self.operationCombo.currentIndexChanged.connect(self.refresh)
         self.refreshButton.clicked.connect(self.refresh)
+        self.importButton.clicked.connect(self.importRequested.emit)
+        self.exportButton.clicked.connect(
+            lambda: self.exportRequested.emit(self.operationCombo.currentData())
+        )
         self.copyAction.triggered.connect(self.copy_selection)
         self.historyTable.customContextMenuRequested.connect(
             lambda point: self._show_context_menu(self.historyTable, point)
@@ -697,17 +1188,23 @@ class ModbusModuleWindow(QDialog):
         self._polling = False
         self._last_order = "ABCD"
         self._pending_map_load_error: str | None = None
+        self._pending_k_factor_load_error: str | None = None
         self._zero_snapshot_variable_names: tuple[str, ...] | None = None
+        self._saved_k_factor_configuration: dict[str, object] = {}
+        self._k_factor_snapshot_variable_names: tuple[str, ...] | None = None
+        self._k_factor_cancel_event: Event | None = None
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(1000)
         self._poll_timer.timeout.connect(self._poll_selected_variables)
         self.connectionDialog: ModbusConnectionDialog | None = None
         self.zeroCalibrationDialog: ZeroCalibrationDialog | None = None
+        self.kFactorDialog: KFactorCalibrationDialog | None = None
         self.calibrationHistoryDialog: CalibrationHistoryDialog | None = None
         self.setWindowTitle("Modbus Module")
         self.resize(1280, 820)
         self.setMinimumSize(1080, 520)
         self._load_saved_register_map()
+        self._load_saved_k_factor_configuration()
         self._build_ui()
         self._connect_signals()
         self._sync_status()
@@ -715,6 +1212,10 @@ class ModbusModuleWindow(QDialog):
         self._log("Ready. This module connection is independent from simulator channels.")
         if self._pending_map_load_error:
             self._log(f"Saved variable map ignored: {self._pending_map_load_error}")
+        if self._pending_k_factor_load_error:
+            self._log(
+                f"Saved K factor configuration ignored: {self._pending_k_factor_load_error}"
+            )
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -906,15 +1407,28 @@ class ModbusModuleWindow(QDialog):
         self.repeatabilityAction.triggered.connect(self._repeatability)
         self.calibrationHistoryAction.triggered.connect(self._open_calibration_history)
 
+    def showEvent(self, event) -> None:  # noqa: N802 - Qt override name
+        self._closing = False
+        self._sync_status()
+        self._set_controls_enabled(True)
+        super().showEvent(event)
+
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override name
         self._closing = True
-        self._queue_shutdown_disconnect()
+        self._stop_polling()
+        if self._busy and self._k_factor_cancel_event is not None:
+            self._cancel_k_factor_capture()
+        elif self.runtime.status.connected and not self._busy:
+            try:
+                status = self.runtime.disconnect()
+            except Exception as exc:
+                self._log(f"Disconnect on close failed: {exc}")
+            else:
+                self.statusValueLabel.setText(status.message)
+                if self.connectionDialog is not None and isValid(self.connectionDialog):
+                    self.connectionDialog.set_status(status.message)
+        self._set_controls_enabled(True)
         super().closeEvent(event)
-
-    def _queue_shutdown_disconnect(self) -> None:
-        task = WorkflowTask(self.runtime.disconnect)
-        self._active_tasks.append(task)
-        self._thread_pool.start(task)
 
     def refresh_ports(self) -> None:
         self._run_task(
@@ -959,6 +1473,51 @@ class ModbusModuleWindow(QDialog):
         if self._data_root is None:
             return None
         return self._data_root / "config" / "register_maps" / "modbus_module_map.json"
+
+    def _load_saved_k_factor_configuration(self) -> None:
+        path = self._saved_k_factor_configuration_path()
+        if path is None or not path.exists():
+            return
+        try:
+            settings = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(settings, dict):
+                raise ValueError("configuration root must be an object")
+        except Exception as exc:
+            self._pending_k_factor_load_error = str(exc)
+            return
+        self._saved_k_factor_configuration = settings
+        snapshot_names = settings.get("snapshot_variable_names")
+        if isinstance(snapshot_names, list):
+            self._k_factor_snapshot_variable_names = tuple(str(name) for name in snapshot_names)
+        self._pending_k_factor_load_error = None
+
+    def _save_k_factor_configuration(self) -> None:
+        dialog = self._ensure_k_factor_dialog()
+        path = self._saved_k_factor_configuration_path()
+        if path is None:
+            dialog.set_error("data root is not configured")
+            self._log("Save K factor configuration failed: data root is not configured.")
+            return
+        settings = dialog.capture_settings()
+        self._saved_k_factor_configuration = dict(settings)
+        self._k_factor_snapshot_variable_names = tuple(settings["snapshot_variable_names"])
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(settings, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            dialog.set_error(str(exc))
+            self._log(f"Save K factor configuration failed: {exc}")
+            return
+        dialog.statusLabel.setText("Configuration saved")
+        self._log(f"K factor configuration saved: {path}")
+
+    def _saved_k_factor_configuration_path(self) -> Path | None:
+        if self._data_root is None:
+            return None
+        return self._data_root / "config" / "workflow_templates" / "modbus_k_factor_simple.json"
 
     def _open_connection_dialog(self) -> None:
         if self.connectionDialog is None:
@@ -1020,7 +1579,10 @@ class ModbusModuleWindow(QDialog):
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
-        dialog.set_ready(connected=self.runtime.status.connected)
+        if self._busy and self._k_factor_cancel_event is not None:
+            dialog.set_canceling()
+        else:
+            dialog.set_ready(connected=self.runtime.status.connected and not self._busy)
 
     def _start_zero_calibration(self) -> None:
         dialog = self._ensure_zero_calibration_dialog()
@@ -1086,28 +1648,294 @@ class ModbusModuleWindow(QDialog):
                 self.runtime,
                 parent=self,
             )
+            self.calibrationHistoryDialog.importRequested.connect(
+                self._import_calibration_history
+            )
+            self.calibrationHistoryDialog.exportRequested.connect(
+                self._export_calibration_history
+            )
         else:
             self.calibrationHistoryDialog.refresh()
         self.calibrationHistoryDialog.show()
         self.calibrationHistoryDialog.raise_()
         self.calibrationHistoryDialog.activateWindow()
 
+    def _export_calibration_history(self, operation: object = None) -> None:
+        if self._busy:
+            self._log("Export history skipped: another Modbus operation is running.")
+            return
+        operation_filter = str(operation) if isinstance(operation, str) else None
+        entries = self.runtime.list_calibration_history(operation=operation_filter)
+        options = CalibrationHistoryExportDialog(
+            operation=operation_filter,
+            entries=entries,
+            parent=self,
+        )
+        if options.exec() != QDialog.DialogCode.Accepted:
+            return
+        operation_filter = options.selected_operation()
+        started_from = options.selected_started_from()
+        started_to = options.selected_started_to()
+        if (
+            started_from is not None
+            and started_to is not None
+            and started_from > started_to
+        ):
+            self._log("Export history failed: start time is after end time.")
+            return
+        default_path = self._default_calibration_history_export_path(operation_filter)
+        file_name, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export Calibration History",
+            str(default_path),
+            "CoreFlow Modbus calibration history (*.json);;Excel workbook (*.xlsx)",
+        )
+        if not file_name:
+            return
+        if "Excel" in selected_filter or Path(file_name).suffix.lower() in {
+            ".xlsx",
+            ".xls",
+        }:
+            self._log("Export history failed: Excel export is reserved for a future release.")
+            return
+        self._run_task(
+            "Export history",
+            lambda: self.runtime.export_calibration_history(
+                file_name,
+                operation=operation_filter,
+                started_from=started_from,
+                started_to=started_to,
+            ),
+            self._history_export_finished,
+            requires_connection=False,
+        )
+
+    def _import_calibration_history(self) -> None:
+        if self._busy:
+            self._log("Import history skipped: another Modbus operation is running.")
+            return
+        start_dir = self._default_calibration_history_directory()
+        file_name, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "Import Calibration History",
+            str(start_dir),
+            "CoreFlow Modbus calibration history (*.json)",
+        )
+        if not file_name:
+            return
+        self._run_task(
+            "Import history",
+            lambda: self.runtime.import_calibration_history(file_name),
+            self._history_import_finished,
+            requires_connection=False,
+        )
+
+    def _default_calibration_history_directory(self) -> Path:
+        if self._data_root is not None:
+            return self._data_root / "exports" / "modbus"
+        return Path.cwd()
+
+    def _default_calibration_history_export_path(self, operation: str | None) -> Path:
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        operation_name = operation if operation not in (None, "", "all") else "all"
+        filename = f"modbus_calibration_history_{operation_name}_{stamp}.json"
+        return self._default_calibration_history_directory() / filename
+
     def _k_factor(self) -> None:
-        mass_acc_before = self.massAccBeforeSpinBox.value()
-        mass_acc_after = self.massAccAfterSpinBox.value()
-        standard_mass = self.standardMassSpinBox.value()
-        current_k_factor = self.currentKFactorSpinBox.value()
+        dialog = self._ensure_k_factor_dialog()
+        self._refresh_k_factor_registers(dialog)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        dialog.set_ready(connected=self.runtime.status.connected)
+
+    def _start_k_factor_capture(self) -> None:
+        dialog = self._ensure_k_factor_dialog()
+        settings = dialog.capture_settings()
+        snapshot_names = tuple(settings["snapshot_variable_names"])
+        self._k_factor_snapshot_variable_names = snapshot_names
+        if self._busy:
+            dialog.set_error("another Modbus operation is running")
+            return
+        if not self.runtime.status.connected:
+            dialog.set_error("connect the Modbus module first")
+            self._log("K factor failed: connect the Modbus module first.")
+            return
+        cancel_event = Event()
+        self._k_factor_cancel_event = cancel_event
+        dialog.set_running()
         self._run_task(
             "K factor",
-            lambda: self.runtime.run_k_factor_calibration(
-                mass_acc_before=mass_acc_before,
-                mass_acc_after=mass_acc_after,
-                standard_mass=standard_mass,
-                current_k_factor=current_k_factor,
+            lambda: self.runtime.capture_k_factor_simple_trial(
+                snapshot_variable_names=snapshot_names,
+                flow_rate_parameter=str(settings["flow_rate_parameter"]),
+                flow_acc_parameter=str(settings["flow_acc_parameter"]),
+                k_factor_parameter=str(settings["k_factor_parameter"]),
+                poll_interval_s=float(settings["poll_interval_s"]),
+                cancel_requested=cancel_event.is_set,
             ),
-            lambda run_id: self._log(f"K factor completed {run_id}"),
+            self._k_factor_capture_finished,
             requires_connection=True,
         )
+
+    def _calculate_k_factor_result(self) -> None:
+        dialog = self._ensure_k_factor_dialog()
+        capture = dialog.current_capture()
+        if capture is None:
+            dialog.set_error("capture a flow segment first")
+            return
+        try:
+            result = self.runtime.calculate_k_factor_simple_result(
+                capture,
+                standard_mass=dialog.standard_mass(),
+                save_history=dialog.save_history(),
+            )
+        except Exception as exc:
+            dialog.set_error(str(exc))
+            self._log(f"K factor calculation failed: {exc}")
+            return
+        dialog.set_result(result)
+        self._log(f"K factor calculated {result.run_id}")
+        if (
+            result.history_saved
+            and self.calibrationHistoryDialog is not None
+            and isValid(self.calibrationHistoryDialog)
+        ):
+            self.calibrationHistoryDialog.refresh()
+        if (
+            dialog.should_write_to_device()
+            and self.runtime.status.connected
+            and not self._busy
+        ):
+            self._write_k_factor_result()
+
+    def _write_k_factor_result(self) -> None:
+        dialog = self._ensure_k_factor_dialog()
+        result = dialog.current_result()
+        if result is None:
+            dialog.set_error("calculate K1 first")
+            return
+        self._run_task(
+            "K factor write",
+            lambda: self.runtime.apply_k_factor_simple_result(result),
+            self._k_factor_write_finished,
+            requires_connection=True,
+        )
+
+    def _ensure_k_factor_dialog(self) -> KFactorCalibrationDialog:
+        if self.kFactorDialog is None or not isValid(self.kFactorDialog):
+            self.kFactorDialog = KFactorCalibrationDialog(parent=self)
+            self.kFactorDialog.startButton.clicked.connect(self._start_k_factor_capture)
+            self.kFactorDialog.calculateButton.clicked.connect(
+                self._calculate_k_factor_result
+            )
+            self.kFactorDialog.writeButton.clicked.connect(self._write_k_factor_result)
+            self.kFactorDialog.saveConfigButton.clicked.connect(
+                self._save_k_factor_configuration
+            )
+            self.kFactorDialog.cancelRequested.connect(self._cancel_k_factor_capture)
+            self._refresh_k_factor_registers(self.kFactorDialog)
+        return self.kFactorDialog
+
+    def _cancel_k_factor_capture(self) -> None:
+        cancel_event = self._k_factor_cancel_event
+        if cancel_event is None or not self._busy:
+            return
+        if not cancel_event.is_set():
+            cancel_event.set()
+            self._log("K factor cancel requested.")
+        if self.kFactorDialog is not None and isValid(self.kFactorDialog):
+            self.kFactorDialog.set_canceling()
+
+    def _refresh_k_factor_registers(self, dialog: KFactorCalibrationDialog) -> None:
+        registers = tuple(
+            register
+            for register in self.runtime.register_map.registers
+            if register.kind
+            in {
+                RegisterKind.COIL,
+                RegisterKind.DISCRETE_INPUT,
+                RegisterKind.HOLDING,
+                RegisterKind.INPUT,
+            }
+        )
+        dialog.set_registers(
+            registers,
+            selected_names=self._k_factor_snapshot_variable_names,
+        )
+        if self._saved_k_factor_configuration:
+            dialog.apply_configuration(self._saved_k_factor_configuration)
+            self._k_factor_snapshot_variable_names = (
+                dialog.selected_snapshot_variable_names()
+            )
+
+    def _k_factor_capture_finished(self, result: object) -> None:
+        self._k_factor_cancel_event = None
+        if not isinstance(result, ModbusKFactorSimpleCapture):
+            self._log(f"K factor finished: {result}")
+            return
+        if self.kFactorDialog is not None and isValid(self.kFactorDialog):
+            self.kFactorDialog.set_captured(result)
+        self._log(f"K factor captured {result.run_id}")
+
+    def _k_factor_write_finished(self, result: object) -> None:
+        if not isinstance(result, ModbusKFactorSimpleResult):
+            self._log(f"K factor write finished: {result}")
+            return
+        if self.kFactorDialog is not None and isValid(self.kFactorDialog):
+            self.kFactorDialog.set_write_result(result)
+        if (
+            self.calibrationHistoryDialog is not None
+            and isValid(self.calibrationHistoryDialog)
+        ):
+            self.calibrationHistoryDialog.refresh()
+        self._update_map_values(
+            (
+                VariableSample(
+                    sample_id=f"{result.run_id}-KFACTOR",
+                    device_id=self.runtime.status.device_id or "",
+                    variable_name=result.k_factor_parameter,
+                    captured_at=datetime.now(UTC),
+                    value=result.readback_k_factor
+                    if result.readback_k_factor is not None
+                    else result.corrected_k_factor,
+                ),
+            )
+        )
+        self._log(
+            f"K factor write {result.write_status}; verified={result.write_verified}"
+        )
+
+    def _history_export_finished(self, result: object) -> None:
+        if not isinstance(result, ModbusCalibrationHistoryExportResult):
+            self._log(f"Export history finished: {result}")
+            return
+        self._log(
+            "Exported calibration history "
+            f"to {result.path} "
+            f"({result.run_count} run(s), "
+            f"{result.analysis_result_count} result(s), "
+            f"{result.workflow_step_count} step(s))."
+        )
+
+    def _history_import_finished(self, result: object) -> None:
+        if not isinstance(result, ModbusCalibrationHistoryImportResult):
+            self._log(f"Import history finished: {result}")
+            return
+        if (
+            self.calibrationHistoryDialog is not None
+            and isValid(self.calibrationHistoryDialog)
+        ):
+            self.calibrationHistoryDialog.refresh()
+        self._log(
+            "Imported calibration history "
+            f"from {result.path} "
+            f"({result.imported_runs} run(s), "
+            f"{result.skipped_runs} skipped, "
+            f"{result.renamed_runs} renamed)."
+        )
+        for error in result.errors:
+            self._log(f"Import history warning: {error}")
 
     def _repeatability(self) -> None:
         self._run_task(
@@ -1674,6 +2502,8 @@ class ModbusModuleWindow(QDialog):
             return
         self._busy = False
         self._active_tasks.clear()
+        if label == "K factor":
+            self._k_factor_cancel_event = None
         self._sync_status()
         self._set_controls_enabled(True)
         if (
@@ -1682,12 +2512,17 @@ class ModbusModuleWindow(QDialog):
             and isValid(self.zeroCalibrationDialog)
         ):
             self.zeroCalibrationDialog.set_error(message)
+        if (
+            label in {"K factor", "K factor write"}
+            and self.kFactorDialog is not None
+            and isValid(self.kFactorDialog)
+        ):
+            self.kFactorDialog.set_error(message)
         self._log(f"{label} failed: {message}")
 
     def _can_update_ui(self) -> bool:
         return (
-            not self._closing
-            and isValid(self)
+            isValid(self)
             and isValid(self.logTextEdit)
             and isValid(self.frameTable)
         )
@@ -1740,6 +2575,12 @@ class ModbusModuleWindow(QDialog):
             and self.zeroCalibrationDialog.statusLabel.text() != "Running..."
         ):
             self.zeroCalibrationDialog.set_ready(connected=connected and enabled)
+        if (
+            self.kFactorDialog is not None
+            and isValid(self.kFactorDialog)
+            and self.kFactorDialog.statusLabel.text() != "Running..."
+        ):
+            self.kFactorDialog.set_ready(connected=connected and enabled)
         self._refresh_variable_map_edit_state()
 
     def _refresh_variable_map_edit_state(self) -> None:
@@ -1899,6 +2740,36 @@ def _format_datetime(value: datetime | None) -> str:
     return value.astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _qt_datetime_from_datetime(value: datetime) -> QDateTime:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    local_value = value.astimezone()
+    return QDateTime(
+        local_value.year,
+        local_value.month,
+        local_value.day,
+        local_value.hour,
+        local_value.minute,
+        local_value.second,
+    )
+
+
+def _datetime_from_qt_datetime(value: QDateTime) -> datetime:
+    py_value = value.toPython()
+    if isinstance(py_value, datetime):
+        if py_value.tzinfo is None:
+            return py_value.astimezone()
+        return py_value
+    return datetime(
+        value.date().year(),
+        value.date().month(),
+        value.date().day(),
+        value.time().hour(),
+        value.time().minute(),
+        value.time().second(),
+    ).astimezone()
+
+
 def _format_history_value(name: str, value: object) -> str:
     if name.endswith("_at") and isinstance(value, str):
         parsed = _parse_datetime(value)
@@ -1950,7 +2821,14 @@ def _history_parameter_summary(entry: ModbusCalibrationHistoryEntry) -> str:
         return ", ".join(values)
     if entry.operation == "k_factor_calibration":
         k_factor = _metric_value(metrics, "corrected_k_factor")
-        return f"k_factor={k_factor}" if k_factor else ""
+        values = []
+        if k_factor:
+            values.append(f"k_factor={k_factor}")
+        if "write_status" in metrics:
+            values.append(f"write={_metric_value(metrics, 'write_status')}")
+        if "write_verified" in metrics:
+            values.append(f"verified={_metric_value(metrics, 'write_verified')}")
+        return ", ".join(values)
     if entry.operation == "manual_error_repeatability":
         trial_count = _metric_value(metrics, "trial_count")
         return f"trial_count={trial_count}" if trial_count else ""

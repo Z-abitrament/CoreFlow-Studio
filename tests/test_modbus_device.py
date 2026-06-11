@@ -74,6 +74,13 @@ class FakeModbusTransport:
         return TransportResponse(values=[1 if value else 0])
 
 
+class FailingConnectTransport(FakeModbusTransport):
+    last_error = "Unable to open COM42: Access is denied."
+
+    def connect(self) -> bool:
+        return False
+
+
 def _register_map() -> ModbusRegisterMap:
     return ModbusRegisterMap(
         name="test-map",
@@ -298,6 +305,27 @@ def test_modbus_device_records_transport_errors() -> None:
     assert diagnostics.state is CommunicationState.FAULTED
     assert diagnostics.timeout_count == 2
     assert diagnostics.last_error == "timeout"
+
+
+def test_modbus_device_preserves_transport_connect_failure_details() -> None:
+    device = ModbusRtuFlowmeterDevice(
+        SerialConfig(port="COM42", unit_id=7, baudrate=9600),
+        _register_map(),
+        transport=FailingConnectTransport({}),
+    )
+
+    try:
+        device.connect()
+    except ConnectionError as exc:
+        message = str(exc)
+    else:
+        raise AssertionError("expected connect failure")
+
+    assert "COM42" in message
+    assert "Access is denied." in message
+    diagnostics = device.communication_diagnostics()
+    assert diagnostics.state is CommunicationState.FAULTED
+    assert diagnostics.last_error == "Unable to open COM42: Access is denied."
 
 
 def test_modbus_device_retries_transient_read_errors() -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import csv
 import io
 from dataclasses import dataclass, field
@@ -119,6 +120,38 @@ class KFactorCalibrationWorkflowResult:
     calibration: KFactorCalibrationResult
     audit_id: str
     write_status: str
+
+
+@dataclass(frozen=True, slots=True)
+class FlowSegmentCaptureConfig:
+    """Reusable detection settings for one non-zero flow segment."""
+
+    flow_rate_parameter: str
+    poll_interval_s: float = 1.0
+    nonzero_threshold: float = 0.0
+    post_start_sample_s: float = 3.0
+    post_stop_delay_s: float = 3.0
+    max_wait_start_polls: int = 600
+    max_wait_stop_polls: int = 600
+    cancel_requested: Callable[[], bool] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FlowSegmentCaptureResult:
+    """Captured timing and flow data for one open-close flow segment."""
+
+    flow_rate_parameter: str
+    started_at: datetime
+    instant_flow_at: datetime
+    ended_at: datetime
+    start_flow: float
+    instant_flow: float
+    stop_flow: float
+    poll_count: int
+
+    @property
+    def duration_s(self) -> float:
+        return (self.ended_at - self.started_at).total_seconds()
 
 
 @dataclass(frozen=True, slots=True)
@@ -804,6 +837,90 @@ class RepeatabilityTestWorkflow:
         return RepeatabilityTestWorkflowResult(run_id=config.run_id, result=result)
 
 
+def capture_flow_segment(
+    device: FlowmeterDevice,
+    config: FlowSegmentCaptureConfig,
+) -> FlowSegmentCaptureResult:
+    """Detect one non-zero flow segment and capture reusable timing values."""
+
+    if config.poll_interval_s <= 0:
+        raise ValueError("Flow segment poll interval must be positive.")
+    if config.post_start_sample_s < 0:
+        raise ValueError("Flow segment start sample delay cannot be negative.")
+    if config.post_stop_delay_s < 0:
+        raise ValueError("Flow segment stop delay cannot be negative.")
+    if config.max_wait_start_polls < 1 or config.max_wait_stop_polls < 1:
+        raise ValueError("Flow segment poll limits must be positive.")
+
+    poll_count = 0
+    start_flow = 0.0
+    started_at: datetime | None = None
+    for _ in range(config.max_wait_start_polls):
+        _raise_if_flow_segment_canceled(config)
+        start_flow = _read_float_parameter(device, config.flow_rate_parameter)
+        poll_count += 1
+        if abs(start_flow) > config.nonzero_threshold:
+            started_at = datetime.now(UTC)
+            break
+        _sleep_flow_segment(config.poll_interval_s, config)
+    if started_at is None:
+        raise TimeoutError(
+            f"Flow segment did not start on {config.flow_rate_parameter}."
+        )
+
+    if config.post_start_sample_s:
+        _sleep_flow_segment(config.post_start_sample_s, config)
+    _raise_if_flow_segment_canceled(config)
+    instant_flow = _read_float_parameter(device, config.flow_rate_parameter)
+    poll_count += 1
+    instant_flow_at = datetime.now(UTC)
+
+    stop_flow = instant_flow
+    stopped = False
+    for _ in range(config.max_wait_stop_polls):
+        _raise_if_flow_segment_canceled(config)
+        stop_flow = _read_float_parameter(device, config.flow_rate_parameter)
+        poll_count += 1
+        if abs(stop_flow) <= config.nonzero_threshold:
+            stopped = True
+            break
+        _sleep_flow_segment(config.poll_interval_s, config)
+    if not stopped:
+        raise TimeoutError(
+            f"Flow segment did not stop on {config.flow_rate_parameter}."
+        )
+
+    if config.post_stop_delay_s:
+        _sleep_flow_segment(config.post_stop_delay_s, config)
+    _raise_if_flow_segment_canceled(config)
+    ended_at = datetime.now(UTC)
+    return FlowSegmentCaptureResult(
+        flow_rate_parameter=config.flow_rate_parameter,
+        started_at=started_at,
+        instant_flow_at=instant_flow_at,
+        ended_at=ended_at,
+        start_flow=start_flow,
+        instant_flow=instant_flow,
+        stop_flow=stop_flow,
+        poll_count=poll_count,
+    )
+
+
+def _raise_if_flow_segment_canceled(config: FlowSegmentCaptureConfig) -> None:
+    if config.cancel_requested is not None and config.cancel_requested():
+        raise RuntimeError("K factor capture canceled.")
+
+
+def _sleep_flow_segment(seconds: float, config: FlowSegmentCaptureConfig) -> None:
+    remaining = seconds
+    while remaining > 0:
+        _raise_if_flow_segment_canceled(config)
+        interval = min(remaining, 0.05)
+        sleep(interval)
+        remaining -= interval
+    _raise_if_flow_segment_canceled(config)
+
+
 def _samples_csv(samples: list[object]) -> bytes:
     buffer = io.StringIO()
     writer = csv.writer(buffer)
@@ -909,6 +1026,10 @@ def _parameter_value(
         if parameter.name == name:
             return parameter.value
     raise ValueError(f"Missing required parameter: {name}")
+
+
+def _read_float_parameter(device: FlowmeterDevice, name: str) -> float:
+    return float(_parameter_value(_read_named_configuration(device, (name,)), name))
 
 
 def _json_metric_value(value: object) -> object:
