@@ -6,6 +6,7 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from math import sqrt
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -13,8 +14,10 @@ from uuid import uuid4
 from coreflow import __version__
 from coreflow.analysis.calibration import (
     KFactorCalibrationInput,
+    RepeatabilityTestResult,
     RepeatabilityTrial,
     ZeroCalibrationRecord,
+    analyze_repeatability,
     calculate_k_factor,
 )
 from coreflow.app.variable_sampling import VariableSample
@@ -164,6 +167,7 @@ class ModbusKFactorSimpleResult:
     flow_instant_at: datetime
     flow_ended_at: datetime
     poll_interval_s: float
+    flow_rate_source: str
     history_saved: bool
     write_requested: bool = False
     write_status: str = "not_requested"
@@ -174,6 +178,99 @@ class ModbusKFactorSimpleResult:
     @property
     def duration_s(self) -> float:
         return (self.flow_ended_at - self.flow_started_at).total_seconds()
+
+
+@dataclass(frozen=True, slots=True)
+class ModbusRepeatabilitySimpleCapture:
+    """Captured device data before one repeatability standard-mass entry."""
+
+    run_id: str
+    flow_point: float
+    trial_index: int
+    flow_rate_parameter: str
+    flow_acc_parameter: str
+    pre_snapshot: dict[str, object]
+    pre_snapshot_captured_at: datetime | None
+    mass_acc_before: float
+    mass_acc_after: float
+    segment: FlowSegmentCaptureResult
+    poll_interval_s: float
+
+    @property
+    def measured_mass_delta(self) -> float:
+        return self.mass_acc_after - self.mass_acc_before
+
+    @property
+    def mean_flow(self) -> float:
+        if self.segment.duration_s <= 0:
+            return 0.0
+        return self.measured_mass_delta / self.segment.duration_s
+
+
+@dataclass(frozen=True, slots=True)
+class ModbusRepeatabilitySimpleTrialResult:
+    """UI-ready result for one repeatability trial."""
+
+    run_id: str
+    flow_point: float
+    trial_index: int
+    flow_rate_parameter: str
+    flow_acc_parameter: str
+    pre_snapshot: dict[str, object]
+    pre_snapshot_captured_at: datetime | None
+    mass_acc_before: float
+    mass_acc_after: float
+    measured_mass_delta: float
+    standard_mass: float
+    percent_error: float
+    mean_flow: float
+    instant_flow: float
+    flow_started_at: datetime
+    flow_instant_at: datetime
+    flow_ended_at: datetime
+    poll_interval_s: float
+    flow_rate_source: str = "device"
+
+    @property
+    def duration_s(self) -> float:
+        return (self.flow_ended_at - self.flow_started_at).total_seconds()
+
+
+@dataclass(frozen=True, slots=True)
+class ModbusRepeatabilityFlowSummary:
+    """Operator-facing summary for the currently completed trials at one flow point."""
+
+    flow_point: float
+    trial_count: int
+    mean_percent_error: float
+    max_abs_percent_error: float
+    repeatability_stddev_percent: float
+    trial_errors: tuple[float, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ModbusRepeatabilitySimpleResult:
+    """UI-ready result for one saved repeatability test summary."""
+
+    run_id: str
+    flow_rate_parameter: str
+    flow_acc_parameter: str
+    poll_interval_s: float
+    pre_snapshot: dict[str, object]
+    pre_snapshot_captured_at: datetime | None
+    trials: tuple[ModbusRepeatabilitySimpleTrialResult, ...]
+    analysis: RepeatabilityTestResult
+    history_saved: bool
+    mode: str = "three_point"
+    expected_trials_per_point: int = 3
+
+    @property
+    def started_at(self) -> datetime:
+        return min(trial.flow_started_at for trial in self.trials)
+
+    @property
+    def ended_at(self) -> datetime:
+        return max(trial.flow_ended_at for trial in self.trials)
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +310,17 @@ class ModbusCalibrationHistoryImportResult:
     imported_analysis_results: int
     imported_workflow_steps: int
     errors: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class PcFlowSimulationSettings:
+    """PC-side flow segment used for lab workflow dry checks with real Modbus reads."""
+
+    enabled: bool = False
+    start_flow: float = 5.0
+    instant_flow: float = 5.0
+    stop_flow: float = 0.0
+    mass_delta: float | None = None
 
 
 TransportFactory = Callable[[SerialConfig], ModbusTransport | None]
@@ -496,6 +604,7 @@ class ModbusModuleRuntime:
         max_wait_start_polls: int = 600,
         max_wait_stop_polls: int = 600,
         cancel_requested: Callable[[], bool] | None = None,
+        pc_flow_simulation: PcFlowSimulationSettings | None = None,
     ) -> ModbusKFactorSimpleCapture:
         run_id = self._next_run_id()
         device = self._require_device()
@@ -537,7 +646,12 @@ class ModbusModuleRuntime:
                 else post_stop_delay_s,
                 max_wait_start_polls=max_wait_start_polls,
                 max_wait_stop_polls=max_wait_stop_polls,
+                cancel_message="K factor capture canceled.",
                 cancel_requested=cancel_requested,
+                flow_rate_reader=_pc_flow_simulation_reader(pc_flow_simulation),
+                flow_rate_source="pc_simulated"
+                if pc_flow_simulation is not None and pc_flow_simulation.enabled
+                else "device",
             ),
         )
         after_parameters = _read_selected_parameters(
@@ -545,7 +659,14 @@ class ModbusModuleRuntime:
             (flow_acc_parameter,),
             merge_adjacent=False,
         )
-        mass_acc_after = float(_find_parameter(after_parameters, flow_acc_parameter).value)
+        device_mass_acc_after = float(
+            _find_parameter(after_parameters, flow_acc_parameter).value
+        )
+        mass_acc_after = _pc_simulated_mass_acc_after(
+            mass_acc_before,
+            device_mass_acc_after,
+            pc_flow_simulation,
+        )
         return ModbusKFactorSimpleCapture(
             run_id=run_id,
             flow_rate_parameter=flow_rate_parameter,
@@ -601,6 +722,7 @@ class ModbusModuleRuntime:
             flow_instant_at=capture.segment.instant_flow_at,
             flow_ended_at=capture.segment.ended_at,
             poll_interval_s=capture.poll_interval_s,
+            flow_rate_source=capture.segment.flow_rate_source,
             history_saved=save_history,
         )
         if save_history:
@@ -682,6 +804,7 @@ class ModbusModuleRuntime:
             flow_instant_at=result.flow_instant_at,
             flow_ended_at=result.flow_ended_at,
             poll_interval_s=result.poll_interval_s,
+            flow_rate_source=result.flow_rate_source,
             history_saved=result.history_saved,
             write_requested=True,
             write_status=decision.result.status.value,
@@ -695,6 +818,234 @@ class ModbusModuleRuntime:
                 status=RunStatus.PASSED if verified else RunStatus.FAILED,
             )
         return updated
+
+    def capture_repeatability_simple_trial(
+        self,
+        *,
+        run_id: str | None = None,
+        flow_point: float,
+        trial_index: int,
+        snapshot_variable_names: tuple[str, ...] = (),
+        flow_rate_parameter: str = "mass_rate",
+        flow_acc_parameter: str = "mass_acc",
+        poll_interval_s: float = 1.0,
+        nonzero_threshold: float = 0.0,
+        post_start_sample_s: float | None = None,
+        post_stop_delay_s: float | None = None,
+        max_wait_start_polls: int = 600,
+        max_wait_stop_polls: int = 600,
+        capture_snapshot: bool = True,
+        cancel_requested: Callable[[], bool] | None = None,
+        pc_flow_simulation: PcFlowSimulationSettings | None = None,
+    ) -> ModbusRepeatabilitySimpleCapture:
+        if trial_index < 1:
+            raise ValueError("Repeatability trial index must be at least 1.")
+        if poll_interval_s <= 0:
+            raise ValueError("Repeatability poll interval must be positive.")
+        capture_run_id = run_id or self._next_run_id()
+        device = self._require_device()
+        identity = self._require_identity()
+        self._repository.save_device(
+            DeviceRecord(
+                device_id=identity.device_id,
+                device_type=identity.device_type.value,
+                serial_number=identity.serial_number,
+                model=identity.model,
+                firmware_version=identity.firmware_version,
+                hardware_version=identity.hardware_version,
+                protocol_address=identity.protocol_address,
+                connection_metadata=identity.metadata,
+            )
+        )
+        if capture_snapshot:
+            pre_snapshot, pre_snapshot_captured_at = _pre_calibration_snapshot(
+                device,
+                _unique_names(snapshot_variable_names),
+            )
+        else:
+            pre_snapshot, pre_snapshot_captured_at = {}, None
+        before_parameters = _read_selected_parameters(
+            device,
+            (flow_acc_parameter,),
+            merge_adjacent=False,
+        )
+        mass_acc_before = float(_find_parameter(before_parameters, flow_acc_parameter).value)
+        segment = capture_flow_segment(
+            device,
+            FlowSegmentCaptureConfig(
+                flow_rate_parameter=flow_rate_parameter,
+                poll_interval_s=poll_interval_s,
+                nonzero_threshold=nonzero_threshold,
+                post_start_sample_s=self._k_factor_post_start_sample_s
+                if post_start_sample_s is None
+                else post_start_sample_s,
+                post_stop_delay_s=self._k_factor_post_stop_delay_s
+                if post_stop_delay_s is None
+                else post_stop_delay_s,
+                max_wait_start_polls=max_wait_start_polls,
+                max_wait_stop_polls=max_wait_stop_polls,
+                cancel_message="Repeatability capture canceled.",
+                cancel_requested=cancel_requested,
+                flow_rate_reader=_pc_flow_simulation_reader(pc_flow_simulation),
+                flow_rate_source="pc_simulated"
+                if pc_flow_simulation is not None and pc_flow_simulation.enabled
+                else "device",
+            ),
+        )
+        after_parameters = _read_selected_parameters(
+            device,
+            (flow_acc_parameter,),
+            merge_adjacent=False,
+        )
+        device_mass_acc_after = float(
+            _find_parameter(after_parameters, flow_acc_parameter).value
+        )
+        mass_acc_after = _pc_simulated_mass_acc_after(
+            mass_acc_before,
+            device_mass_acc_after,
+            pc_flow_simulation,
+        )
+        return ModbusRepeatabilitySimpleCapture(
+            run_id=capture_run_id,
+            flow_point=flow_point,
+            trial_index=trial_index,
+            flow_rate_parameter=flow_rate_parameter,
+            flow_acc_parameter=flow_acc_parameter,
+            pre_snapshot=pre_snapshot,
+            pre_snapshot_captured_at=pre_snapshot_captured_at,
+            mass_acc_before=mass_acc_before,
+            mass_acc_after=mass_acc_after,
+            segment=segment,
+            poll_interval_s=poll_interval_s,
+        )
+
+    def calculate_repeatability_simple_trial(
+        self,
+        capture: ModbusRepeatabilitySimpleCapture,
+        *,
+        standard_mass: float,
+    ) -> ModbusRepeatabilitySimpleTrialResult:
+        if standard_mass <= 0:
+            raise ValueError("Repeatability test requires positive standard mass.")
+        measured_mass_delta = capture.measured_mass_delta
+        percent_error = (measured_mass_delta - standard_mass) / standard_mass * 100.0
+        return ModbusRepeatabilitySimpleTrialResult(
+            run_id=capture.run_id,
+            flow_point=capture.flow_point,
+            trial_index=capture.trial_index,
+            flow_rate_parameter=capture.flow_rate_parameter,
+            flow_acc_parameter=capture.flow_acc_parameter,
+            pre_snapshot=capture.pre_snapshot,
+            pre_snapshot_captured_at=capture.pre_snapshot_captured_at,
+            mass_acc_before=capture.mass_acc_before,
+            mass_acc_after=capture.mass_acc_after,
+            measured_mass_delta=measured_mass_delta,
+            standard_mass=standard_mass,
+            percent_error=percent_error,
+            mean_flow=capture.mean_flow,
+            instant_flow=capture.segment.instant_flow,
+            flow_started_at=capture.segment.started_at,
+            flow_instant_at=capture.segment.instant_flow_at,
+            flow_ended_at=capture.segment.ended_at,
+            poll_interval_s=capture.poll_interval_s,
+            flow_rate_source=capture.segment.flow_rate_source,
+        )
+
+    def summarize_repeatability_flow_point(
+        self,
+        trials: tuple[ModbusRepeatabilitySimpleTrialResult, ...],
+        *,
+        flow_point: float | None = None,
+    ) -> ModbusRepeatabilityFlowSummary:
+        if not trials:
+            raise ValueError("Repeatability summary requires at least one trial.")
+        selected = tuple(
+            trial
+            for trial in trials
+            if flow_point is None or trial.flow_point == flow_point
+        )
+        if not selected:
+            raise ValueError("Repeatability summary requires trials for the flow point.")
+        errors = tuple(trial.percent_error for trial in selected)
+        return ModbusRepeatabilityFlowSummary(
+            flow_point=selected[0].flow_point,
+            trial_count=len(selected),
+            mean_percent_error=sum(errors) / len(errors),
+            max_abs_percent_error=max(abs(error) for error in errors),
+            repeatability_stddev_percent=_sample_stddev(errors),
+            trial_errors=errors,
+        )
+
+    def calculate_repeatability_simple_result(
+        self,
+        trials: tuple[ModbusRepeatabilitySimpleTrialResult, ...],
+        *,
+        save_history: bool = True,
+        mode: str = "three_point",
+        expected_flow_point_count: int = 3,
+        expected_trials_per_point: int = 3,
+        require_complete: bool = True,
+    ) -> ModbusRepeatabilitySimpleResult:
+        if not trials:
+            raise ValueError("Repeatability test requires at least one trial.")
+        if expected_flow_point_count < 1:
+            raise ValueError("Repeatability test requires at least one flow point.")
+        if expected_trials_per_point < 1:
+            raise ValueError("Repeatability test requires at least one trial per point.")
+        flow_points = {trial.flow_point for trial in trials}
+        expected_total = expected_flow_point_count * expected_trials_per_point
+        if require_complete and len(trials) != expected_total:
+            raise ValueError(
+                "Repeatability test requires "
+                f"{expected_total} trials for {expected_flow_point_count} flow point(s)."
+            )
+        if len(flow_points) != expected_flow_point_count:
+            raise ValueError(
+                "Repeatability test requires "
+                f"{expected_flow_point_count} flow point(s)."
+            )
+        run_ids = {trial.run_id for trial in trials}
+        if len(run_ids) != 1:
+            raise ValueError("Repeatability trials must belong to one run.")
+        flow_rate_parameters = {trial.flow_rate_parameter for trial in trials}
+        flow_acc_parameters = {trial.flow_acc_parameter for trial in trials}
+        if len(flow_rate_parameters) != 1 or len(flow_acc_parameters) != 1:
+            raise ValueError("Repeatability trials must use one variable configuration.")
+        repeatability_trials = tuple(
+            RepeatabilityTrial(
+                flow_point=trial.flow_point,
+                trial_index=trial.trial_index,
+                mass_acc_before=trial.mass_acc_before,
+                mass_acc_after=trial.mass_acc_after,
+                standard_mass=trial.standard_mass,
+            )
+            for trial in trials
+        )
+        analysis = analyze_repeatability(
+            repeatability_trials,
+            expected_trials_per_point=expected_trials_per_point,
+        )
+        first_snapshot_trial = next((trial for trial in trials if trial.pre_snapshot), None)
+        result = ModbusRepeatabilitySimpleResult(
+            run_id=trials[0].run_id,
+            flow_rate_parameter=trials[0].flow_rate_parameter,
+            flow_acc_parameter=trials[0].flow_acc_parameter,
+            poll_interval_s=trials[0].poll_interval_s,
+            pre_snapshot=first_snapshot_trial.pre_snapshot
+            if first_snapshot_trial is not None
+            else {},
+            pre_snapshot_captured_at=first_snapshot_trial.pre_snapshot_captured_at
+            if first_snapshot_trial is not None
+            else None,
+            trials=trials,
+            analysis=analysis,
+            history_saved=save_history,
+            mode=mode,
+            expected_trials_per_point=expected_trials_per_point,
+        )
+        if save_history:
+            self._save_repeatability_simple_history(result, status=RunStatus.PASSED)
+        return result
 
     def run_k_factor_calibration(
         self,
@@ -1035,6 +1386,95 @@ class ModbusModuleRuntime:
             )
         )
 
+    def _save_repeatability_simple_history(
+        self,
+        result: ModbusRepeatabilitySimpleResult,
+        *,
+        status: RunStatus,
+    ) -> None:
+        identity = self._require_identity()
+        metrics = _repeatability_simple_metrics(result)
+        started_at = result.started_at
+        ended_at = result.ended_at
+        self._repository.save_run(
+            RunSession(
+                run_id=result.run_id,
+                run_type=RunType.ERROR_ANALYSIS,
+                workflow_name="manual_error_repeatability",
+                workflow_version="0.2-simple",
+                device_id=identity.device_id,
+                operator=self._operator,
+                status=status,
+                started_at=started_at,
+                ended_at=ended_at,
+                configuration_snapshot={
+                    "mode": result.mode,
+                    "flow_rate_parameter": result.flow_rate_parameter,
+                    "flow_acc_parameter": result.flow_acc_parameter,
+                    "poll_interval_s": result.poll_interval_s,
+                    "flow_point_count": result.analysis.summary_metrics.get(
+                        "flow_point_count"
+                    ),
+                    "trials_per_point": result.expected_trials_per_point,
+                    "pre_snapshot_variable_count": len(result.pre_snapshot),
+                },
+                software_version=__version__,
+            )
+        )
+        step = WorkflowStep(
+            step_id=f"{result.run_id}-STEP-001",
+            run_id=result.run_id,
+            name="Capture and analyze Modbus repeatability trials",
+            step_type=WorkflowStepType.ANALYSIS,
+            status=WorkflowStepStatus.PASSED
+            if status is RunStatus.PASSED
+            else WorkflowStepStatus.FAILED,
+            started_at=started_at,
+            ended_at=ended_at,
+            input_configuration={
+                "mode": result.mode,
+                "flow_rate_parameter": result.flow_rate_parameter,
+                "flow_acc_parameter": result.flow_acc_parameter,
+                "poll_interval_s": result.poll_interval_s,
+            },
+            output_summary={
+                "flow_point_count": result.analysis.summary_metrics.get(
+                    "flow_point_count"
+                ),
+                "trial_count": result.analysis.summary_metrics.get("trial_count"),
+                "max_abs_percent_error": result.analysis.summary_metrics.get(
+                    "max_abs_percent_error"
+                ),
+                "max_repeatability_stddev_percent": result.analysis.summary_metrics.get(
+                    "max_repeatability_stddev_percent"
+                ),
+            },
+        )
+        self._repository.save_step(step)
+        self._repository.save_analysis_result(
+            AnalysisResultRecord(
+                result_id=f"{result.run_id}-REPEATABILITY",
+                run_id=result.run_id,
+                step_id=step.step_id,
+                result_type="manual_error_repeatability",
+                algorithm_name="modbus_simple_mass_total_repeatability",
+                algorithm_version="0.2",
+                configuration_snapshot={
+                    "formula": "e = (delta_m - standard_mass) / standard_mass * 100%",
+                    "repeatability": "sample standard deviation of percent errors per flow point",
+                    "mode": result.mode,
+                    "trial_count": len(result.trials),
+                    "flow_point_count": result.analysis.summary_metrics.get(
+                        "flow_point_count"
+                    ),
+                    "trials_per_point": result.expected_trials_per_point,
+                },
+                summary_metrics=metrics,
+                pass_fail_decision="passed" if status is RunStatus.PASSED else "failed",
+                created_at=datetime.now(UTC),
+            )
+        )
+
     def _require_device(self) -> FlowmeterDevice:
         if self._device is None:
             raise ConnectionError("Connect the Modbus module first.")
@@ -1319,6 +1759,37 @@ def _sample_one_variable(
     return sample
 
 
+def _pc_flow_simulation_reader(
+    settings: PcFlowSimulationSettings | None,
+) -> Callable[[FlowmeterDevice, str], float] | None:
+    if settings is None or not settings.enabled:
+        return None
+    sequence = [
+        settings.start_flow,
+        settings.instant_flow,
+        settings.stop_flow,
+    ]
+    state = {"index": 0}
+
+    def read(device: FlowmeterDevice, parameter_name: str) -> float:
+        _read_selected_parameters(device, (parameter_name,), merge_adjacent=False)
+        index = min(state["index"], len(sequence) - 1)
+        state["index"] += 1
+        return float(sequence[index])
+
+    return read
+
+
+def _pc_simulated_mass_acc_after(
+    mass_acc_before: float,
+    device_mass_acc_after: float,
+    settings: PcFlowSimulationSettings | None,
+) -> float:
+    if settings is None or not settings.enabled or settings.mass_delta is None:
+        return device_mass_acc_after
+    return mass_acc_before + float(settings.mass_delta)
+
+
 def _pre_calibration_snapshot(
     device: FlowmeterDevice,
     names: tuple[str, ...],
@@ -1355,6 +1826,7 @@ def _k_factor_simple_metrics(result: ModbusKFactorSimpleResult) -> dict[str, obj
         "corrected_k_factor": result.corrected_k_factor,
         "mean_flow": result.mean_flow,
         "instant_flow": result.instant_flow,
+        "flow_rate_source": result.flow_rate_source,
         "duration_s": result.duration_s,
         "flow_started_at": result.flow_started_at.isoformat(),
         "flow_instant_at": result.flow_instant_at.isoformat(),
@@ -1374,6 +1846,81 @@ def _k_factor_simple_metrics(result: ModbusKFactorSimpleResult) -> dict[str, obj
     if result.pre_snapshot_captured_at is not None:
         metrics["pre_snapshot_captured_at"] = result.pre_snapshot_captured_at.isoformat()
     return metrics
+
+
+def _repeatability_simple_metrics(
+    result: ModbusRepeatabilitySimpleResult,
+) -> dict[str, object]:
+    metrics: dict[str, object] = {
+        "mode": result.mode,
+        "flow_rate_parameter": result.flow_rate_parameter,
+        "flow_acc_parameter": result.flow_acc_parameter,
+        "poll_interval_s": result.poll_interval_s,
+        "expected_trials_per_point": result.expected_trials_per_point,
+        "history_saved": result.history_saved,
+        "started_at": result.started_at.isoformat(),
+        "ended_at": result.ended_at.isoformat(),
+        **result.analysis.summary_metrics,
+        "trials": [
+            {
+                "flow_point": trial.flow_point,
+                "trial_index": trial.trial_index,
+                "mass_acc_before": trial.mass_acc_before,
+                "mass_acc_after": trial.mass_acc_after,
+                "measured_mass_delta": trial.measured_mass_delta,
+                "standard_mass": trial.standard_mass,
+                "percent_error": trial.percent_error,
+                "mean_flow": trial.mean_flow,
+                "instant_flow": trial.instant_flow,
+                "flow_rate_source": trial.flow_rate_source,
+                "duration_s": trial.duration_s,
+                "flow_started_at": trial.flow_started_at.isoformat(),
+                "flow_instant_at": trial.flow_instant_at.isoformat(),
+                "flow_ended_at": trial.flow_ended_at.isoformat(),
+            }
+            for trial in result.trials
+        ],
+        "flow_points": [
+            {
+                "flow_point": point.flow_point,
+                "repeatability_stddev_percent": point.repeatability_stddev_percent,
+                "trial_errors": [
+                    trial.percent_error
+                    for trial in point.trials
+                ],
+            }
+            for point in result.analysis.flow_points
+        ],
+    }
+    for point in result.analysis.flow_points:
+        label = _flow_point_metric_label(point.flow_point)
+        metrics[f"{label}_repeatability_stddev_percent"] = (
+            point.repeatability_stddev_percent
+        )
+        for trial in point.trials:
+            metrics[f"{label}_trial_{trial.trial_index}_percent_error"] = (
+                trial.percent_error
+            )
+    if result.pre_snapshot:
+        metrics["pre_snapshot"] = result.pre_snapshot
+    if result.pre_snapshot_captured_at is not None:
+        metrics["pre_snapshot_captured_at"] = (
+            result.pre_snapshot_captured_at.isoformat()
+        )
+    return metrics
+
+
+def _flow_point_metric_label(flow_point: float) -> str:
+    raw = f"{flow_point:.12g}".replace("-", "neg_")
+    return "flow_point_" + raw.replace(".", "_")
+
+
+def _sample_stddev(values: tuple[float, ...]) -> float:
+    if len(values) < 2:
+        return 0.0
+    mean = sum(values) / len(values)
+    variance = sum((value - mean) ** 2 for value in values) / (len(values) - 1)
+    return sqrt(variance)
 
 
 def _json_metric_value(value: object) -> object:

@@ -12,6 +12,7 @@ from coreflow.app.modbus_runtime import (
     ModbusCalibrationHistoryEntry,
     ModbusConnectionSettings,
     ModbusModuleRuntime,
+    PcFlowSimulationSettings,
 )
 from coreflow.hardware import SerialPortInfo, SerialPortScanner
 from coreflow.protocols.modbus import (
@@ -78,6 +79,13 @@ def _find_metric_row(table, metric_name: str) -> int:
         if _table_text(table, row, 0) == metric_name:
             return row
     raise AssertionError(f"missing metric row: {metric_name}")
+
+
+def _has_metric_row(table, metric_name: str) -> bool:
+    for row in range(table.rowCount()):
+        if _table_text(table, row, 0) == metric_name:
+            return True
+    return False
 
 
 def _column_texts(table, column: int) -> list[str]:
@@ -173,6 +181,213 @@ def test_modbus_module_runtime_runs_without_simulator(tmp_path) -> None:
         for frame in frames
     )
     assert all(" " in frame[2] or frame[2] for frame in frames)
+
+
+def test_modbus_module_runtime_captures_simple_repeatability_history(tmp_path) -> None:
+    repository = _repository(tmp_path)
+    transports = []
+    runtime = ModbusModuleRuntime(
+        repository,
+        transport_factory=placeholder_transport_factory(transports),
+        k_factor_post_start_sample_s=0.0,
+        k_factor_post_stop_delay_s=0.0,
+    )
+    runtime.connect(ModbusConnectionSettings(port="COM9", unit_id=1))
+    transport = transports[0]
+    register_map = runtime.register_map
+    mass_rate = register_map.by_name("mass_rate")
+    mass_acc = register_map.by_name("mass_acc")
+    transport.read_sequences[mass_rate.address] = [
+        encode_registers(mass_rate, 0.0),
+        *[
+            encoded
+            for _trial in range(9)
+            for encoded in (
+                encode_registers(mass_rate, 5.0),
+                encode_registers(mass_rate, 5.5),
+                encode_registers(mass_rate, 0.0),
+            )
+        ],
+    ]
+    measured_deltas = (100.0, 101.0, 99.0, 50.0, 51.0, 49.0, 20.0, 20.2, 19.8)
+    cumulative = 0.0
+    mass_acc_reads = []
+    for delta in measured_deltas:
+        mass_acc_reads.append(encode_registers(mass_acc, cumulative))
+        cumulative += delta
+        mass_acc_reads.append(encode_registers(mass_acc, cumulative))
+    transport.read_sequences[mass_acc.address] = mass_acc_reads
+
+    standards = (100.0, 100.0, 100.0, 50.0, 50.0, 50.0, 20.0, 20.0, 20.0)
+    flow_points = (600.0, 600.0, 600.0, 300.0, 300.0, 300.0, 100.0, 100.0, 100.0)
+    trials = []
+    run_id = None
+    for index, (flow_point, standard_mass) in enumerate(zip(flow_points, standards)):
+        capture = runtime.capture_repeatability_simple_trial(
+            run_id=run_id,
+            flow_point=flow_point,
+            trial_index=index % 3 + 1,
+            snapshot_variable_names=("temperature",),
+            flow_rate_parameter="mass_rate",
+            flow_acc_parameter="mass_acc",
+            poll_interval_s=0.05,
+            capture_snapshot=run_id is None,
+        )
+        run_id = capture.run_id
+        trials.append(
+            runtime.calculate_repeatability_simple_trial(
+                capture,
+                standard_mass=standard_mass,
+            )
+        )
+
+    result = runtime.calculate_repeatability_simple_result(tuple(trials))
+
+    assert repository.get_run_status(result.run_id) == "passed"
+    assert result.analysis.summary_metrics["trial_count"] == 9.0
+    assert result.analysis.summary_metrics["max_repeatability_stddev_percent"] == 2.0
+    assert result.trials[1].percent_error == 1.0
+    history = runtime.list_calibration_history(operation="manual_error_repeatability")
+    assert len(history) == 1
+    assert history[0].metrics["max_abs_percent_error"] == 2.0
+    assert history[0].metrics["flow_point_300_repeatability_stddev_percent"] == 2.0
+    assert len(history[0].metrics["trials"]) == 9
+
+
+def test_modbus_module_runtime_saves_single_point_repeatability_summary(
+    tmp_path,
+) -> None:
+    repository = _repository(tmp_path)
+    transports = []
+    runtime = ModbusModuleRuntime(
+        repository,
+        transport_factory=placeholder_transport_factory(transports),
+        k_factor_post_start_sample_s=0.0,
+        k_factor_post_stop_delay_s=0.0,
+    )
+    runtime.connect(ModbusConnectionSettings(port="COM9", unit_id=1))
+    transport = transports[0]
+    register_map = runtime.register_map
+    mass_rate = register_map.by_name("mass_rate")
+    mass_acc = register_map.by_name("mass_acc")
+    transport.read_sequences[mass_rate.address] = [
+        encode_registers(mass_rate, 0.0),
+        *[
+            encoded
+            for _trial in range(4)
+            for encoded in (
+                encode_registers(mass_rate, 4.0),
+                encode_registers(mass_rate, 4.2),
+                encode_registers(mass_rate, 0.0),
+            )
+        ],
+    ]
+    measured_deltas = (100.0, 101.0, 99.0, 102.0)
+    cumulative = 0.0
+    mass_acc_reads = []
+    for delta in measured_deltas:
+        mass_acc_reads.append(encode_registers(mass_acc, cumulative))
+        cumulative += delta
+        mass_acc_reads.append(encode_registers(mass_acc, cumulative))
+    transport.read_sequences[mass_acc.address] = mass_acc_reads
+
+    trials = []
+    run_id = None
+    for index in range(1, 5):
+        capture = runtime.capture_repeatability_simple_trial(
+            run_id=run_id,
+            flow_point=250.0,
+            trial_index=index,
+            flow_rate_parameter="mass_rate",
+            flow_acc_parameter="mass_acc",
+            poll_interval_s=0.05,
+            capture_snapshot=run_id is None,
+        )
+        run_id = capture.run_id
+        trials.append(
+            runtime.calculate_repeatability_simple_trial(
+                capture,
+                standard_mass=100.0,
+            )
+        )
+
+    summary = runtime.summarize_repeatability_flow_point(tuple(trials), flow_point=250.0)
+    result = runtime.calculate_repeatability_simple_result(
+        tuple(trials),
+        mode="single_point",
+        expected_flow_point_count=1,
+        expected_trials_per_point=len(trials),
+        require_complete=False,
+    )
+
+    assert summary.trial_count == 4
+    assert summary.max_abs_percent_error == 2.0
+    assert result.mode == "single_point"
+    assert result.analysis.summary_metrics["trial_count"] == 4.0
+    assert result.analysis.summary_metrics["flow_point_count"] == 1.0
+    history = runtime.list_calibration_history(operation="manual_error_repeatability")
+    assert len(history) == 1
+    assert history[0].metrics["mode"] == "single_point"
+    assert history[0].metrics["expected_trials_per_point"] == 4
+    assert len(history[0].metrics["trials"]) == 4
+
+
+def test_modbus_module_runtime_pc_simulated_flow_keeps_device_reads(
+    tmp_path,
+) -> None:
+    repository = _repository(tmp_path)
+    transports = []
+    runtime = ModbusModuleRuntime(
+        repository,
+        transport_factory=placeholder_transport_factory(transports),
+        k_factor_post_start_sample_s=0.0,
+        k_factor_post_stop_delay_s=0.0,
+    )
+    runtime.connect(ModbusConnectionSettings(port="COM9", unit_id=1))
+    transport = transports[0]
+    register_map = runtime.register_map
+    mass_rate = register_map.by_name("mass_rate")
+    mass_acc = register_map.by_name("mass_acc")
+    transport.read_sequences[mass_rate.address] = [
+        encode_registers(mass_rate, 0.0),
+        encode_registers(mass_rate, 0.0),
+        encode_registers(mass_rate, 0.0),
+    ]
+    transport.read_sequences[mass_acc.address] = [
+        encode_registers(mass_acc, 100.0),
+        encode_registers(mass_acc, 100.0),
+        encode_registers(mass_acc, 100.0),
+    ]
+
+    capture = runtime.capture_k_factor_simple_trial(
+        snapshot_variable_names=(),
+        flow_rate_parameter="mass_rate",
+        flow_acc_parameter="mass_acc",
+        k_factor_parameter="k_factor",
+        poll_interval_s=0.05,
+        pc_flow_simulation=PcFlowSimulationSettings(
+            enabled=True,
+            start_flow=6.0,
+            instant_flow=6.5,
+            stop_flow=0.0,
+            mass_delta=12.0,
+        ),
+    )
+    result = runtime.calculate_k_factor_simple_result(
+        capture,
+        standard_mass=12.6,
+    )
+
+    assert capture.segment.flow_rate_source == "pc_simulated"
+    assert capture.segment.start_flow == 6.0
+    assert capture.segment.instant_flow == 6.5
+    assert capture.measured_mass_delta == 12.0
+    assert result.corrected_k_factor == 525.0
+    assert any(read[1] == mass_rate.address for read in transport.reads)
+    assert any(read[1] == mass_acc.address for read in transport.reads)
+    history = runtime.list_calibration_history(operation="k_factor_calibration")
+    assert len(history) == 1
+    assert history[0].metrics["flow_rate_source"] == "pc_simulated"
 
 
 def test_modbus_module_manual_zero_start_write_sends_fc05_first(tmp_path) -> None:
@@ -520,17 +735,21 @@ def test_modbus_module_window_uses_own_connection_state(qtbot, tmp_path) -> None
     assert window.kFactorDialog is not None
     window.repeatabilityAction.trigger()
     qtbot.waitUntil(
-        lambda: "Repeatability completed" in window.logTextEdit.toPlainText(),
+        lambda: window.repeatabilityDialog is not None
+        and window.repeatabilityDialog.isVisible(),
         timeout=5000,
     )
+    assert window.repeatabilityDialog is not None
+    assert window.repeatabilityDialog.modeCombo.currentData() == "three_point"
+    assert window.repeatabilityDialog.modeCombo.model().item(1).isEnabled()
+    assert not window.repeatabilityDialog.modeCombo.model().item(2).isEnabled()
 
     assert window.statusValueLabel.text() == "Connected modbus:COM9:7"
     assert window.frameTable.rowCount() >= 14
     assert _table_text(window.frameTable, 0, 1) in {"TX", "RX"}
     log = window.logTextEdit.toPlainText()
     assert "Zero calibration completed" in log
-    assert "Repeatability completed" in log
-    assert repository.count_rows("run_sessions") == 2
+    assert repository.count_rows("run_sessions") == 1
     window.calibrationHistoryAction.trigger()
     qtbot.waitUntil(
         lambda: window.calibrationHistoryDialog is not None
@@ -538,7 +757,7 @@ def test_modbus_module_window_uses_own_connection_state(qtbot, tmp_path) -> None
         timeout=5000,
     )
     assert window.calibrationHistoryDialog is not None
-    assert window.calibrationHistoryDialog.historyTable.rowCount() == 2
+    assert window.calibrationHistoryDialog.historyTable.rowCount() == 1
     assert window.calibrationHistoryDialog.historyTable.columnCount() == 5
     assert window.calibrationHistoryDialog.importButton.text() == "Import..."
     assert window.calibrationHistoryDialog.exportButton.text() == "Export..."
@@ -687,6 +906,522 @@ def test_modbus_module_window_k_factor_simple_flow_calculates_and_writes(
     assert len(history) == 1
     assert history[0].metrics["write_verified"] is True
     assert history[0].metrics["corrected_k_factor"] == 525.0
+
+
+def test_modbus_module_window_k_factor_pc_simulated_flow(
+    qtbot,
+    tmp_path,
+) -> None:
+    repository = _repository(tmp_path)
+    transports = []
+    runtime = ModbusModuleRuntime(
+        repository,
+        transport_factory=placeholder_transport_factory(transports),
+        zero_calibration_wait_s=0.0,
+        k_factor_post_start_sample_s=0.0,
+        k_factor_post_stop_delay_s=0.0,
+    )
+    scanner = SerialPortScanner(provider=lambda: (SerialPortInfo(port="COM9"),))
+    window = ModbusModuleWindow(repository, runtime=runtime, port_scanner=scanner)
+    qtbot.addWidget(window)
+    window.show()
+    dialog = _open_connection_dialog(qtbot, window)
+    _wait_for_scanned_ports(qtbot, dialog, 1)
+    _click(qtbot, dialog.connectButton)
+    qtbot.waitUntil(
+        lambda: window.statusValueLabel.text() == "Connected modbus:COM9:1",
+        timeout=5000,
+    )
+    register_map = runtime.register_map
+    mass_rate = register_map.by_name("mass_rate")
+    mass_acc = register_map.by_name("mass_acc")
+    transports[0].read_sequences[mass_rate.address] = [
+        encode_registers(mass_rate, 0.0),
+        encode_registers(mass_rate, 0.0),
+        encode_registers(mass_rate, 0.0),
+    ]
+    transports[0].read_sequences[mass_acc.address] = [
+        encode_registers(mass_acc, 100.0),
+        encode_registers(mass_acc, 100.0),
+        encode_registers(mass_acc, 100.0),
+    ]
+
+    window.kFactorAction.trigger()
+    qtbot.waitUntil(
+        lambda: window.kFactorDialog is not None and window.kFactorDialog.isVisible(),
+        timeout=5000,
+    )
+    assert window.kFactorDialog is not None
+    k_dialog = window.kFactorDialog
+    k_dialog.pcFlowSimulationCheckBox.setChecked(True)
+    k_dialog.pcFlowValueSpinBox.setValue(6.0)
+    k_dialog.pcMassDeltaSpinBox.setValue(12.0)
+    k_dialog.standardMassSpinBox.setValue(12.6)
+
+    _click(qtbot, k_dialog.startButton)
+    qtbot.waitUntil(
+        lambda: "K factor captured" in window.logTextEdit.toPlainText(),
+        timeout=5000,
+    )
+    assert (
+        _table_text(
+            k_dialog.resultTable,
+            _find_metric_row(k_dialog.resultTable, "flow_rate_source"),
+            1,
+        )
+        == "pc_simulated"
+    )
+    assert _table_text(
+        k_dialog.resultTable,
+        _find_metric_row(k_dialog.resultTable, "delta_m"),
+        1,
+    ) == "12"
+    _click(qtbot, k_dialog.calculateButton)
+    qtbot.waitUntil(
+        lambda: "K factor calculated" in window.logTextEdit.toPlainText(),
+        timeout=5000,
+    )
+    assert "525" in _table_text(
+        k_dialog.resultTable,
+        _find_metric_row(k_dialog.resultTable, "K1"),
+        1,
+    )
+    assert any(read[1] == mass_rate.address for read in transports[0].reads)
+    assert any(read[1] == mass_acc.address for read in transports[0].reads)
+
+
+def test_modbus_module_window_repeatability_simple_records_nine_trials(
+    qtbot,
+    tmp_path,
+) -> None:
+    repository = _repository(tmp_path)
+    transports = []
+    runtime = ModbusModuleRuntime(
+        repository,
+        transport_factory=placeholder_transport_factory(transports),
+        k_factor_post_start_sample_s=0.0,
+        k_factor_post_stop_delay_s=0.0,
+    )
+    scanner = SerialPortScanner(provider=lambda: (SerialPortInfo(port="COM9"),))
+    window = ModbusModuleWindow(
+        repository,
+        runtime=runtime,
+        port_scanner=scanner,
+        data_root=tmp_path,
+    )
+    qtbot.addWidget(window)
+    window.show()
+    dialog = _open_connection_dialog(qtbot, window)
+    _wait_for_scanned_ports(qtbot, dialog, 1)
+    _click(qtbot, dialog.connectButton)
+    qtbot.waitUntil(
+        lambda: window.statusValueLabel.text() == "Connected modbus:COM9:1",
+        timeout=5000,
+    )
+    transport = transports[0]
+    register_map = runtime.register_map
+    mass_rate = register_map.by_name("mass_rate")
+    mass_acc = register_map.by_name("mass_acc")
+    transport.read_sequences[mass_rate.address] = [
+        encode_registers(mass_rate, 0.0),
+        *[
+            encoded
+            for _trial in range(9)
+            for encoded in (
+                encode_registers(mass_rate, 5.0),
+                encode_registers(mass_rate, 5.5),
+                encode_registers(mass_rate, 0.0),
+            )
+        ],
+    ]
+    measured_deltas = (100.0, 101.0, 99.0, 50.0, 51.0, 49.0, 20.0, 20.2, 19.8)
+    cumulative = 0.0
+    mass_acc_reads = [encode_registers(mass_acc, cumulative)]
+    for delta in measured_deltas:
+        mass_acc_reads.append(encode_registers(mass_acc, cumulative))
+        cumulative += delta
+        mass_acc_reads.append(encode_registers(mass_acc, cumulative))
+    transport.read_sequences[mass_acc.address] = mass_acc_reads
+
+    window.repeatabilityAction.trigger()
+    qtbot.waitUntil(
+        lambda: window.repeatabilityDialog is not None
+        and window.repeatabilityDialog.isVisible(),
+        timeout=5000,
+    )
+    assert window.repeatabilityDialog is not None
+    rep_dialog = window.repeatabilityDialog
+    rep_dialog.pollIntervalSpinBox.setValue(0.05)
+    for spin, value in zip(rep_dialog.flowPointSpinBoxes, (600.0, 300.0, 100.0)):
+        spin.setValue(value)
+    _click(qtbot, rep_dialog.saveConfigButton)
+    qtbot.waitUntil(
+        lambda: "Repeatability configuration saved" in window.logTextEdit.toPlainText(),
+        timeout=5000,
+    )
+
+    standards = (100.0, 100.0, 100.0, 50.0, 50.0, 50.0, 20.0, 20.0, 20.0)
+    for index, standard_mass in enumerate(standards, start=1):
+        rep_dialog.standardMassSpinBox.setValue(standard_mass)
+        _click(qtbot, rep_dialog.startButton)
+        qtbot.waitUntil(
+            lambda count=index: window.logTextEdit.toPlainText().count(
+                "Repeatability captured"
+            )
+            >= count,
+            timeout=5000,
+        )
+        _click(qtbot, rep_dialog.saveTrialButton)
+        qtbot.waitUntil(
+            lambda count=index: len(rep_dialog.trial_results()) == count,
+            timeout=5000,
+        )
+        if index == 3:
+            qtbot.waitUntil(
+                lambda: _has_metric_row(
+                    rep_dialog.resultTable,
+                    "flow_600_repeatability_stddev_percent",
+                ),
+                timeout=5000,
+            )
+            assert _table_text(
+                rep_dialog.resultTable,
+                _find_metric_row(
+                    rep_dialog.resultTable,
+                    "flow_600_repeatability_stddev_percent",
+                ),
+                1,
+            ) == "1"
+
+    qtbot.waitUntil(
+        lambda: "Repeatability completed" in window.logTextEdit.toPlainText(),
+        timeout=5000,
+    )
+
+    assert _table_text(
+        rep_dialog.resultTable,
+        _find_metric_row(rep_dialog.resultTable, "trial_count"),
+        1,
+    ) == "9"
+    assert _table_text(rep_dialog.trialTable, 0, 6) == "5.5"
+    assert _table_text(rep_dialog.trialTable, 0, 7)
+    assert _table_text(rep_dialog.trialTable, 1, 9) == "1"
+    assert _table_text(rep_dialog.trialTable, 5, 9) == "-2"
+    history = runtime.list_calibration_history(operation="manual_error_repeatability")
+    assert len(history) == 1
+    assert history[0].metrics["flow_point_300_repeatability_stddev_percent"] == 2.0
+    window.calibrationHistoryAction.trigger()
+    qtbot.waitUntil(
+        lambda: window.calibrationHistoryDialog is not None
+        and window.calibrationHistoryDialog.isVisible(),
+        timeout=5000,
+    )
+    assert window.calibrationHistoryDialog is not None
+    assert "max_repeatability=" in _table_text(
+        window.calibrationHistoryDialog.historyTable,
+        0,
+        3,
+    )
+    assert (
+        "trial 300/2"
+        in window.calibrationHistoryDialog.detailTextEdit.toPlainText()
+    )
+    assert "v1=5.5" in window.calibrationHistoryDialog.detailTextEdit.toPlainText()
+    assert "v_mean=" in window.calibrationHistoryDialog.detailTextEdit.toPlainText()
+    assert (
+        tmp_path
+        / "config"
+        / "workflow_templates"
+        / "modbus_repeatability_simple.json"
+    ).exists()
+
+
+def test_modbus_module_window_repeatability_single_point_appends_trials(
+    qtbot,
+    tmp_path,
+) -> None:
+    repository = _repository(tmp_path)
+    transports = []
+    runtime = ModbusModuleRuntime(
+        repository,
+        transport_factory=placeholder_transport_factory(transports),
+        k_factor_post_start_sample_s=0.0,
+        k_factor_post_stop_delay_s=0.0,
+    )
+    scanner = SerialPortScanner(provider=lambda: (SerialPortInfo(port="COM9"),))
+    window = ModbusModuleWindow(
+        repository,
+        runtime=runtime,
+        port_scanner=scanner,
+        data_root=tmp_path,
+    )
+    qtbot.addWidget(window)
+    window.show()
+    dialog = _open_connection_dialog(qtbot, window)
+    _wait_for_scanned_ports(qtbot, dialog, 1)
+    _click(qtbot, dialog.connectButton)
+    qtbot.waitUntil(
+        lambda: window.statusValueLabel.text() == "Connected modbus:COM9:1",
+        timeout=5000,
+    )
+    transport = transports[0]
+    register_map = runtime.register_map
+    mass_rate = register_map.by_name("mass_rate")
+    mass_acc = register_map.by_name("mass_acc")
+    transport.read_sequences[mass_rate.address] = [
+        encode_registers(mass_rate, 0.0),
+        *[
+            encoded
+            for _trial in range(4)
+            for encoded in (
+                encode_registers(mass_rate, 4.0),
+                encode_registers(mass_rate, 4.2),
+                encode_registers(mass_rate, 0.0),
+            )
+        ],
+    ]
+    measured_deltas = (100.0, 101.0, 99.0, 102.0)
+    cumulative = 0.0
+    mass_acc_reads = [encode_registers(mass_acc, cumulative)]
+    for delta in measured_deltas:
+        mass_acc_reads.append(encode_registers(mass_acc, cumulative))
+        cumulative += delta
+        mass_acc_reads.append(encode_registers(mass_acc, cumulative))
+    transport.read_sequences[mass_acc.address] = mass_acc_reads
+
+    window.repeatabilityAction.trigger()
+    qtbot.waitUntil(
+        lambda: window.repeatabilityDialog is not None
+        and window.repeatabilityDialog.isVisible(),
+        timeout=5000,
+    )
+    assert window.repeatabilityDialog is not None
+    rep_dialog = window.repeatabilityDialog
+    rep_dialog.modeCombo.setCurrentIndex(
+        rep_dialog.modeCombo.findData("single_point")
+    )
+    rep_dialog.pollIntervalSpinBox.setValue(0.05)
+    rep_dialog.flowPointSpinBoxes[0].setValue(250.0)
+    _click(qtbot, rep_dialog.saveConfigButton)
+    qtbot.waitUntil(
+        lambda: "Repeatability configuration saved" in window.logTextEdit.toPlainText(),
+        timeout=5000,
+    )
+
+    for index in range(1, 5):
+        rep_dialog.standardMassSpinBox.setValue(100.0)
+        _click(qtbot, rep_dialog.startButton)
+        qtbot.waitUntil(
+            lambda count=index: window.logTextEdit.toPlainText().count(
+                "Repeatability captured"
+            )
+            >= count,
+            timeout=5000,
+        )
+        _click(qtbot, rep_dialog.saveTrialButton)
+        qtbot.waitUntil(
+            lambda count=index: len(rep_dialog.trial_results()) == count,
+            timeout=5000,
+        )
+
+    assert rep_dialog.trialTable.rowCount() == 5
+    assert _table_text(rep_dialog.trialTable, 4, 2) == "Pending"
+    assert _table_text(rep_dialog.trialTable, 3, 1) == "4"
+    assert _table_text(rep_dialog.trialTable, 3, 9) == "2"
+    assert _table_text(
+        rep_dialog.resultTable,
+        _find_metric_row(rep_dialog.resultTable, "flow_250_trial_count"),
+        1,
+    ) == "4"
+    assert _has_metric_row(
+        rep_dialog.resultTable,
+        "flow_250_repeatability_stddev_percent",
+    )
+    assert rep_dialog.saveResultButton.isEnabled()
+
+    _click(qtbot, rep_dialog.saveResultButton)
+    qtbot.waitUntil(
+        lambda: "Repeatability summary saved" in window.logTextEdit.toPlainText(),
+        timeout=5000,
+    )
+    history = runtime.list_calibration_history(operation="manual_error_repeatability")
+    assert len(history) == 1
+    assert history[0].metrics["mode"] == "single_point"
+    assert history[0].metrics["trial_count"] == 4.0
+    assert history[0].metrics["expected_trials_per_point"] == 4
+    assert len(history[0].metrics["trials"]) == 4
+    assert rep_dialog.startButton.isEnabled()
+
+
+def test_modbus_module_window_repeatability_pc_simulated_flow_trial(
+    qtbot,
+    tmp_path,
+) -> None:
+    repository = _repository(tmp_path)
+    transports = []
+    runtime = ModbusModuleRuntime(
+        repository,
+        transport_factory=placeholder_transport_factory(transports),
+        k_factor_post_start_sample_s=0.0,
+        k_factor_post_stop_delay_s=0.0,
+    )
+    scanner = SerialPortScanner(provider=lambda: (SerialPortInfo(port="COM9"),))
+    window = ModbusModuleWindow(
+        repository,
+        runtime=runtime,
+        port_scanner=scanner,
+        data_root=tmp_path,
+    )
+    qtbot.addWidget(window)
+    window.show()
+    dialog = _open_connection_dialog(qtbot, window)
+    _wait_for_scanned_ports(qtbot, dialog, 1)
+    _click(qtbot, dialog.connectButton)
+    qtbot.waitUntil(
+        lambda: window.statusValueLabel.text() == "Connected modbus:COM9:1",
+        timeout=5000,
+    )
+    transport = transports[0]
+    register_map = runtime.register_map
+    mass_rate = register_map.by_name("mass_rate")
+    mass_acc = register_map.by_name("mass_acc")
+    transport.read_sequences[mass_rate.address] = [
+        encode_registers(mass_rate, 0.0),
+        encode_registers(mass_rate, 0.0),
+        encode_registers(mass_rate, 0.0),
+    ]
+    transport.read_sequences[mass_acc.address] = [
+        encode_registers(mass_acc, 100.0),
+        encode_registers(mass_acc, 100.0),
+        encode_registers(mass_acc, 100.0),
+    ]
+
+    window.repeatabilityAction.trigger()
+    qtbot.waitUntil(
+        lambda: window.repeatabilityDialog is not None
+        and window.repeatabilityDialog.isVisible(),
+        timeout=5000,
+    )
+    assert window.repeatabilityDialog is not None
+    rep_dialog = window.repeatabilityDialog
+    rep_dialog.modeCombo.setCurrentIndex(
+        rep_dialog.modeCombo.findData("single_point")
+    )
+    rep_dialog.pollIntervalSpinBox.setValue(0.05)
+    rep_dialog.pcFlowSimulationCheckBox.setChecked(True)
+    rep_dialog.pcFlowValueSpinBox.setValue(6.0)
+    rep_dialog.pcMassDeltaSpinBox.setValue(100.0)
+    rep_dialog.standardMassSpinBox.setValue(100.0)
+
+    _click(qtbot, rep_dialog.startButton)
+    qtbot.waitUntil(
+        lambda: "Repeatability captured" in window.logTextEdit.toPlainText(),
+        timeout=5000,
+    )
+    assert (
+        _table_text(
+            rep_dialog.resultTable,
+            _find_metric_row(rep_dialog.resultTable, "flow_rate_source"),
+            1,
+        )
+        == "pc_simulated"
+    )
+    _click(qtbot, rep_dialog.saveTrialButton)
+    qtbot.waitUntil(
+        lambda: len(rep_dialog.trial_results()) == 1,
+        timeout=5000,
+    )
+    assert _table_text(rep_dialog.trialTable, 0, 5) == "100"
+    assert _table_text(rep_dialog.trialTable, 0, 9) == "0"
+    assert (
+        _table_text(
+            rep_dialog.resultTable,
+            _find_metric_row(rep_dialog.resultTable, "last_flow_rate_source"),
+            1,
+        )
+        == "pc_simulated"
+    )
+    assert any(read[1] == mass_rate.address for read in transport.reads)
+    assert any(read[1] == mass_acc.address for read in transport.reads)
+
+
+def test_modbus_module_window_repeatability_close_discards_incomplete_capture(
+    qtbot,
+    tmp_path,
+) -> None:
+    repository = _repository(tmp_path)
+    transports = []
+    runtime = ModbusModuleRuntime(
+        repository,
+        transport_factory=placeholder_transport_factory(transports),
+        k_factor_post_start_sample_s=0.0,
+        k_factor_post_stop_delay_s=0.0,
+    )
+    scanner = SerialPortScanner(provider=lambda: (SerialPortInfo(port="COM9"),))
+    window = ModbusModuleWindow(
+        repository,
+        runtime=runtime,
+        port_scanner=scanner,
+        data_root=tmp_path,
+    )
+    qtbot.addWidget(window)
+    window.show()
+    dialog = _open_connection_dialog(qtbot, window)
+    _wait_for_scanned_ports(qtbot, dialog, 1)
+    _click(qtbot, dialog.connectButton)
+    qtbot.waitUntil(
+        lambda: window.statusValueLabel.text() == "Connected modbus:COM9:1",
+        timeout=5000,
+    )
+    transport = transports[0]
+    register_map = runtime.register_map
+    mass_rate = register_map.by_name("mass_rate")
+    mass_acc = register_map.by_name("mass_acc")
+    transport.read_sequences[mass_rate.address] = [
+        encode_registers(mass_rate, 0.0),
+        encode_registers(mass_rate, 5.0),
+        encode_registers(mass_rate, 5.5),
+        encode_registers(mass_rate, 0.0),
+    ]
+    transport.read_sequences[mass_acc.address] = [
+        encode_registers(mass_acc, 0.0),
+        encode_registers(mass_acc, 0.0),
+        encode_registers(mass_acc, 100.0),
+    ]
+
+    window.repeatabilityAction.trigger()
+    qtbot.waitUntil(
+        lambda: window.repeatabilityDialog is not None
+        and window.repeatabilityDialog.isVisible(),
+        timeout=5000,
+    )
+    assert window.repeatabilityDialog is not None
+    first_dialog = window.repeatabilityDialog
+    first_dialog.pollIntervalSpinBox.setValue(0.05)
+    _click(qtbot, first_dialog.startButton)
+    qtbot.waitUntil(
+        lambda: first_dialog.current_capture() is not None,
+        timeout=5000,
+    )
+    assert len(first_dialog.trial_results()) == 0
+
+    first_dialog.close()
+    qtbot.waitUntil(lambda: window.repeatabilityDialog is None, timeout=5000)
+
+    window.repeatabilityAction.trigger()
+    qtbot.waitUntil(
+        lambda: window.repeatabilityDialog is not None
+        and window.repeatabilityDialog.isVisible(),
+        timeout=5000,
+    )
+    assert window.repeatabilityDialog is not None
+    reopened = window.repeatabilityDialog
+    assert reopened is not first_dialog
+    assert reopened.current_capture() is None
+    assert len(reopened.trial_results()) == 0
+    assert reopened.statusLabel.text() == "Ready"
+    assert _table_text(reopened.trialTable, 0, 2) == "Pending"
+    assert reopened.saveTrialButton.isEnabled() is False
 
 
 def test_modbus_module_window_k_factor_cancel_on_close_recovers_controls(

@@ -39,7 +39,6 @@ from PySide6.QtWidgets import (
     QDateTimeEdit,
 )
 
-from coreflow.analysis.calibration import RepeatabilityTrial
 from coreflow.app.modbus_runtime import (
     ModbusCalibrationHistoryEntry,
     ModbusCalibrationHistoryExportResult,
@@ -48,6 +47,11 @@ from coreflow.app.modbus_runtime import (
     ModbusKFactorSimpleCapture,
     ModbusKFactorSimpleResult,
     ModbusModuleRuntime,
+    PcFlowSimulationSettings,
+    ModbusRepeatabilityFlowSummary,
+    ModbusRepeatabilitySimpleCapture,
+    ModbusRepeatabilitySimpleResult,
+    ModbusRepeatabilitySimpleTrialResult,
     ModbusVariableSampleResult,
     ModbusZeroCalibrationResult,
 )
@@ -500,6 +504,19 @@ class KFactorCalibrationDialog(QDialog):
         self.pollIntervalSpinBox.setSingleStep(0.1)
         self.pollIntervalSpinBox.setValue(1.0)
         settings.addRow("Poll Interval (s)", self.pollIntervalSpinBox)
+        self.pcFlowSimulationCheckBox = QCheckBox("PC simulate flow segment")
+        self.pcFlowSimulationCheckBox.setObjectName(
+            "modbusKFactorPcFlowSimulationCheckBox"
+        )
+        settings.addRow("", self.pcFlowSimulationCheckBox)
+        self.pcFlowValueSpinBox = _float_input(5.0)
+        self.pcFlowValueSpinBox.setObjectName("modbusKFactorPcFlowValueSpinBox")
+        self.pcFlowValueSpinBox.setMinimum(0.000001)
+        settings.addRow("PC Sim Flow", self.pcFlowValueSpinBox)
+        self.pcMassDeltaSpinBox = _float_input(12.0)
+        self.pcMassDeltaSpinBox.setObjectName("modbusKFactorPcMassDeltaSpinBox")
+        self.pcMassDeltaSpinBox.setMinimum(0.000001)
+        settings.addRow("PC Sim Delta m", self.pcMassDeltaSpinBox)
         self.standardMassSpinBox = _float_input(12.6)
         self.standardMassSpinBox.setObjectName("modbusKFactorStandardMassSpinBox")
         self.standardMassSpinBox.setMinimum(0.000001)
@@ -670,6 +687,7 @@ class KFactorCalibrationDialog(QDialog):
                 ("t2", _format_datetime(capture.segment.ended_at)),
                 ("duration_s", capture.segment.duration_s),
                 ("v1", capture.segment.instant_flow),
+                ("flow_rate_source", capture.segment.flow_rate_source),
             ]
         )
 
@@ -707,6 +725,9 @@ class KFactorCalibrationDialog(QDialog):
             "flow_acc_parameter": self.flowAccCombo.currentText(),
             "k_factor_parameter": self.kFactorCombo.currentText(),
             "poll_interval_s": self.pollIntervalSpinBox.value(),
+            "pc_flow_simulation_enabled": self.pcFlowSimulationCheckBox.isChecked(),
+            "pc_flow_simulation_value": self.pcFlowValueSpinBox.value(),
+            "pc_mass_delta": self.pcMassDeltaSpinBox.value(),
         }
 
     def apply_configuration(self, settings: dict[str, object]) -> None:
@@ -716,6 +737,15 @@ class KFactorCalibrationDialog(QDialog):
         poll_interval = settings.get("poll_interval_s")
         if isinstance(poll_interval, (int, float)):
             self.pollIntervalSpinBox.setValue(float(poll_interval))
+        pc_enabled = settings.get("pc_flow_simulation_enabled")
+        if isinstance(pc_enabled, bool):
+            self.pcFlowSimulationCheckBox.setChecked(pc_enabled)
+        pc_value = settings.get("pc_flow_simulation_value")
+        if isinstance(pc_value, (int, float)):
+            self.pcFlowValueSpinBox.setValue(float(pc_value))
+        pc_mass_delta = settings.get("pc_mass_delta")
+        if isinstance(pc_mass_delta, (int, float)):
+            self.pcMassDeltaSpinBox.setValue(float(pc_mass_delta))
         snapshot_names = settings.get("snapshot_variable_names")
         if isinstance(snapshot_names, (list, tuple)):
             selected = {str(name) for name in snapshot_names}
@@ -756,6 +786,7 @@ class KFactorCalibrationDialog(QDialog):
             ("K1", result.corrected_k_factor),
             ("v_mean", result.mean_flow),
             ("v1", result.instant_flow),
+            ("flow_rate_source", result.flow_rate_source),
             ("t1", _format_datetime(result.flow_started_at)),
             ("t2", _format_datetime(result.flow_ended_at)),
             ("duration_s", result.duration_s),
@@ -804,12 +835,679 @@ class KFactorCalibrationDialog(QDialog):
             self.flowAccCombo,
             self.kFactorCombo,
             self.pollIntervalSpinBox,
+            self.pcFlowSimulationCheckBox,
+            self.pcFlowValueSpinBox,
+            self.pcMassDeltaSpinBox,
             self.standardMassSpinBox,
             self.saveHistoryCheckBox,
             self.writeToDeviceCheckBox,
             self.snapshotTable,
         ):
             widget.setEnabled(enabled)
+
+
+class RepeatabilityTestDialog(QDialog):
+    """Operator-facing simple error and repeatability test dialog."""
+
+    cancelRequested = Signal()
+
+    def __init__(self, *, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Error And Repeatability Test")
+        self.setModal(False)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        self.setSizeGripEnabled(True)
+        self.resize(1080, 820)
+        self.setMinimumSize(820, 600)
+        self._run_id: str | None = None
+        self._capture: ModbusRepeatabilitySimpleCapture | None = None
+        self._trials: list[ModbusRepeatabilitySimpleTrialResult] = []
+        self._result: ModbusRepeatabilitySimpleResult | None = None
+        self._build_ui()
+        self._populate_trial_placeholders()
+
+    def closeEvent(self, event) -> None:  # noqa: N802 - Qt override name
+        self.cancelRequested.emit()
+        super().closeEvent(event)
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(10)
+
+        self.statusLabel = QLabel("Ready")
+        self.statusLabel.setObjectName("modbusRepeatabilityStatusLabel")
+        root.addWidget(self.statusLabel)
+
+        settings_group = QGroupBox("Error And Repeatability")
+        settings = QFormLayout(settings_group)
+        self.modeCombo = QComboBox()
+        self.modeCombo.setObjectName("modbusRepeatabilityModeCombo")
+        self.modeCombo.addItem("Three Flow Ranges", "three_point")
+        self.modeCombo.addItem("Single Flow Range", "single_point")
+        self.modeCombo.addItem("Advanced (reserved)", "advanced")
+        self.modeCombo.model().item(2).setEnabled(False)
+        self.modeCombo.currentIndexChanged.connect(self._mode_changed)
+        settings.addRow("Mode", self.modeCombo)
+
+        self.flowRateCombo = QComboBox()
+        self.flowRateCombo.setObjectName("modbusRepeatabilityFlowRateCombo")
+        settings.addRow("Flow Rate", self.flowRateCombo)
+        self.flowAccCombo = QComboBox()
+        self.flowAccCombo.setObjectName("modbusRepeatabilityFlowAccCombo")
+        settings.addRow("Flow Acc", self.flowAccCombo)
+        self.pollIntervalSpinBox = QDoubleSpinBox()
+        self.pollIntervalSpinBox.setObjectName(
+            "modbusRepeatabilityPollIntervalSpinBox"
+        )
+        self.pollIntervalSpinBox.setRange(0.05, 30.0)
+        self.pollIntervalSpinBox.setDecimals(2)
+        self.pollIntervalSpinBox.setSingleStep(0.1)
+        self.pollIntervalSpinBox.setValue(1.0)
+        settings.addRow("Poll Interval (s)", self.pollIntervalSpinBox)
+        self.pcFlowSimulationCheckBox = QCheckBox("PC simulate flow segment")
+        self.pcFlowSimulationCheckBox.setObjectName(
+            "modbusRepeatabilityPcFlowSimulationCheckBox"
+        )
+        settings.addRow("", self.pcFlowSimulationCheckBox)
+        self.pcFlowValueSpinBox = _float_input(5.0)
+        self.pcFlowValueSpinBox.setObjectName(
+            "modbusRepeatabilityPcFlowValueSpinBox"
+        )
+        self.pcFlowValueSpinBox.setMinimum(0.000001)
+        settings.addRow("PC Sim Flow", self.pcFlowValueSpinBox)
+        self.pcMassDeltaSpinBox = _float_input(100.0)
+        self.pcMassDeltaSpinBox.setObjectName(
+            "modbusRepeatabilityPcMassDeltaSpinBox"
+        )
+        self.pcMassDeltaSpinBox.setMinimum(0.000001)
+        settings.addRow("PC Sim Delta m", self.pcMassDeltaSpinBox)
+
+        self.flowPointSpinBoxes: list[QDoubleSpinBox] = []
+        for index, value in enumerate((600.0, 300.0, 100.0), start=1):
+            spin = _float_input(value)
+            spin.setObjectName(f"modbusRepeatabilityFlowPoint{index}SpinBox")
+            spin.setMinimum(0.0)
+            spin.valueChanged.connect(self._flow_points_changed)
+            self.flowPointSpinBoxes.append(spin)
+            settings.addRow(f"Flow Point {index}", spin)
+
+        self.standardMassSpinBox = _float_input(10.0)
+        self.standardMassSpinBox.setObjectName(
+            "modbusRepeatabilityStandardMassSpinBox"
+        )
+        self.standardMassSpinBox.setMinimum(0.000001)
+        settings.addRow("Standard Mass", self.standardMassSpinBox)
+        self.saveHistoryCheckBox = QCheckBox("Record calibration history")
+        self.saveHistoryCheckBox.setObjectName(
+            "modbusRepeatabilitySaveHistoryCheckBox"
+        )
+        self.saveHistoryCheckBox.setChecked(True)
+        settings.addRow("", self.saveHistoryCheckBox)
+        root.addWidget(settings_group, 1)
+
+        snapshot_group = QGroupBox("Pre-test Snapshot")
+        snapshot_layout = QVBoxLayout(snapshot_group)
+        self.snapshotTable = QTableWidget(0, 5)
+        self.snapshotTable.setObjectName("modbusRepeatabilitySnapshotTable")
+        self.snapshotTable.setHorizontalHeaderLabels(
+            ["Capture", "Variable", "Kind", "Address", "Type"]
+        )
+        self.snapshotTable.verticalHeader().setVisible(False)
+        self.snapshotTable.setAlternatingRowColors(True)
+        self.snapshotTable.setSelectionMode(
+            QAbstractItemView.SelectionMode.NoSelection
+        )
+        self.snapshotTable.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
+        self.snapshotTable.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+        )
+        snapshot_layout.addWidget(self.snapshotTable)
+        root.addWidget(snapshot_group, 2)
+
+        self.trialTable = QTableWidget(9, 10)
+        self.trialTable.setObjectName("modbusRepeatabilityTrialTable")
+        self.trialTable.setHorizontalHeaderLabels(
+            [
+                "Target Flow",
+                "Trial",
+                "State",
+                "m1",
+                "m2",
+                "Delta m",
+                "v1",
+                "v_mean",
+                "Standard Mass",
+                "Error (%)",
+            ]
+        )
+        self.trialTable.verticalHeader().setVisible(False)
+        self.trialTable.setAlternatingRowColors(True)
+        self.trialTable.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectItems
+        )
+        self.trialTable.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        self.trialTable.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+        )
+        self.trialTable.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+        )
+        for column, width in enumerate(
+            (120, 70, 110, 95, 95, 95, 95, 95, 120, 110)
+        ):
+            self.trialTable.setColumnWidth(column, width)
+        root.addWidget(self.trialTable, 2)
+
+        self.resultTable = QTableWidget(0, 2)
+        self.resultTable.setObjectName("modbusRepeatabilityResultTable")
+        self.resultTable.setHorizontalHeaderLabels(["Metric", "Value"])
+        self.resultTable.verticalHeader().setVisible(False)
+        self.resultTable.setAlternatingRowColors(True)
+        self.resultTable.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectItems
+        )
+        self.resultTable.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        self.resultTable.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
+        self.resultTable.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+        )
+        root.addWidget(self.resultTable, 2)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        self.startButton = QPushButton("Capture Trial")
+        self.startButton.setObjectName("modbusRepeatabilityStartButton")
+        self.saveTrialButton = QPushButton("Save Trial")
+        self.saveTrialButton.setObjectName("modbusRepeatabilitySaveTrialButton")
+        self.saveTrialButton.setEnabled(False)
+        self.saveResultButton = QPushButton("Save Summary")
+        self.saveResultButton.setObjectName("modbusRepeatabilitySaveResultButton")
+        self.saveResultButton.setEnabled(False)
+        self.saveConfigButton = QPushButton("Save Configuration")
+        self.saveConfigButton.setObjectName("modbusRepeatabilitySaveConfigButton")
+        self.newTestButton = QPushButton("New Test")
+        self.newTestButton.setObjectName("modbusRepeatabilityNewTestButton")
+        self.newTestButton.clicked.connect(self.reset_test)
+        self.closeButton = QPushButton("Close")
+        self.closeButton.setObjectName("modbusRepeatabilityCloseButton")
+        self.closeButton.clicked.connect(self.close)
+        buttons.addWidget(self.startButton)
+        buttons.addWidget(self.saveTrialButton)
+        buttons.addWidget(self.saveResultButton)
+        buttons.addWidget(self.saveConfigButton)
+        buttons.addWidget(self.newTestButton)
+        buttons.addWidget(self.closeButton)
+        root.addLayout(buttons)
+
+    def set_registers(
+        self,
+        registers: tuple[ModbusRegister, ...],
+        *,
+        selected_names: tuple[str, ...] | None = None,
+    ) -> None:
+        names = tuple(register.name for register in registers)
+        self._set_combo_items(self.flowRateCombo, names, ("flow_rate", "mass_rate", "mass_flow"))
+        self._set_combo_items(self.flowAccCombo, names, ("flow_acc", "mass_acc"))
+        if selected_names is None:
+            selected_names = self.selected_snapshot_variable_names()
+        if not selected_names:
+            selected_names = _default_zero_snapshot_names(registers)
+        selected = set(selected_names)
+        self.snapshotTable.setRowCount(len(registers))
+        for row, register in enumerate(registers):
+            check_item = QTableWidgetItem("")
+            check_item.setFlags(
+                Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable
+            )
+            check_item.setCheckState(
+                Qt.CheckState.Checked
+                if register.name in selected
+                else Qt.CheckState.Unchecked
+            )
+            self.snapshotTable.setItem(row, 0, check_item)
+            values = (
+                register.name,
+                register.kind.value,
+                str(register.address),
+                register.data_type.value,
+            )
+            for offset, value in enumerate(values, start=1):
+                item = QTableWidgetItem(value)
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self.snapshotTable.setItem(row, offset, item)
+
+    def selected_snapshot_variable_names(self) -> tuple[str, ...]:
+        names: list[str] = []
+        for row in range(self.snapshotTable.rowCount()):
+            check_item = self.snapshotTable.item(row, 0)
+            if check_item is None or check_item.checkState() != Qt.CheckState.Checked:
+                continue
+            name = _table_text(self.snapshotTable, row, 1)
+            if name:
+                names.append(name)
+        return tuple(names)
+
+    def capture_settings(self) -> dict[str, object]:
+        return {
+            "mode": self.mode(),
+            "snapshot_variable_names": self.selected_snapshot_variable_names(),
+            "flow_rate_parameter": self.flowRateCombo.currentText(),
+            "flow_acc_parameter": self.flowAccCombo.currentText(),
+            "poll_interval_s": self.pollIntervalSpinBox.value(),
+            "pc_flow_simulation_enabled": self.pcFlowSimulationCheckBox.isChecked(),
+            "pc_flow_simulation_value": self.pcFlowValueSpinBox.value(),
+            "pc_mass_delta": self.pcMassDeltaSpinBox.value(),
+            "flow_points": self.flow_points(),
+        }
+
+    def apply_configuration(self, settings: dict[str, object]) -> None:
+        mode = settings.get("mode")
+        if isinstance(mode, str):
+            index = self.modeCombo.findData(mode)
+            if index >= 0 and self.modeCombo.model().item(index).isEnabled():
+                self.modeCombo.setCurrentIndex(index)
+        self._set_combo_text(self.flowRateCombo, settings.get("flow_rate_parameter"))
+        self._set_combo_text(self.flowAccCombo, settings.get("flow_acc_parameter"))
+        poll_interval = settings.get("poll_interval_s")
+        if isinstance(poll_interval, (int, float)):
+            self.pollIntervalSpinBox.setValue(float(poll_interval))
+        pc_enabled = settings.get("pc_flow_simulation_enabled")
+        if isinstance(pc_enabled, bool):
+            self.pcFlowSimulationCheckBox.setChecked(pc_enabled)
+        pc_value = settings.get("pc_flow_simulation_value")
+        if isinstance(pc_value, (int, float)):
+            self.pcFlowValueSpinBox.setValue(float(pc_value))
+        pc_mass_delta = settings.get("pc_mass_delta")
+        if isinstance(pc_mass_delta, (int, float)):
+            self.pcMassDeltaSpinBox.setValue(float(pc_mass_delta))
+        flow_points = settings.get("flow_points")
+        if isinstance(flow_points, (list, tuple)):
+            for spin, value in zip(self.flowPointSpinBoxes, flow_points):
+                if isinstance(value, (int, float)):
+                    spin.setValue(float(value))
+        snapshot_names = settings.get("snapshot_variable_names")
+        if isinstance(snapshot_names, (list, tuple)):
+            selected = {str(name) for name in snapshot_names}
+            for row in range(self.snapshotTable.rowCount()):
+                check_item = self.snapshotTable.item(row, 0)
+                if check_item is None:
+                    continue
+                name = _table_text(self.snapshotTable, row, 1)
+                check_item.setCheckState(
+                    Qt.CheckState.Checked
+                    if name in selected
+                    else Qt.CheckState.Unchecked
+                )
+        self._populate_trial_placeholders()
+
+    def mode(self) -> str:
+        value = self.modeCombo.currentData()
+        return str(value) if value else "three_point"
+
+    def is_single_point_mode(self) -> bool:
+        return self.mode() == "single_point"
+
+    def flow_points(self) -> tuple[float, float, float]:
+        return tuple(spin.value() for spin in self.flowPointSpinBoxes)  # type: ignore[return-value]
+
+    def next_trial_context(self) -> tuple[float, int]:
+        if self.is_single_point_mode():
+            return self.flow_points()[0], len(self._trials) + 1
+        if len(self._trials) >= 9:
+            raise ValueError("All 9 repeatability trials are already complete.")
+        flow_points = self.flow_points()
+        flow_index = len(self._trials) // 3
+        trial_index = len(self._trials) % 3 + 1
+        return flow_points[flow_index], trial_index
+
+    def current_run_id(self) -> str | None:
+        return self._run_id
+
+    def current_capture(self) -> ModbusRepeatabilitySimpleCapture | None:
+        return self._capture
+
+    def trial_results(self) -> tuple[ModbusRepeatabilitySimpleTrialResult, ...]:
+        return tuple(self._trials)
+
+    def standard_mass(self) -> float:
+        return self.standardMassSpinBox.value()
+
+    def save_history(self) -> bool:
+        return self.saveHistoryCheckBox.isChecked()
+
+    def is_complete(self) -> bool:
+        if self.is_single_point_mode():
+            return False
+        return len(self._trials) >= 9
+
+    def can_save_summary(self) -> bool:
+        return self.is_single_point_mode() and bool(self._trials)
+
+    def reset_test(self) -> None:
+        self._run_id = None
+        self._capture = None
+        self._trials = []
+        self._result = None
+        self.resultTable.setRowCount(0)
+        self._populate_trial_placeholders()
+        self.statusLabel.setText("Ready")
+        self.set_ready(connected=True)
+
+    def set_ready(self, *, connected: bool) -> None:
+        can_capture = connected and self._capture is None and not self.is_complete()
+        self.startButton.setEnabled(can_capture)
+        self.saveTrialButton.setEnabled(connected and self._capture is not None)
+        self.saveResultButton.setEnabled(connected and self.can_save_summary())
+        self.saveConfigButton.setEnabled(True)
+        self.newTestButton.setEnabled(connected)
+        self._set_config_enabled(connected and not self._trials and self._capture is None)
+        self.standardMassSpinBox.setEnabled(connected and self._capture is not None)
+        self.saveHistoryCheckBox.setEnabled(
+            connected and (self.is_single_point_mode() or not self.is_complete())
+        )
+        if connected and self.statusLabel.text() == "Running...":
+            self.statusLabel.setText("Ready")
+
+    def set_running(self) -> None:
+        self.statusLabel.setText("Running...")
+        self.startButton.setEnabled(False)
+        self.saveTrialButton.setEnabled(False)
+        self.saveResultButton.setEnabled(False)
+        self.saveConfigButton.setEnabled(False)
+        self.newTestButton.setEnabled(False)
+        self._set_config_enabled(False)
+        self.standardMassSpinBox.setEnabled(False)
+        self.saveHistoryCheckBox.setEnabled(False)
+
+    def set_canceling(self) -> None:
+        self.statusLabel.setText("Canceling...")
+        self.startButton.setEnabled(False)
+        self.saveTrialButton.setEnabled(False)
+        self.saveResultButton.setEnabled(False)
+        self.saveConfigButton.setEnabled(False)
+        self.newTestButton.setEnabled(False)
+        self._set_config_enabled(False)
+        self.standardMassSpinBox.setEnabled(False)
+        self.saveHistoryCheckBox.setEnabled(False)
+
+    def set_captured(self, capture: ModbusRepeatabilitySimpleCapture) -> None:
+        self._run_id = capture.run_id
+        self._capture = capture
+        self.statusLabel.setText(
+            "Captured trial data. Enter standard mass and click Save Trial."
+        )
+        self.startButton.setEnabled(False)
+        self.saveTrialButton.setEnabled(True)
+        self.saveResultButton.setEnabled(False)
+        self.saveConfigButton.setEnabled(True)
+        self.newTestButton.setEnabled(True)
+        self._set_config_enabled(False)
+        self.standardMassSpinBox.setEnabled(True)
+        self.saveHistoryCheckBox.setEnabled(
+            self.is_single_point_mode() or not self.is_complete()
+        )
+        self._populate_rows(
+            [
+                ("run_id", capture.run_id),
+                ("flow_point", capture.flow_point),
+                ("trial", capture.trial_index),
+                ("m1", capture.mass_acc_before),
+                ("m2", capture.mass_acc_after),
+                ("delta_m", capture.measured_mass_delta),
+                ("t1", _format_datetime(capture.segment.started_at)),
+                ("t2", _format_datetime(capture.segment.ended_at)),
+                ("duration_s", capture.segment.duration_s),
+                ("v1", capture.segment.instant_flow),
+                ("v_mean", capture.mean_flow),
+                ("flow_rate_source", capture.segment.flow_rate_source),
+            ]
+        )
+
+    def add_trial_result(
+        self,
+        trial: ModbusRepeatabilitySimpleTrialResult,
+    ) -> None:
+        row = len(self._trials)
+        self._trials.append(trial)
+        self._capture = None
+        self._result = None
+        self._set_trial_row(row, trial)
+        if self.is_single_point_mode():
+            self._populate_trial_placeholders()
+        if self.is_complete():
+            self.statusLabel.setText("All trials captured. Calculating summary...")
+        else:
+            flow_point, trial_index = self.next_trial_context()
+            self.statusLabel.setText(
+                f"Saved trial. Next: flow point {flow_point:g}, trial {trial_index}."
+            )
+        self.startButton.setEnabled(not self.is_complete())
+        self.saveTrialButton.setEnabled(False)
+        self.saveResultButton.setEnabled(self.can_save_summary())
+        self.standardMassSpinBox.setEnabled(False)
+        self.saveConfigButton.setEnabled(True)
+        self.newTestButton.setEnabled(True)
+        self.saveHistoryCheckBox.setEnabled(
+            self.is_single_point_mode() or not self.is_complete()
+        )
+
+    def set_result(self, result: ModbusRepeatabilitySimpleResult) -> None:
+        self._result = result
+        if self.is_single_point_mode():
+            self.statusLabel.setText(
+                f"Repeatability summary saved {result.run_id}; next trial can be captured."
+            )
+        else:
+            self.statusLabel.setText(f"Repeatability completed {result.run_id}")
+        self.startButton.setEnabled(self.is_single_point_mode())
+        self.saveTrialButton.setEnabled(False)
+        self.saveResultButton.setEnabled(self.can_save_summary())
+        self.saveConfigButton.setEnabled(True)
+        self.newTestButton.setEnabled(True)
+        self._set_config_enabled(False)
+        self.standardMassSpinBox.setEnabled(False)
+        self.saveHistoryCheckBox.setEnabled(
+            self.is_single_point_mode() or not self.is_complete()
+        )
+        rows: list[tuple[str, object]] = [
+            ("run_id", result.run_id),
+            ("trial_count", result.analysis.summary_metrics["trial_count"]),
+            ("mean_percent_error", result.analysis.summary_metrics["mean_percent_error"]),
+            (
+                "max_abs_percent_error",
+                result.analysis.summary_metrics["max_abs_percent_error"],
+            ),
+            (
+                "max_repeatability_stddev_percent",
+                result.analysis.summary_metrics[
+                    "max_repeatability_stddev_percent"
+                ],
+            ),
+            ("history_saved", result.history_saved),
+        ]
+        for point in result.analysis.flow_points:
+            rows.append(
+                (
+                    f"flow_{point.flow_point:g}_repeatability_stddev_percent",
+                    point.repeatability_stddev_percent,
+                )
+            )
+        self._populate_rows(rows)
+
+    def set_error(self, message: str) -> None:
+        self.statusLabel.setText(f"Failed: {message}")
+        self.startButton.setEnabled(self._capture is None and not self.is_complete())
+        self.saveTrialButton.setEnabled(self._capture is not None)
+        self.saveResultButton.setEnabled(self.can_save_summary())
+        self.saveConfigButton.setEnabled(True)
+        self.newTestButton.setEnabled(True)
+        self.standardMassSpinBox.setEnabled(self._capture is not None)
+        self.saveHistoryCheckBox.setEnabled(
+            self.is_single_point_mode() or not self.is_complete()
+        )
+        self._set_config_enabled(not self._trials and self._capture is None)
+
+    def _populate_trial_placeholders(self) -> None:
+        if self._capture is not None:
+            return
+        if self.is_single_point_mode():
+            row_count = len(self._trials) + 1
+            self.trialTable.setRowCount(row_count)
+            for row, trial in enumerate(self._trials):
+                self._set_trial_row(row, trial)
+            flow_point, trial_index = self.next_trial_context()
+            self._set_pending_trial_row(row_count - 1, flow_point, trial_index)
+            return
+        self.trialTable.setRowCount(9)
+        row = 0
+        for flow_point in self.flow_points():
+            for trial_index in range(1, 4):
+                if row < len(self._trials):
+                    self._set_trial_row(row, self._trials[row])
+                else:
+                    self._set_pending_trial_row(row, flow_point, trial_index)
+                row += 1
+
+    def _set_trial_row(
+        self,
+        row: int,
+        trial: ModbusRepeatabilitySimpleTrialResult,
+    ) -> None:
+        values = (
+            trial.flow_point,
+            trial.trial_index,
+            "Saved",
+            trial.mass_acc_before,
+            trial.mass_acc_after,
+            trial.measured_mass_delta,
+            trial.instant_flow,
+            trial.mean_flow,
+            trial.standard_mass,
+            trial.percent_error,
+        )
+        for column, value in enumerate(values):
+            self._set_trial_text(row, column, _format_value(value))
+
+    def _set_pending_trial_row(
+        self,
+        row: int,
+        flow_point: float,
+        trial_index: int,
+    ) -> None:
+        self._set_trial_text(row, 0, _format_value(flow_point))
+        self._set_trial_text(row, 1, str(trial_index))
+        self._set_trial_text(row, 2, "Pending")
+        for column in range(3, 10):
+            self._set_trial_text(row, column, "")
+
+    def _set_trial_text(self, row: int, column: int, value: str) -> None:
+        item = QTableWidgetItem(value)
+        item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+        self.trialTable.setItem(row, column, item)
+
+    def set_progress_summary(
+        self,
+        *,
+        latest_trial: ModbusRepeatabilitySimpleTrialResult,
+        flow_summaries: tuple[ModbusRepeatabilityFlowSummary, ...],
+    ) -> None:
+        rows: list[tuple[str, object]] = [
+            ("run_id", latest_trial.run_id),
+            ("mode", self.mode()),
+            ("trial_count", len(self._trials)),
+            ("last_flow_point", latest_trial.flow_point),
+            ("last_trial", latest_trial.trial_index),
+            ("last_error_percent", latest_trial.percent_error),
+            ("last_v1", latest_trial.instant_flow),
+            ("last_v_mean", latest_trial.mean_flow),
+            ("last_flow_rate_source", latest_trial.flow_rate_source),
+        ]
+        for flow_summary in flow_summaries:
+            rows.extend(
+                [
+                    (f"flow_{flow_summary.flow_point:g}_trial_count", flow_summary.trial_count),
+                    (
+                        f"flow_{flow_summary.flow_point:g}_mean_percent_error",
+                        flow_summary.mean_percent_error,
+                    ),
+                    (
+                        f"flow_{flow_summary.flow_point:g}_max_abs_percent_error",
+                        flow_summary.max_abs_percent_error,
+                    ),
+                    (
+                        f"flow_{flow_summary.flow_point:g}_repeatability_stddev_percent",
+                        flow_summary.repeatability_stddev_percent,
+                    ),
+                ]
+            )
+        self._populate_rows(rows)
+
+    def _populate_rows(self, rows: list[tuple[str, object]]) -> None:
+        self.resultTable.setRowCount(len(rows))
+        for row, (name, value) in enumerate(rows):
+            for column, text in enumerate((name, _format_value(value))):
+                item = QTableWidgetItem(text)
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self.resultTable.setItem(row, column, item)
+
+    def _flow_points_changed(self) -> None:
+        self._populate_trial_placeholders()
+
+    def _mode_changed(self) -> None:
+        self._populate_trial_placeholders()
+        if self._trials or self._capture is not None:
+            return
+        config_enabled = self.modeCombo.isEnabled()
+        single_point = self.is_single_point_mode()
+        for index, spin in enumerate(self.flowPointSpinBoxes):
+            spin.setEnabled(config_enabled and (index == 0 or not single_point))
+
+    def _set_config_enabled(self, enabled: bool) -> None:
+        single_point = self.is_single_point_mode()
+        for widget in (
+            self.modeCombo,
+            self.flowRateCombo,
+            self.flowAccCombo,
+            self.pollIntervalSpinBox,
+            self.pcFlowSimulationCheckBox,
+            self.pcFlowValueSpinBox,
+            self.pcMassDeltaSpinBox,
+            self.snapshotTable,
+        ):
+            widget.setEnabled(enabled)
+        for index, spin in enumerate(self.flowPointSpinBoxes):
+            spin.setEnabled(enabled and (index == 0 or not single_point))
+
+    def _set_combo_items(
+        self,
+        combo: QComboBox,
+        names: tuple[str, ...],
+        preferred: tuple[str, ...],
+    ) -> None:
+        current = combo.currentText()
+        combo.clear()
+        combo.addItems(names)
+        target = current if current in names else ""
+        if not target:
+            target = next((name for name in preferred if name in names), names[0] if names else "")
+        if target:
+            combo.setCurrentText(target)
+
+    def _set_combo_text(self, combo: QComboBox, value: object) -> None:
+        if not isinstance(value, str):
+            return
+        index = combo.findText(value)
+        if index >= 0:
+            combo.setCurrentIndex(index)
 
 
 class CalibrationHistoryExportDialog(QDialog):
@@ -1189,22 +1887,28 @@ class ModbusModuleWindow(QDialog):
         self._last_order = "ABCD"
         self._pending_map_load_error: str | None = None
         self._pending_k_factor_load_error: str | None = None
+        self._pending_repeatability_load_error: str | None = None
         self._zero_snapshot_variable_names: tuple[str, ...] | None = None
         self._saved_k_factor_configuration: dict[str, object] = {}
         self._k_factor_snapshot_variable_names: tuple[str, ...] | None = None
         self._k_factor_cancel_event: Event | None = None
+        self._saved_repeatability_configuration: dict[str, object] = {}
+        self._repeatability_snapshot_variable_names: tuple[str, ...] | None = None
+        self._repeatability_cancel_event: Event | None = None
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(1000)
         self._poll_timer.timeout.connect(self._poll_selected_variables)
         self.connectionDialog: ModbusConnectionDialog | None = None
         self.zeroCalibrationDialog: ZeroCalibrationDialog | None = None
         self.kFactorDialog: KFactorCalibrationDialog | None = None
+        self.repeatabilityDialog: RepeatabilityTestDialog | None = None
         self.calibrationHistoryDialog: CalibrationHistoryDialog | None = None
         self.setWindowTitle("Modbus Module")
         self.resize(1280, 820)
         self.setMinimumSize(1080, 520)
         self._load_saved_register_map()
         self._load_saved_k_factor_configuration()
+        self._load_saved_repeatability_configuration()
         self._build_ui()
         self._connect_signals()
         self._sync_status()
@@ -1215,6 +1919,11 @@ class ModbusModuleWindow(QDialog):
         if self._pending_k_factor_load_error:
             self._log(
                 f"Saved K factor configuration ignored: {self._pending_k_factor_load_error}"
+            )
+        if self._pending_repeatability_load_error:
+            self._log(
+                "Saved repeatability configuration ignored: "
+                f"{self._pending_repeatability_load_error}"
             )
 
     def _build_ui(self) -> None:
@@ -1418,6 +2127,8 @@ class ModbusModuleWindow(QDialog):
         self._stop_polling()
         if self._busy and self._k_factor_cancel_event is not None:
             self._cancel_k_factor_capture()
+        elif self._busy and self._repeatability_cancel_event is not None:
+            self._cancel_repeatability_capture()
         elif self.runtime.status.connected and not self._busy:
             try:
                 status = self.runtime.disconnect()
@@ -1518,6 +2229,62 @@ class ModbusModuleWindow(QDialog):
         if self._data_root is None:
             return None
         return self._data_root / "config" / "workflow_templates" / "modbus_k_factor_simple.json"
+
+    def _load_saved_repeatability_configuration(self) -> None:
+        path = self._saved_repeatability_configuration_path()
+        if path is None or not path.exists():
+            return
+        try:
+            settings = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(settings, dict):
+                raise ValueError("configuration root must be an object")
+        except Exception as exc:
+            self._pending_repeatability_load_error = str(exc)
+            return
+        self._saved_repeatability_configuration = settings
+        snapshot_names = settings.get("snapshot_variable_names")
+        if isinstance(snapshot_names, list):
+            self._repeatability_snapshot_variable_names = tuple(
+                str(name) for name in snapshot_names
+            )
+        self._pending_repeatability_load_error = None
+
+    def _save_repeatability_configuration(self) -> None:
+        dialog = self._ensure_repeatability_dialog()
+        path = self._saved_repeatability_configuration_path()
+        if path is None:
+            dialog.set_error("data root is not configured")
+            self._log(
+                "Save repeatability configuration failed: data root is not configured."
+            )
+            return
+        settings = dialog.capture_settings()
+        self._saved_repeatability_configuration = dict(settings)
+        self._repeatability_snapshot_variable_names = tuple(
+            settings["snapshot_variable_names"]
+        )
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(settings, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            dialog.set_error(str(exc))
+            self._log(f"Save repeatability configuration failed: {exc}")
+            return
+        dialog.statusLabel.setText("Configuration saved")
+        self._log(f"Repeatability configuration saved: {path}")
+
+    def _saved_repeatability_configuration_path(self) -> Path | None:
+        if self._data_root is None:
+            return None
+        return (
+            self._data_root
+            / "config"
+            / "workflow_templates"
+            / "modbus_repeatability_simple.json"
+        )
 
     def _open_connection_dialog(self) -> None:
         if self.connectionDialog is None:
@@ -1764,6 +2531,7 @@ class ModbusModuleWindow(QDialog):
         cancel_event = Event()
         self._k_factor_cancel_event = cancel_event
         dialog.set_running()
+        pc_flow_simulation = _pc_flow_simulation_from_settings(settings)
         self._run_task(
             "K factor",
             lambda: self.runtime.capture_k_factor_simple_trial(
@@ -1772,6 +2540,7 @@ class ModbusModuleWindow(QDialog):
                 flow_acc_parameter=str(settings["flow_acc_parameter"]),
                 k_factor_parameter=str(settings["k_factor_parameter"]),
                 poll_interval_s=float(settings["poll_interval_s"]),
+                pc_flow_simulation=pc_flow_simulation,
                 cancel_requested=cancel_event.is_set,
             ),
             self._k_factor_capture_finished,
@@ -1876,7 +2645,10 @@ class ModbusModuleWindow(QDialog):
             return
         if self.kFactorDialog is not None and isValid(self.kFactorDialog):
             self.kFactorDialog.set_captured(result)
-        self._log(f"K factor captured {result.run_id}")
+        self._log(
+            f"K factor captured {result.run_id} "
+            f"(flow_source={result.segment.flow_rate_source})"
+        )
 
     def _k_factor_write_finished(self, result: object) -> None:
         if not isinstance(result, ModbusKFactorSimpleResult):
@@ -1904,6 +2676,265 @@ class ModbusModuleWindow(QDialog):
         )
         self._log(
             f"K factor write {result.write_status}; verified={result.write_verified}"
+        )
+
+    def _repeatability(self) -> None:
+        dialog = self._ensure_repeatability_dialog()
+        self._refresh_repeatability_registers(dialog)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        dialog.set_ready(connected=self.runtime.status.connected)
+
+    def _start_repeatability_capture(self) -> None:
+        dialog = self._ensure_repeatability_dialog()
+        settings = dialog.capture_settings()
+        snapshot_names = tuple(settings["snapshot_variable_names"])
+        self._repeatability_snapshot_variable_names = snapshot_names
+        if self._busy:
+            dialog.set_error("another Modbus operation is running")
+            return
+        if not self.runtime.status.connected:
+            dialog.set_error("connect the Modbus module first")
+            self._log("Repeatability failed: connect the Modbus module first.")
+            return
+        try:
+            flow_point, trial_index = dialog.next_trial_context()
+        except Exception as exc:
+            dialog.set_error(str(exc))
+            return
+        cancel_event = Event()
+        self._repeatability_cancel_event = cancel_event
+        dialog.set_running()
+        run_id = dialog.current_run_id()
+        capture_snapshot = not dialog.trial_results()
+        pc_flow_simulation = _pc_flow_simulation_from_settings(settings)
+        self._run_task(
+            "Repeatability",
+            lambda: self.runtime.capture_repeatability_simple_trial(
+                run_id=run_id,
+                flow_point=flow_point,
+                trial_index=trial_index,
+                snapshot_variable_names=snapshot_names,
+                flow_rate_parameter=str(settings["flow_rate_parameter"]),
+                flow_acc_parameter=str(settings["flow_acc_parameter"]),
+                poll_interval_s=float(settings["poll_interval_s"]),
+                capture_snapshot=capture_snapshot,
+                pc_flow_simulation=pc_flow_simulation,
+                cancel_requested=cancel_event.is_set,
+            ),
+            self._repeatability_capture_finished,
+            requires_connection=True,
+        )
+
+    def _save_repeatability_trial(self) -> None:
+        dialog = self._ensure_repeatability_dialog()
+        capture = dialog.current_capture()
+        if capture is None:
+            dialog.set_error("capture a trial first")
+            return
+        try:
+            trial = self.runtime.calculate_repeatability_simple_trial(
+                capture,
+                standard_mass=dialog.standard_mass(),
+            )
+        except Exception as exc:
+            dialog.set_error(str(exc))
+            self._log(f"Repeatability trial calculation failed: {exc}")
+            return
+        dialog.add_trial_result(trial)
+        self._update_map_values(
+            (
+                VariableSample(
+                    sample_id=f"{trial.run_id}-REP-{trial.trial_index}",
+                    device_id=self.runtime.status.device_id or "",
+                    variable_name=trial.flow_acc_parameter,
+                    captured_at=trial.flow_ended_at,
+                    value=trial.mass_acc_after,
+                ),
+            )
+        )
+        self._log(
+            "Repeatability trial saved "
+            f"{len(dialog.trial_results())}"
+            f"{'' if dialog.is_single_point_mode() else '/9'} "
+            f"(flow={trial.flow_point:g}, trial={trial.trial_index}, "
+            f"error={trial.percent_error:.6g}%)."
+        )
+        summaries: list[ModbusRepeatabilityFlowSummary] = []
+        latest_summary: ModbusRepeatabilityFlowSummary | None = None
+        for flow_point in dict.fromkeys(item.flow_point for item in dialog.trial_results()):
+            flow_trials = tuple(
+                item
+                for item in dialog.trial_results()
+                if item.flow_point == flow_point
+            )
+            if not dialog.is_single_point_mode() and len(flow_trials) < 3:
+                continue
+            try:
+                summary = self.runtime.summarize_repeatability_flow_point(
+                    flow_trials,
+                    flow_point=flow_point,
+                )
+            except Exception as exc:
+                self._log(f"Repeatability flow summary failed: {exc}")
+                continue
+            summaries.append(summary)
+            if flow_point == trial.flow_point:
+                latest_summary = summary
+        if dialog.is_single_point_mode() and latest_summary is None:
+            flow_trials = tuple(
+                item
+                for item in dialog.trial_results()
+                if item.flow_point == trial.flow_point
+            )
+            latest_summary = self.runtime.summarize_repeatability_flow_point(
+                flow_trials,
+                flow_point=trial.flow_point,
+            )
+            summaries.append(latest_summary)
+        dialog.set_progress_summary(
+            latest_trial=trial,
+            flow_summaries=tuple(summaries),
+        )
+        if latest_summary is not None:
+            self._log(
+                "Repeatability flow summary "
+                f"flow={latest_summary.flow_point:g}, "
+                f"trials={latest_summary.trial_count}, "
+                "stddev="
+                f"{latest_summary.repeatability_stddev_percent:.6g}%."
+            )
+        if dialog.is_complete():
+            self._finish_repeatability_result()
+
+    def _save_repeatability_summary(self) -> None:
+        self._finish_repeatability_result(force_single_summary=True)
+
+    def _finish_repeatability_result(
+        self,
+        *,
+        force_single_summary: bool = False,
+    ) -> None:
+        dialog = self._ensure_repeatability_dialog()
+        trials = dialog.trial_results()
+        if not trials:
+            dialog.set_error("save at least one trial first")
+            return
+        if dialog.is_single_point_mode():
+            expected_flow_point_count = 1
+            expected_trials_per_point = len(trials)
+            require_complete = False
+            mode = "single_point"
+        else:
+            expected_flow_point_count = 3
+            expected_trials_per_point = 3
+            require_complete = True
+            mode = "three_point"
+        if dialog.is_single_point_mode() and not force_single_summary:
+            return
+        try:
+            result = self.runtime.calculate_repeatability_simple_result(
+                trials,
+                save_history=dialog.save_history(),
+                mode=mode,
+                expected_flow_point_count=expected_flow_point_count,
+                expected_trials_per_point=expected_trials_per_point,
+                require_complete=require_complete,
+            )
+        except Exception as exc:
+            dialog.set_error(str(exc))
+            self._log(f"Repeatability calculation failed: {exc}")
+            return
+        dialog.set_result(result)
+        if (
+            result.history_saved
+            and self.calibrationHistoryDialog is not None
+            and isValid(self.calibrationHistoryDialog)
+        ):
+            self.calibrationHistoryDialog.refresh()
+        if dialog.is_single_point_mode():
+            self._log(
+                f"Repeatability summary saved {result.run_id} "
+                f"({len(result.trials)} trial(s))."
+            )
+        else:
+            self._log(f"Repeatability completed {result.run_id}")
+
+    def _ensure_repeatability_dialog(self) -> RepeatabilityTestDialog:
+        if self.repeatabilityDialog is None or not isValid(self.repeatabilityDialog):
+            self.repeatabilityDialog = RepeatabilityTestDialog(parent=self)
+            self.repeatabilityDialog.destroyed.connect(
+                self._repeatability_dialog_destroyed
+            )
+            self.repeatabilityDialog.startButton.clicked.connect(
+                self._start_repeatability_capture
+            )
+            self.repeatabilityDialog.saveTrialButton.clicked.connect(
+                self._save_repeatability_trial
+            )
+            self.repeatabilityDialog.saveResultButton.clicked.connect(
+                self._save_repeatability_summary
+            )
+            self.repeatabilityDialog.saveConfigButton.clicked.connect(
+                self._save_repeatability_configuration
+            )
+            self.repeatabilityDialog.cancelRequested.connect(
+                self._cancel_repeatability_capture
+            )
+            self._refresh_repeatability_registers(self.repeatabilityDialog)
+        return self.repeatabilityDialog
+
+    def _repeatability_dialog_destroyed(self, _object: object | None = None) -> None:
+        self.repeatabilityDialog = None
+
+    def _cancel_repeatability_capture(self) -> None:
+        cancel_event = self._repeatability_cancel_event
+        if cancel_event is None or not self._busy:
+            return
+        if not cancel_event.is_set():
+            cancel_event.set()
+            self._log("Repeatability cancel requested.")
+        if self.repeatabilityDialog is not None and isValid(self.repeatabilityDialog):
+            self.repeatabilityDialog.set_canceling()
+
+    def _refresh_repeatability_registers(
+        self,
+        dialog: RepeatabilityTestDialog,
+    ) -> None:
+        registers = tuple(
+            register
+            for register in self.runtime.register_map.registers
+            if register.kind
+            in {
+                RegisterKind.COIL,
+                RegisterKind.DISCRETE_INPUT,
+                RegisterKind.HOLDING,
+                RegisterKind.INPUT,
+            }
+        )
+        dialog.set_registers(
+            registers,
+            selected_names=self._repeatability_snapshot_variable_names,
+        )
+        if self._saved_repeatability_configuration:
+            dialog.apply_configuration(self._saved_repeatability_configuration)
+            self._repeatability_snapshot_variable_names = (
+                dialog.selected_snapshot_variable_names()
+            )
+
+    def _repeatability_capture_finished(self, result: object) -> None:
+        self._repeatability_cancel_event = None
+        if not isinstance(result, ModbusRepeatabilitySimpleCapture):
+            self._log(f"Repeatability finished: {result}")
+            return
+        if self.repeatabilityDialog is not None and isValid(self.repeatabilityDialog):
+            self.repeatabilityDialog.set_captured(result)
+        self._log(
+            "Repeatability captured "
+            f"{result.run_id} "
+            f"(flow={result.flow_point:g}, trial={result.trial_index}, "
+            f"flow_source={result.segment.flow_rate_source})"
         )
 
     def _history_export_finished(self, result: object) -> None:
@@ -1936,14 +2967,6 @@ class ModbusModuleWindow(QDialog):
         )
         for error in result.errors:
             self._log(f"Import history warning: {error}")
-
-    def _repeatability(self) -> None:
-        self._run_task(
-            "Repeatability",
-            lambda: self.runtime.run_repeatability_test(_default_trials()),
-            lambda run_id: self._log(f"Repeatability completed {run_id}"),
-            requires_connection=True,
-        )
 
     def _sync_status(self) -> None:
         self.statusValueLabel.setText(self.runtime.status.message)
@@ -2518,6 +3541,14 @@ class ModbusModuleWindow(QDialog):
             and isValid(self.kFactorDialog)
         ):
             self.kFactorDialog.set_error(message)
+        if label == "Repeatability":
+            self._repeatability_cancel_event = None
+        if (
+            label == "Repeatability"
+            and self.repeatabilityDialog is not None
+            and isValid(self.repeatabilityDialog)
+        ):
+            self.repeatabilityDialog.set_error(message)
         self._log(f"{label} failed: {message}")
 
     def _can_update_ui(self) -> bool:
@@ -2581,6 +3612,12 @@ class ModbusModuleWindow(QDialog):
             and self.kFactorDialog.statusLabel.text() != "Running..."
         ):
             self.kFactorDialog.set_ready(connected=connected and enabled)
+        if (
+            self.repeatabilityDialog is not None
+            and isValid(self.repeatabilityDialog)
+            and self.repeatabilityDialog.statusLabel.text() != "Running..."
+        ):
+            self.repeatabilityDialog.set_ready(connected=connected and enabled)
         self._refresh_variable_map_edit_state()
 
     def _refresh_variable_map_edit_state(self) -> None:
@@ -2664,20 +3701,6 @@ def _float_input(value: float) -> QDoubleSpinBox:
     widget.setDecimals(6)
     widget.setValue(value)
     return widget
-
-
-def _default_trials() -> tuple[RepeatabilityTrial, ...]:
-    return (
-        RepeatabilityTrial(1.0, 1, 0.0, 10.0, 10.0),
-        RepeatabilityTrial(1.0, 2, 0.0, 10.1, 10.0),
-        RepeatabilityTrial(1.0, 3, 0.0, 9.9, 10.0),
-        RepeatabilityTrial(2.0, 1, 0.0, 20.0, 20.0),
-        RepeatabilityTrial(2.0, 2, 0.0, 20.2, 20.0),
-        RepeatabilityTrial(2.0, 3, 0.0, 19.8, 20.0),
-        RepeatabilityTrial(3.0, 1, 0.0, 30.0, 30.0),
-        RepeatabilityTrial(3.0, 2, 0.0, 30.3, 30.0),
-        RepeatabilityTrial(3.0, 3, 0.0, 29.7, 30.0),
-    )
 
 
 def _sample_variable_names() -> tuple[str, ...]:
@@ -2794,6 +3817,27 @@ def _operation_label(value: str) -> str:
     return labels.get(value, value)
 
 
+def _pc_flow_simulation_from_settings(
+    settings: dict[str, object],
+) -> PcFlowSimulationSettings:
+    enabled = bool(settings.get("pc_flow_simulation_enabled"))
+    value = settings.get("pc_flow_simulation_value")
+    flow_value = float(value) if isinstance(value, (int, float)) else 5.0
+    mass_delta_value = settings.get("pc_mass_delta")
+    mass_delta = (
+        float(mass_delta_value)
+        if isinstance(mass_delta_value, (int, float))
+        else None
+    )
+    return PcFlowSimulationSettings(
+        enabled=enabled,
+        start_flow=flow_value,
+        instant_flow=flow_value,
+        stop_flow=0.0,
+        mass_delta=mass_delta,
+    )
+
+
 def _metric_value(metrics: dict[str, object], key: str) -> str:
     if key not in metrics:
         return ""
@@ -2831,7 +3875,16 @@ def _history_parameter_summary(entry: ModbusCalibrationHistoryEntry) -> str:
         return ", ".join(values)
     if entry.operation == "manual_error_repeatability":
         trial_count = _metric_value(metrics, "trial_count")
-        return f"trial_count={trial_count}" if trial_count else ""
+        values = []
+        if trial_count:
+            values.append(f"trials={trial_count}")
+        max_error = _metric_value(metrics, "max_abs_percent_error")
+        if max_error:
+            values.append(f"max_error={max_error}%")
+        repeatability = _metric_value(metrics, "max_repeatability_stddev_percent")
+        if repeatability:
+            values.append(f"max_repeatability={repeatability}%")
+        return ", ".join(values)
     return ""
 
 
@@ -2886,11 +3939,51 @@ def _history_result_lines(metrics: dict[str, object]) -> list[str]:
         ("completed", "completed"),
         ("corrected_k_factor", "corrected_k_factor"),
         ("measured_mass_delta", "measured_mass_delta"),
+        ("flow_rate_source", "flow_rate_source"),
         ("trial_count", "trial_count"),
+        ("mean_percent_error", "mean_percent_error"),
+        ("max_abs_percent_error", "max_abs_percent_error"),
+        (
+            "max_repeatability_stddev_percent",
+            "max_repeatability_stddev_percent",
+        ),
     ):
         value = _metric_value(metrics, key)
         if value:
             rows.append(f"{label}: {value}")
+    flow_points = metrics.get("flow_points")
+    if isinstance(flow_points, list):
+        for point in flow_points:
+            if not isinstance(point, dict):
+                continue
+            flow_point = _format_value(point.get("flow_point", ""))
+            stddev = _format_value(point.get("repeatability_stddev_percent", ""))
+            trial_errors = point.get("trial_errors")
+            rows.append(
+                f"flow_point {flow_point}: repeatability_stddev_percent={stddev}"
+            )
+            if isinstance(trial_errors, list):
+                rows.append(
+                    "  trial_errors_percent="
+                    + ", ".join(_format_value(value) for value in trial_errors)
+                )
+    trials = metrics.get("trials")
+    if isinstance(trials, list):
+        for trial in trials:
+            if not isinstance(trial, dict):
+                continue
+            flow_point = _format_value(trial.get("flow_point", ""))
+            trial_index = _format_value(trial.get("trial_index", ""))
+            rows.append(
+                "trial "
+                f"{flow_point}/{trial_index}: "
+                f"delta_m={_format_value(trial.get('measured_mass_delta', ''))}, "
+                f"v1={_format_value(trial.get('instant_flow', ''))}, "
+                f"v_mean={_format_value(trial.get('mean_flow', ''))}, "
+                f"source={_format_value(trial.get('flow_rate_source', ''))}, "
+                f"standard_mass={_format_value(trial.get('standard_mass', ''))}, "
+                f"error={_format_value(trial.get('percent_error', ''))}%"
+            )
     return rows
 
 
@@ -2906,6 +3999,11 @@ def _history_extra_metric_lines(metrics: dict[str, object]) -> list[str]:
         "corrected_k_factor",
         "measured_mass_delta",
         "trial_count",
+        "mean_percent_error",
+        "max_abs_percent_error",
+        "max_repeatability_stddev_percent",
+        "flow_points",
+        "trials",
         "pre_snapshot",
     }
     rows: list[str] = []

@@ -149,7 +149,7 @@ Fields:
 - Write audit references.
 - Zero calibration before/after `zero_offset`, `delta_t`, timestamps, control parameter, and completion status.
 - K factor calibration pre-operation snapshot values, flow-rate segment timestamps, instantaneous flow sample, accumulated-mass before/after, measured mass delta, standard mass, current K factor, corrected K factor, mean flow, write request/apply/verify status, and readback value when available.
-- Manual repeatability test flow points, trial inputs, percent errors, and per-flow-point repeatability standard deviations.
+- Manual repeatability test mode, configured target-flow ranges, per-trial flow-segment timestamps, third-second instantaneous flow `v1`, mean flow `v_mean`, accumulated-mass before/after values, standard masses, percent errors, per-range repeatability standard deviations, and whether the saved summary came from fixed three-flow-range mode or the appendable single-flow-range mode.
 
 ### Artifact
 Represents a file linked to a run, step, or result.

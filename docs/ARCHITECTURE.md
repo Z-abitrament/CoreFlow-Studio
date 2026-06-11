@@ -86,7 +86,7 @@ The first Modbus-oriented calibration workflows remain headless and device-inter
 
 - Zero calibration writes a configured start coil or parameter through the write guard, then polls configured read-only variables until the completion state is observed.
 - K factor calibration captures selected pre-operation variables, records one configured flow-rate segment and accumulated-mass boundaries, accepts operator-entered standard mass, calculates the proposed K factor, and writes only through the same guarded application path as other calibration writes.
-- Manual error/repeatability testing records operator-entered flow points and standard masses while using accumulated-mass readings as traceable input data.
+- Manual error/repeatability testing records operator-configured flow points and standard masses while capturing accumulated-mass boundaries from the same reusable non-zero-to-zero flow-segment process used by K factor calibration. The UI supports both fixed three-flow-range tests and a single-flow-range mode that can append additional trials before saving the current summary.
 
 ### Protocol And Transport Layer
 The first real protocol adapter is Modbus RTU over serial.
@@ -109,7 +109,7 @@ The Modbus master UI should expose configuration in focused dialogs rather than 
 
 - Serial/channel setup: port identification, baud rate, parity, stop bits, timeout, retries, and unit ID.
 - Variable editor: logical variable name, Modbus table type, address, word count, data type, endianness, scale, unit, writable flag, and valid range.
-- Calibration dialogs: zero calibration control/status, K factor simple/advanced modes, and three-flow-point repeatability trials.
+- Calibration dialogs: zero calibration control/status, K factor simple/advanced modes, and repeatability trials in three-flow-range or single-flow-range modes.
 
 ### ASIO/IIS Frame Stream Layer
 The ASIO/IIS module is a headless hardware I/O boundary for a USB sound-card module that appears in Windows Device Manager as `BRAVO-HD Device Control`.
