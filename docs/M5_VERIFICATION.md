@@ -9,6 +9,8 @@ M5 implements calibration preview workflow foundation and application-level writ
 - `PlaceholderCalibrationCalculator` that calculates mean error and proposed `zero_offset` preview writes without claiming production validity.
 - `WriteGuardService` for preview, dry-run, armed-state validation, range checks, writable checks, and audit persistence.
 - `CalibrationPreviewWorkflow` that runs headlessly against any `FlowmeterDevice`.
+- `ZeroCalibrationWorkflow` that writes a configured start coil/parameter through the write guard, polls completion, and stores before/after `zero_offset` and `delta_t`.
+- `KFactorCalibrationWorkflow` that calculates `k_s = k_r / m_r * m_s` from manual accumulated-mass and standard-mass inputs, then writes the configured K factor through the write guard.
 - Simulator-backed calibration preview that stores device metadata, run session, workflow steps, raw CSV artifacts, analysis result, and audit records.
 - Package-level import cycle cleanup so storage models and repositories remain independent from workflow implementation.
 
@@ -29,4 +31,4 @@ conda run -n coreflow-studio python -m pytest
 ## Notes
 - Placeholder calibration output must be replaced with approved production formulas before real calibration use.
 - Calibration preview creates proposed writes and audit records, but does not apply device parameter changes.
-- Full calibration write workflow remains future work after the write guard is integrated with explicit operator approval.
+- Zero and K factor workflows are headless foundations. Real hardware use still requires approved register maps, operator approval policy, and UI wiring.

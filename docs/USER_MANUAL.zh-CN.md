@@ -3,7 +3,7 @@
 ## 适用范围
 本手册描述当前 M12 版本的 CoreFlow Studio。当前版本是一个 Windows 优先的桌面工具，主要用于基于模拟器的科里奥利流量计 PC 端自动化流程开发、验证和打包交付检查。
 
-当前版本支持模拟设备、实时读数、校准预览、自动化工厂测试、基础灵活实验、运行记录检查以及报告/导出生成。当前版本尚未在 UI 中启用真实硬件操作、生产校准公式、真实参数写入、签名安装包或客户定制报告模板。
+当前版本支持模拟设备、实时读数、校准预览、独立 Modbus Module 窗口、自动化工厂测试、基础灵活实验、运行记录检查以及报告/导出生成。独立 Modbus Module 可以在自己的窗口中尝试连接配置的串口 Modbus 设备，但生产真实发射机使用前仍需要验证后的寄存器表、确认后的校准公式和硬件验收结果。
 
 ## 启动应用
 在打包分发目录中双击：
@@ -87,9 +87,11 @@ Replay CSV 模式会把记录或生成的样本作为只读模拟器设备加载
 Replay CSV 必须包含 `mass_flow`。可选列包括 `captured_at`、`volume_flow`、`density`、`temperature`、`status_flags` 和 `source_channel`。
 
 ## Serial Modbus RTU 模式
-`Serial Modbus RTU` 目前作为未来真实硬件路径展示，但当前版本没有在 UI 中启用真实硬件操作。
+主窗口连接面板中的 `Serial Modbus RTU` 目前作为未来真实硬件路径展示，但当前版本禁用了主窗口串口设备创建。
 
 如果选择串口模式后点击 `Add Simulator`，状态日志会提示串口 Modbus 已配置但在硬件验收前禁用。这是有意设计：真实设备寄存器表、验收阈值、夹具规则和写入策略仍属于待确认项。
+
+如需直接执行 Modbus 主站操作，请从工具栏或 `Modules` 菜单打开独立 Modbus Module。该模块独立于主窗口的模拟器/replay 设备列表。
 
 如需生成占位寄存器表模板，仅用于工程评审，可运行：
 
@@ -110,6 +112,27 @@ Calibration Preview 会根据内置参考点采集模拟器样本并保存预览
 6. 在 Result Details 中查看步骤、指标、判定和 artifacts。
 
 当前计算模块仍是占位实现，生产校准公式提供后才能替换为真实算法。
+
+## 独立 Modbus Module
+可以从主工具栏或 `Modules` 菜单打开 Modbus Module。该模块拥有自己的连接状态、连接弹窗、变量映射、`Operations` 菜单、通信数据码显示区和日志，不需要先在主窗口添加模拟器或 replay 通道。
+
+- 点击 `Connection...` 打开 Modbus 连接弹窗。端口列表会根据已接入的串口适配器自动发现。插入或拔出 USB 转串口适配器后，可点击 `Refresh Ports` 重新扫描。`Order` 用于选择 32 位数据的字节/字序，例如 `ABCD`、`BADC`、`CDAB` 或 `DCBA`。`Timeout` 和 `Retries` 可用于容忍从机响应较慢或偶发无响应的情况。
+- 连接前可在 `Variable Map` 表格中编辑每个变量的寄存器类型、地址、字数、数据类型、缩放、单位和是否可写。
+- 默认映射包含 `mass_rate`、`mass_acc`、`temperature`、`delta_t`、`zero_offset`、`k_factor`、`low_threshold` 和 `zero_calibration_start`。
+- `Variable Map` 在变量或列较多时会显示滚动条；拖动列头可以调整列顺序。
+- 连接前可用 `Add Variable` 添加自定义变量行，并定义变量名、地址、类型和是否可写。断开连接时可用 `Delete Variable` 删除当前选中的变量行。
+- 连接前可用 `Save Map` 保存当前变量映射。Modbus Module 下次打开时会自动加载保存的映射，因此地址、类型、缩放、单位、是否可写和行顺序不需要重新填写。
+- 可编辑映射包含采样变量以及零点校准启动 coil。如需切换映射，请先断开连接再修改。
+- `Connect` 只会在连接弹窗中打开所选的 Modbus RTU 串口。连接完成后可以手动关闭弹窗，模块窗口会保持已连接状态。
+- 连接后可使用每行的 `Read` 主动查询一个变量，并刷新 `Value` 显示列。可写变量可填写 `Write Value` 后点击 `Write`；不可写变量会禁用写入控件。写入仍会经过 write guard 和审计日志。
+- 勾选变量行的 `Poll` 后点击 `Start Polling`，会每秒轮询一次选中的变量。每轮轮询会按变量逐个读；同一 Modbus 表内相邻地址会尽量合并成一次读请求。
+- 使用 `Operations` 菜单执行 `Sample Variables`、`Zero Cal`、`K Factor`、`Repeatability` 和 `Calibration History`。当前版本隐藏 `K Factor Inputs` 区域；现有 K Factor 操作路径保留，后续再接入对应弹窗。
+- 通信数据码表会实时显示读写操作的 TX/RX Modbus 数据码。
+- `Sample Variables` 会逐个读取配置变量，把成功读取的累积质量、Delta T、零点偏移、K factor 和低阈值等值连同时间戳写入数据库，刷新 `Value` 列，并对无响应变量记录 warning。
+- `Zero Cal` 会打开独立弹窗，点击 `Start` 后先读取 `zero_offset` 和 `delta_t`，再通过 write guard 将 `zero_calibration_start` 置 1，等待 3 秒后读取 coil 完成状态，并显示校准前后的 `zero_offset` 和 `delta_t`，供操作员自行判断结果。Variable Map 的 `Value` 列会刷新校准后的值，包括最终的 `zero_calibration_start` coil 状态。
+- `Calibration History` 会打开独立历史窗口，可与校准弹窗同时存在。它支持显示全部校准操作或单独筛选某一类操作，表格包含具体时间，并允许操作员编辑备注。`K Factor` 和 `Repeatability` 的专用弹窗仍属于后续 UI 工作。
+
+当前模块在没有工程提供验证寄存器表时仍使用占位寄存器表模板。不要把占位寄存器表当作生产发射机文档使用。
 
 ## 工厂测试
 Factory Test 会运行固定的模拟器出厂测试路径：
@@ -215,9 +238,10 @@ Replay CSV 必须包含 `mass_flow` 列。可选列包括 `captured_at`、`volum
 ## 安全说明
 - 模拟器流程不需要硬件，属于安全路径。
 - Calibration Preview 不会写入设备参数。
-- 当前未启用硬件写入流程。
+- 独立 Modbus Module 会在操作员于连接弹窗点击 `Connect` 时尝试打开所选 COM 口。
+- 具备写入能力的 Modbus 操作必须经过明确的 write-guard 和审计流程。
 - 真实发射机寄存器表、校准公式、夹具行为和验收阈值必须在硬件使用前提供。
-- 未来任何硬件写入都必须经过明确的 write-guard 和审计流程。
+- 不要使用占位寄存器表执行生产发射机写入。
 
 ## 故障排查
 如果 UI 无法打开，请先运行控制台 smoke：
@@ -252,8 +276,8 @@ $env:COREFLOW_DATA_ROOT = "D:\CoreFlowStudioData"
 ## 当前限制
 - 没有签名安装包或 MSI。
 - 没有生产校准公式。
-- UI 尚未启用真实硬件。
-- 没有真实校准参数写入流程。
+- 没有经过生产批准的硬件寄存器表。
+- 没有已武装的生产校准参数写入流程。
 - 没有客户定制报告模板。
 - 没有真实 ML 模型执行。
 - Replay 文件 UI 当前支持手动输入 CSV 路径，尚未提供文件浏览器。

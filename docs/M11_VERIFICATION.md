@@ -4,7 +4,7 @@
 M11 prepares for first physical transmitter testing. It does not enable automatic hardware connection from the UI, does not perform armed parameter writes, and does not claim that the placeholder register map matches production firmware.
 
 ## Implemented
-- Placeholder Modbus register-map template with logical names required by `docs/PROTOCOLS.md`.
+- Placeholder Modbus register-map template with logical names required by `docs/PROTOCOLS.md`, including mass rate, accumulated mass, Delta T, frequency, K factor, low threshold, and zero-calibration control.
 - JSON serialization and loading helpers for Modbus register maps.
 - Serial port scanner abstraction using pyserial list-port discovery by default and injected providers in tests.
 - `HardwareAcceptanceRunner` for read-only acceptance preparation checks:
@@ -37,3 +37,4 @@ conda run -n coreflow-studio python -m pytest -q
 - The placeholder register map is marked as a template and must be replaced or edited from real firmware documentation before real transmitter use.
 - The dry-run check forces `WriteMode.DRY_RUN`; it does not transmit Modbus write requests.
 - First real hardware use still requires operator review of serial settings, register map, read-only checks, and audit logs.
+- com0com/hub4com listener diagnostics remain deferred and require separate virtual-port installation/configuration permission.

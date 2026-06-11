@@ -66,6 +66,7 @@ class RunSummary:
     started_at: datetime | None = None
     ended_at: datetime | None = None
     software_version: str | None = None
+    notes: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,3 +105,19 @@ class AuditLogRecord:
     protocol_request_ref: str | None = None
     result: str | None = None
     error_message: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class VariableSampleRecord:
+    """Timestamped low-rate variable value persisted in SQLite."""
+
+    sample_id: str
+    device_id: str
+    variable_name: str
+    captured_at: datetime
+    value: Any
+    run_id: str | None = None
+    step_id: str | None = None
+    unit: str | None = None
+    source_channel: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)

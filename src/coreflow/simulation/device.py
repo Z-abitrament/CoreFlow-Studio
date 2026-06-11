@@ -199,15 +199,7 @@ class SimulatedFlowmeterDevice(FlowmeterDevice):
             status = WriteResultStatus.DRY_RUN
         else:
             status = WriteResultStatus.APPLIED
-            self._parameters[request.parameter_name] = ConfigurationParameter(
-                name=parameter.name,
-                value=request.new_value,
-                unit=parameter.unit,
-                writable=parameter.writable,
-                minimum=parameter.minimum,
-                maximum=parameter.maximum,
-                metadata=parameter.metadata,
-            )
+            self._apply_parameter_value(parameter, request.new_value)
 
         self._record_success()
         return self._write_result(
@@ -333,9 +325,51 @@ class SimulatedFlowmeterDevice(FlowmeterDevice):
                 writable=parameter.writable,
                 minimum=parameter.minimum,
                 maximum=parameter.maximum,
+                metadata=parameter.metadata,
             )
             for parameter in parameters
         }
+
+    def _apply_parameter_value(
+        self,
+        parameter: ConfigurationParameter,
+        value: Any,
+    ) -> None:
+        if parameter.metadata.get("simulated_zero_calibration_control") and bool(value):
+            self._parameters[parameter.name] = ConfigurationParameter(
+                name=parameter.name,
+                value=False,
+                unit=parameter.unit,
+                writable=parameter.writable,
+                minimum=parameter.minimum,
+                maximum=parameter.maximum,
+                metadata=parameter.metadata,
+            )
+            for target_name, target_value in (
+                ("zero_offset", parameter.metadata.get("completed_zero_offset", 0.0)),
+                ("delta_t", parameter.metadata.get("completed_delta_t", 0.0)),
+            ):
+                target = self._parameters.get(target_name)
+                if target is not None:
+                    self._parameters[target_name] = ConfigurationParameter(
+                        name=target.name,
+                        value=target_value,
+                        unit=target.unit,
+                        writable=target.writable,
+                        minimum=target.minimum,
+                        maximum=target.maximum,
+                        metadata=target.metadata,
+                    )
+            return
+        self._parameters[parameter.name] = ConfigurationParameter(
+            name=parameter.name,
+            value=value,
+            unit=parameter.unit,
+            writable=parameter.writable,
+            minimum=parameter.minimum,
+            maximum=parameter.maximum,
+            metadata=parameter.metadata,
+        )
 
     def _in_range(self, parameter: ConfigurationParameter, value: Any) -> bool:
         if not isinstance(value, int | float):

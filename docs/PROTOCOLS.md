@@ -11,6 +11,13 @@ The first concrete hardware communication path is Modbus RTU over USB-to-serial.
 - Configurable serial settings.
 - Configurable Modbus unit IDs.
 - Configurable register maps.
+- Modbus master operation for configured variable reads and guarded calibration writes.
+
+### Future Modbus Listener Diagnostics
+- Modbus listener or sniffer mode using com0com plus hub4com virtual serial ports.
+- Intended for lab diagnostics and protocol visibility, not for production calibration decisions.
+- Requires operator permission to install/configure virtual serial-port drivers and to open the relevant serial endpoints.
+- Must be implemented as a separate diagnostic tool path so it cannot silently proxy or modify transmitter traffic.
 
 ### Post-M12 Hardware Frame Stream
 - ASIO-backed USB sound-card frame I/O for IIS lab testing.
@@ -75,23 +82,32 @@ Each register definition should include:
 - Read/write permission.
 - Valid range for writable values.
 - Description.
+- Metadata marking template, simulator, customer, or firmware-documentation source.
 
 The application should not hard-code production register addresses in workflow code.
 
 Initial register-map files should be JSON or YAML and versioned as configuration artifacts. Each workflow run must store the register-map version or snapshot used for device communication.
 
+The UI-facing variable editor should allow users to add, edit, and remove logical variables before connecting to hardware. Edits must update a configuration artifact or runtime snapshot; they must not patch protocol code.
+
 ## Measurement Register Groups
 The first register-map template should reserve logical names for:
 
+- Mass rate.
+- Accumulated mass.
 - Mass flow.
 - Volume flow.
 - Density.
 - Temperature.
+- Delta T.
 - Drive gain or drive status if available.
 - Tube frequency or signal quality if available.
 - Alarm flags.
 - Device status.
 - Zero offset or calibration state.
+- K factor.
+- Low threshold.
+- Zero-calibration start/status coil or parameter.
 
 These names are logical placeholders until firmware documentation provides addresses and scaling.
 
@@ -116,6 +132,8 @@ Required behavior:
 - Calibration workflows must support preview before write.
 - Every write attempt must be logged with timestamp, device identity, register name, previous value when available, new value, result, and operator or automation source.
 - Simulator write behavior must match the same code path used for real devices at the application level.
+- Zero calibration must treat the configured start coil or parameter as write-capable and must poll only configured read-capable variables for completion.
+- K factor calibration must calculate the proposed value from recorded accumulated-mass inputs and standard mass, then use a guarded write to the configured K factor parameter.
 
 Write-capable workflows should use these states:
 
@@ -152,6 +170,27 @@ The Windows implementation should enumerate serial ports and display enough info
 Port discovery must not assume that COM port numbers are stable between machines or reconnects.
 
 Port discovery is advisory only. The persisted device record should include the last known port metadata, but device identity read from the transmitter or simulator is the stronger identifier when available.
+
+## Modbus Master Operator Workflows
+
+The Modbus master module supports these headless workflow contracts before UI wiring:
+
+- Variable sampling: read configured logical variables and persist the value, timestamp, device identity, source channel, and optional run/step reference.
+- Zero calibration: record `zero_offset` and `delta_t` before start, write the configured start coil/parameter through the write guard, poll until the configured completion state is read, then record `zero_offset`, `delta_t`, completion state, and timestamps.
+- K factor calibration: record accumulated mass before/after manual valve operation, accept standard mass from the operator, read or receive current K factor, calculate `k_s = k_r / m_r * m_s`, and apply the new value only through the write guard.
+- Error/repeatability: for three configured flow points and three trials per point, calculate trial percent error and per-flow-point repeatability standard deviation from stored inputs.
+
+## Modbus Listener Diagnostics
+
+The listener/sniffer path is deferred until a lab PC has com0com and hub4com installed and approved.
+
+Required constraints:
+
+- Listener setup must be explicit and separate from normal Modbus master connections.
+- The tool must report which virtual COM pair and hub4com route are active.
+- Captured frames should be stored as diagnostic artifacts when attached to a run.
+- The listener must default to read-only observation. Any future proxy or injection capability requires a separate safety review.
+- Automated tests must use fake serial endpoints or recorded frames before opening virtual COM ports.
 
 ## Future Protocol Plugin Rules
 Future protocol adapters must:
@@ -200,5 +239,7 @@ Signal semantics:
 - Required Modbus function codes.
 - Serial defaults for production hardware.
 - Device write commit/apply semantics.
+- Exact zero calibration start and completion semantics.
+- Whether com0com/hub4com will be installed globally on the target lab PC or packaged/documented as an external prerequisite.
 - Whether production high-rate signal capture uses Modbus, UART, ASIO/IIS frame streaming, or another path.
 - Whether BRAVO-HD ASIO sample formats, channel ordering, and stable device alias remain the same across driver revisions and other lab PCs.

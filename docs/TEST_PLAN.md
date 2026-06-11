@@ -73,10 +73,24 @@ Goal: Verify Modbus RTU adapter behavior before hardware use.
 Scenarios:
 
 - Read holding/input registers through fake or loopback target.
+- Read configured coil and discrete-input values through fake or loopback target.
+- Write a configured coil through the guarded device path for zero-calibration start behavior.
 - Decode configured data types and scaling.
 - Handle timeout and retry.
 - Reject writes to read-only register definitions.
 - Record communication diagnostics.
+
+ID: TP-PROTO-002
+
+Goal: Verify future Modbus listener diagnostics before using com0com or hub4com on a lab PC.
+
+Scenarios:
+
+- Use fake serial endpoints or recorded frames to exercise listener parsing without installed virtual-port drivers.
+- Configure source/destination virtual COM route metadata without changing normal Modbus master connections.
+- Store captured frames and timestamps as diagnostic artifacts.
+- Confirm listener mode is read-only and cannot write transmitter parameters or inject frames.
+- On an approved lab PC, verify com0com/hub4com route discovery and frame capture as a hardware acceptance extension.
 
 ### Integration Tests
 ID: TP-INT-001
@@ -100,6 +114,18 @@ Scenarios:
 - Store raw captures and calculated preview results.
 - Produce proposed parameter writes without applying them.
 - Mark workflow failed when required data is missing.
+
+ID: TP-WF-003
+
+Goal: Verify manual Modbus calibration workflows.
+
+Scenarios:
+
+- Run zero calibration against a fake or simulator device with configurable start coil/parameter, before/after `zero_offset`, before/after `delta_t`, and completion polling.
+- Confirm zero calibration writes only through `WriteGuardService` in an explicit write-capable state and creates an audit record.
+- Run K factor calibration from accumulated-mass before/after values, standard mass, and current K factor.
+- Confirm corrected K factor is calculated as `k_s = k_r / m_r * m_s`.
+- Confirm K factor apply writes only through the write guard and stores run, step, analysis, and audit records.
 
 ID: TP-WF-002
 
@@ -133,6 +159,18 @@ Scenarios:
 - Detect simulator-injected drift and dropouts.
 - Recompute the same result from persisted data.
 
+ID: TP-CALC-003
+
+Goal: Verify manual mass-total error and repeatability calculations.
+
+Scenarios:
+
+- Calculate percent error for each trial as `e = (m_1 - m_2) / m_2 * 100%`.
+- Require three flow points with three trials per point for the standard workflow.
+- Calculate repeatability as the standard deviation of the three percent errors at each flow point.
+- Reject zero or negative standard mass values.
+- Store repeatability summary metrics for later review.
+
 ### Data Integrity Tests
 ID: TP-DATA-001
 
@@ -144,6 +182,7 @@ Scenarios:
 - Confirm every artifact referenced in SQLite exists on disk.
 - Confirm missing artifacts are reported clearly.
 - Confirm audit log records parameter-write attempts.
+- Store timestamped variable samples with device identity, variable name, value, unit, source channel, and optional run/step references.
 
 ### Safety And Write-Guard Tests
 ID: TP-SAFE-001
@@ -170,6 +209,8 @@ Scenarios:
 - Create simulated channels.
 - Connect and disconnect devices.
 - Start and cancel a workflow without freezing the UI.
+- Open the standalone Modbus Module from the toolbar or menu.
+- Confirm the Modbus Module has its own connection state and does not create or connect simulator/replay channels in the main window.
 
 ID: TP-UI-002
 

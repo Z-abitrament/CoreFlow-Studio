@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 from coreflow.app import ChannelSnapshot, CoreFlowRuntime, RunInspection
 from coreflow.devices import Measurement
 from coreflow.ui.asio_window import AsioIisWindow
+from coreflow.ui.modbus_window import ModbusModuleWindow
 from coreflow.ui.workers import WorkflowTask
 
 
@@ -47,6 +48,7 @@ class MainWindow(QMainWindow):
         self._cancel_requested = False
         self._active_tasks: list[WorkflowTask] = []
         self.asioWindow: AsioIisWindow | None = None
+        self.modbusWindow: ModbusModuleWindow | None = None
 
         self.setWindowTitle("CoreFlow Studio")
         self.resize(1180, 760)
@@ -75,6 +77,8 @@ class MainWindow(QMainWindow):
         self.disconnectButton.setObjectName("disconnectButton")
         self.readLiveButton = QPushButton("Read Live")
         self.readLiveButton.setObjectName("readLiveButton")
+        self.modbusModuleButton = QPushButton("Modbus Module")
+        self.modbusModuleButton.setObjectName("modbusModuleButton")
         self.asioModuleButton = QPushButton("ASIO/IIS Module")
         self.asioModuleButton.setObjectName("asioModuleButton")
         self.cancelWorkflowButton = QPushButton("Cancel")
@@ -85,6 +89,7 @@ class MainWindow(QMainWindow):
             self.connectButton,
             self.disconnectButton,
             self.readLiveButton,
+            self.modbusModuleButton,
             self.asioModuleButton,
             self.cancelWorkflowButton,
         ):
@@ -107,6 +112,8 @@ class MainWindow(QMainWindow):
 
     def _build_menu(self) -> None:
         modules_menu = self.menuBar().addMenu("Modules")
+        self.modbusModuleAction = modules_menu.addAction("Modbus Module")
+        self.modbusModuleAction.setObjectName("modbusModuleAction")
         self.asioModuleAction = modules_menu.addAction("ASIO/IIS Module")
         self.asioModuleAction.setObjectName("asioModuleAction")
 
@@ -207,7 +214,7 @@ class MainWindow(QMainWindow):
         layout.setSpacing(10)
 
         actions = QGroupBox("Workflows")
-        action_layout = QHBoxLayout(actions)
+        action_layout = QGridLayout(actions)
         self.runCalibrationButton = QPushButton("Calibration Preview")
         self.runCalibrationButton.setObjectName("runCalibrationButton")
         self.runFactoryTestButton = QPushButton("Factory Test")
@@ -216,10 +223,15 @@ class MainWindow(QMainWindow):
         self.runExperimentButton.setObjectName("runExperimentButton")
         self.generateExportButton = QPushButton("Generate Export")
         self.generateExportButton.setObjectName("generateExportButton")
-        action_layout.addWidget(self.runCalibrationButton)
-        action_layout.addWidget(self.runFactoryTestButton)
-        action_layout.addWidget(self.runExperimentButton)
-        action_layout.addWidget(self.generateExportButton)
+        workflow_buttons = (
+            self.runCalibrationButton,
+            self.runFactoryTestButton,
+            self.runExperimentButton,
+            self.generateExportButton,
+        )
+        for index, button in enumerate(workflow_buttons):
+            button.setMinimumHeight(30)
+            action_layout.addWidget(button, index // 4, index % 4)
         layout.addWidget(actions)
 
         self.statusLog = QTableWidget(0, 3)
@@ -271,6 +283,8 @@ class MainWindow(QMainWindow):
         self.connectButton.clicked.connect(self._connect_selected)
         self.disconnectButton.clicked.connect(self._disconnect_selected)
         self.readLiveButton.clicked.connect(self._read_live)
+        self.modbusModuleButton.clicked.connect(self._open_modbus_window)
+        self.modbusModuleAction.triggered.connect(self._open_modbus_window)
         self.asioModuleButton.clicked.connect(self._open_asio_window)
         self.asioModuleAction.triggered.connect(self._open_asio_window)
         self.runCalibrationButton.clicked.connect(self._run_calibration)
@@ -291,6 +305,17 @@ class MainWindow(QMainWindow):
         self.asioWindow.show()
         self.asioWindow.raise_()
         self.asioWindow.activateWindow()
+
+    def _open_modbus_window(self) -> None:
+        if self.modbusWindow is None:
+            self.modbusWindow = ModbusModuleWindow(
+                repository=self.runtime.repository,
+                data_root=self.runtime.data_root,
+                parent=self,
+            )
+        self.modbusWindow.show()
+        self.modbusWindow.raise_()
+        self.modbusWindow.activateWindow()
 
     def _add_channel(self) -> None:
         mode = self.connectionModeCombo.currentText()

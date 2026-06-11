@@ -3,7 +3,7 @@
 ## Scope
 This manual describes the current M12 CoreFlow Studio build. The application is a Windows-first desktop tool for simulator-backed Coriolis flowmeter workflow development and packaging validation.
 
-The current build supports simulated devices, live readings, calibration preview, automated factory test, a basic flexible experiment, run inspection, and report/export generation. It does not yet enable real hardware operation from the UI, production calibration formulas, armed parameter writes, signed installers, or customer-specific report templates.
+The current build supports simulated devices, live readings, calibration preview, a standalone Modbus Module window, automated factory test, a basic flexible experiment, run inspection, and report/export generation. The standalone Modbus Module can attempt a configured serial Modbus connection from its own window, but production real-transmitter use still requires a validated register map, confirmed calibration formulas, and hardware acceptance.
 
 ## Starting The Application
 From the packaged distribution folder, double-click:
@@ -87,9 +87,11 @@ Replay CSV mode loads recorded or generated samples as a read-only simulated dev
 Replay CSV files require `mass_flow`. Optional columns include `captured_at`, `volume_flow`, `density`, `temperature`, `status_flags`, and `source_channel`.
 
 ## Serial Modbus RTU Mode
-`Serial Modbus RTU` is shown as a future hardware path, but real hardware UI enablement is disabled in this build.
+`Serial Modbus RTU` in the main connection panel is shown as a future hardware path, but main-window serial device creation is disabled in this build.
 
 If you choose serial mode and click `Add Simulator`, the status log reports that serial Modbus setup is configured but disabled until hardware acceptance. This is intentional: real-device register maps, acceptance thresholds, fixture rules, and write policies are still known unknowns.
+
+For direct Modbus master operations, use the standalone Modbus Module from the toolbar or the `Modules` menu. That module is independent from the main simulator/replay device list.
 
 Use the console command below only to write a placeholder register-map template for engineering review:
 
@@ -110,6 +112,27 @@ Calibration Preview collects simulator samples against a built-in reference poin
 6. Review steps, metrics, decisions, and artifacts in Result Details.
 
 The calculation module is a placeholder until production calibration formulas are supplied.
+
+## Standalone Modbus Module
+Open the Modbus Module from the main toolbar or `Modules` menu. The module has its own connection state, connection dialog, variable map, Operations menu, communication-frame view, and log. It does not require adding a simulator or replay channel in the main window.
+
+- Click `Connection...` to open the Modbus connection dialog. The port list is discovered automatically from connected serial adapters. Use `Refresh Ports` after plugging in or removing a USB-to-serial adapter. Use `Order` for 32-bit byte/word order such as `ABCD`, `BADC`, `CDAB`, or `DCBA`. Use `Timeout` and `Retries` to tolerate slower or occasionally missed device responses.
+- Edit the `Variable Map` table before connecting to set each variable's register kind, address, word count, data type, scale, unit, and writable flag.
+- The default map includes `mass_rate`, `mass_acc`, `temperature`, `delta_t`, `zero_offset`, `k_factor`, `low_threshold`, and `zero_calibration_start`.
+- The `Variable Map` table keeps scroll bars visible when variables or columns exceed the visible area. Drag column headers to reorder columns.
+- Use `Add Variable` before connecting to add a custom variable row and define its name, address, type, and writable setting. Use `Delete Variable` to remove the selected row while disconnected.
+- Use `Save Map` before connecting to persist the current variable map under the user data directory. The Modbus Module loads that saved map the next time it opens, so edited addresses, types, scales, units, writable flags, and row order do not need to be re-entered.
+- The editable map covers sampled variables plus the zero-calibration start coil. Disconnect before changing the map for a new connection.
+- `Connect` opens the selected Modbus RTU port only from the connection dialog. After the connection succeeds, the dialog can be closed manually while the module window remains connected.
+- After connecting, use each row's `Read` button to query one variable and refresh the `Value` column. Writable rows can use `Write Value` and `Write`; non-writable rows disable write controls. Writes still go through the write guard and audit log.
+- Select row `Poll` checkboxes and click `Start Polling` to poll selected variables once per second. Each polling cycle reads selected variables sequentially, and adjacent variables with the same Modbus table are merged into one read request where possible.
+- Use the `Operations` menu for `Sample Variables`, `Zero Cal`, `K Factor`, `Repeatability`, and `Calibration History`. The K Factor input panel is hidden in this build; the existing K Factor operation path is retained for later dialog work.
+- The communication-frame table shows live TX/RX Modbus data codes for reads and writes.
+- `Sample Variables` reads the configured variables one by one, stores successful values such as accumulated mass, Delta T, zero offset, K factor, and low threshold with timestamps, updates the `Value` column, and logs warnings for variables that do not respond.
+- `Zero Cal` opens a dialog with a `Start` button. Starting reads `zero_offset` and `delta_t`, writes `zero_calibration_start` to 1 through the write guard, waits 3 seconds, reads the coil completion state, then displays before/after `zero_offset` and `delta_t` values for operator judgment. The Variable Map `Value` column is refreshed with the after values, including the final `zero_calibration_start` coil state.
+- `Calibration History` opens an independent table that can remain open beside calibration dialogs. It can show all calibration operations or one operation type, includes timestamps, and lets the operator edit notes. `K Factor` and `Repeatability` dedicated dialogs are still future UI work.
+
+The current module still uses the placeholder register-map template unless engineering supplies a validated map. Do not use the placeholder map as production transmitter documentation.
 
 ## Factory Test
 Factory Test runs a fixed simulator-backed outgoing-test path:
@@ -215,9 +238,10 @@ Replay CSV files require a `mass_flow` column. Optional columns are `captured_at
 ## Safety Notes
 - Simulator workflows are safe and require no hardware.
 - Calibration Preview does not write device parameters.
-- Hardware write workflows are not enabled.
+- The standalone Modbus Module can open the selected COM port when the operator clicks `Connect` in its connection dialog.
+- Write-capable Modbus operations must go through explicit write-guard and audit behavior.
 - Real transmitter register maps, calibration formulas, fixture behavior, and acceptance thresholds must be supplied before hardware use.
-- Any future hardware write must go through explicit write-guard and audit behavior.
+- Do not use the placeholder register map for production transmitter writes.
 
 ## Troubleshooting
 If the UI does not open, run the console smoke command:
@@ -252,8 +276,8 @@ $env:COREFLOW_DATA_ROOT = "D:\CoreFlowStudioData"
 ## Current Limits
 - No signed installer or MSI.
 - No production calibration formulas.
-- No real hardware UI enablement.
-- No armed calibration-parameter write workflow.
+- No production-approved hardware register map.
+- No armed production calibration-parameter write workflow.
 - No customer-specific report templates.
 - No real ML model execution.
 - Replay file UI currently accepts a typed CSV path; it does not yet include a file browser.

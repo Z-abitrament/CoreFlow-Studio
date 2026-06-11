@@ -66,6 +66,17 @@ class FakeModbusTransport:
         self.registers[address] = list(values)
         return TransportResponse(values=values)
 
+    def write_coil(
+        self,
+        address: int,
+        value: bool,
+        unit_id: int,
+    ) -> TransportResponse:
+        assert self.writes is not None
+        self.writes.append((address, [1 if value else 0], unit_id))
+        self.registers[address] = [1 if value else 0]
+        return TransportResponse(values=[1 if value else 0])
+
 
 def _register_map() -> ModbusRegisterMap:
     return ModbusRegisterMap(

@@ -36,6 +36,7 @@ Application services coordinate user actions and domain operations:
 - `StorageService`: writes and reads metadata, results, and file references.
 - `ExperimentService`: manages flexible experiment definitions and module execution.
 - `WriteGuardService`: validates safety-sensitive device write requests before they reach any device adapter.
+- `VariableSamplingService`: reads configured device variables and stores timestamped values with device/run/step traceability.
 
 ### Workflow Layer
 Workflows are explicit state machines or step graphs. Each workflow step declares:
@@ -52,8 +53,11 @@ Initial workflows:
 
 - Calibration preview workflow.
 - Calibration write workflow.
+- Zero calibration workflow.
+- K factor calibration workflow.
 - Automated factory test workflow.
 - Error analysis workflow.
+- Manual mass-total error and repeatability workflow.
 - Stability capture workflow.
 - Flexible experiment workflow.
 
@@ -78,6 +82,12 @@ Implementations:
 
 Device implementations must not decide whether a calibration workflow is allowed to write. They enforce device-level capabilities and parameter constraints, while workflow state, actor/source, dry-run mode, and audit requirements are coordinated by application services.
 
+The first Modbus-oriented calibration workflows remain headless and device-interface based:
+
+- Zero calibration writes a configured start coil or parameter through the write guard, then polls configured read-only variables until the completion state is observed.
+- K factor calibration receives operator-entered standard mass and accumulated-mass boundaries, calculates the proposed K factor, and writes only through the same guarded application path as other calibration writes.
+- Manual error/repeatability testing records operator-entered flow points and standard masses while using accumulated-mass readings as traceable input data.
+
 ### Protocol And Transport Layer
 The first real protocol adapter is Modbus RTU over serial.
 
@@ -86,13 +96,20 @@ Responsibilities:
 - Serial port open/close and configuration.
 - Request scheduling per port.
 - Timeout, retry, and backoff.
-- Register encoding and decoding.
+- Register, coil, and discrete-input encoding/decoding where the configured map allows it.
 - Diagnostics and protocol error reporting.
 - Optional frame logging for debugging.
+- Optional Modbus listener/sniffer diagnostics through a future com0com/hub4com virtual-port setup.
 
 Protocol code must not know about calibration workflows or UI widgets.
 
 Register maps, scaling, writable permissions, and acceptance limits must be loaded from configuration or workflow inputs. Production register addresses and calibration thresholds must not be embedded in protocol, workflow, or UI code.
+
+The Modbus master UI should expose configuration in focused dialogs rather than protocol code:
+
+- Serial/channel setup: port identification, baud rate, parity, stop bits, timeout, retries, and unit ID.
+- Variable editor: logical variable name, Modbus table type, address, word count, data type, endianness, scale, unit, writable flag, and valid range.
+- Calibration dialogs: zero calibration control/status, K factor manual mass inputs, and three-flow-point repeatability trials.
 
 ### ASIO/IIS Frame Stream Layer
 The ASIO/IIS module is a headless hardware I/O boundary for a USB sound-card module that appears in Windows Device Manager as `BRAVO-HD Device Control`.
@@ -170,6 +187,7 @@ SQLite stores:
 - Workflow steps.
 - Calibration results.
 - Error and stability metrics.
+- Timestamped low-rate variable samples.
 - File artifact references.
 - Audit log entries.
 

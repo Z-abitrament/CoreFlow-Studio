@@ -55,6 +55,8 @@ class ModbusRtuFlowmeterDevice(FlowmeterDevice):
         self._average_response_ms: float | None = None
 
     def connect(self) -> None:
+        if self._state is CommunicationState.CONNECTED:
+            return
         self._request_count += 1
         self._state = CommunicationState.CONNECTING
         if self._transport.connect():
@@ -121,26 +123,30 @@ class ModbusRtuFlowmeterDevice(FlowmeterDevice):
     def read_configuration(self) -> tuple[ConfigurationParameter, ...]:
         parameters: list[ConfigurationParameter] = []
         for register in self._register_map.registers:
-            if register.kind not in (RegisterKind.HOLDING, RegisterKind.INPUT):
+            if register.kind not in (
+                RegisterKind.HOLDING,
+                RegisterKind.INPUT,
+                RegisterKind.COIL,
+                RegisterKind.DISCRETE_INPUT,
+            ):
                 continue
-            value = self._read_register(register)
-            parameters.append(
-                ConfigurationParameter(
-                    name=register.name,
-                    value=value,
-                    unit=register.unit,
-                    writable=register.writable,
-                    minimum=register.minimum,
-                    maximum=register.maximum,
-                    metadata={
-                        "register_kind": register.kind.value,
-                        "address": register.address,
-                        "word_count": register.word_count,
-                        "data_type": register.data_type.value,
-                    },
-                )
-            )
+            parameters.append(self._configuration_parameter(register))
         return tuple(parameters)
+
+    def read_configuration_parameters(
+        self,
+        parameter_names: tuple[str, ...],
+        *,
+        merge_adjacent: bool = False,
+    ) -> tuple[ConfigurationParameter, ...]:
+        """Read only selected configured parameters."""
+
+        if merge_adjacent:
+            return self._read_configuration_parameters_merged(parameter_names)
+        return tuple(
+            self._configuration_parameter(self._register_map.by_name(name))
+            for name in parameter_names
+        )
 
     def write_configuration(
         self, request: ParameterWriteRequest
@@ -181,8 +187,11 @@ class ModbusRtuFlowmeterDevice(FlowmeterDevice):
                 new_value=request.new_value,
             )
 
-        encoded = encode_registers(register, request.new_value)
-        response = self._send_write(register, encoded)
+        if register.kind is RegisterKind.COIL:
+            response = self._send_coil_write(register, bool(request.new_value))
+        else:
+            encoded = encode_registers(register, request.new_value)
+            response = self._send_write(register, encoded)
         if not response:
             return _write_result(
                 request,
@@ -195,6 +204,58 @@ class ModbusRtuFlowmeterDevice(FlowmeterDevice):
             request,
             WriteResultStatus.APPLIED,
             previous_value=previous_value,
+            new_value=request.new_value,
+        )
+
+    def write_configuration_without_pre_read(
+        self,
+        request: ParameterWriteRequest,
+    ) -> ParameterWriteResult:
+        """Apply a validated write without issuing a read before the write frame."""
+
+        try:
+            register = self._register_map.by_name(request.parameter_name)
+        except KeyError as exc:
+            self._exception_count += 1
+            self._last_error = str(exc)
+            return _write_result(request, WriteResultStatus.REJECTED, message=str(exc))
+
+        validation_error = self._validate_write(register, request.new_value)
+        if validation_error is not None:
+            self._exception_count += 1
+            self._last_error = validation_error
+            return _write_result(request, WriteResultStatus.REJECTED, message=validation_error)
+
+        if request.mode is WriteMode.PREVIEW:
+            self._record_success()
+            return _write_result(
+                request,
+                WriteResultStatus.PREVIEWED,
+                new_value=request.new_value,
+            )
+        if request.mode is WriteMode.DRY_RUN:
+            self._record_success()
+            return _write_result(
+                request,
+                WriteResultStatus.DRY_RUN,
+                new_value=request.new_value,
+            )
+
+        if register.kind is RegisterKind.COIL:
+            response = self._send_coil_write(register, bool(request.new_value))
+        else:
+            encoded = encode_registers(register, request.new_value)
+            response = self._send_write(register, encoded)
+        if not response:
+            return _write_result(
+                request,
+                WriteResultStatus.FAILED,
+                message=self._last_error,
+            )
+
+        return _write_result(
+            request,
+            WriteResultStatus.APPLIED,
             new_value=request.new_value,
         )
 
@@ -235,6 +296,77 @@ class ModbusRtuFlowmeterDevice(FlowmeterDevice):
             self._record_transport_error(last_error)
         raise TimeoutError(last_error or "Modbus read failed.")
 
+    def _configuration_parameter(
+        self,
+        register: ModbusRegister,
+    ) -> ConfigurationParameter:
+        value = self._read_register(register)
+        return self._configuration_parameter_from_value(register, value)
+
+    def _configuration_parameter_from_value(
+        self,
+        register: ModbusRegister,
+        value: Any,
+    ) -> ConfigurationParameter:
+        return ConfigurationParameter(
+            name=register.name,
+            value=value,
+            unit=register.unit,
+            writable=register.writable,
+            minimum=register.minimum,
+            maximum=register.maximum,
+            metadata={
+                "register_kind": register.kind.value,
+                "address": register.address,
+                "word_count": register.word_count,
+                "data_type": register.data_type.value,
+            },
+        )
+
+    def _read_configuration_parameters_merged(
+        self,
+        parameter_names: tuple[str, ...],
+    ) -> tuple[ConfigurationParameter, ...]:
+        registers = [self._register_map.by_name(name) for name in parameter_names]
+        values: dict[str, Any] = {}
+        for group in _contiguous_register_groups(registers):
+            start = group[0].address
+            end = max(register.address + register.word_count for register in group)
+            words = self._read_words(group[0].kind, start, end - start)
+            for register in group:
+                offset = register.address - start
+                raw_words = words[offset : offset + register.word_count]
+                values[register.name] = decode_registers(register, raw_words)
+        return tuple(
+            self._configuration_parameter_from_value(
+                self._register_map.by_name(name),
+                values[name],
+            )
+            for name in parameter_names
+        )
+
+    def _read_words(
+        self,
+        kind: RegisterKind,
+        address: int,
+        count: int,
+    ) -> list[int]:
+        last_error: str | None = None
+        for _attempt in range(self._config.retry_count + 1):
+            self._request_count += 1
+            response = self._transport.read_registers(
+                kind,
+                address,
+                count,
+                self._config.unit_id,
+            )
+            if response.ok:
+                self._record_success()
+                return response.values or []
+            last_error = response.error
+            self._record_transport_error(last_error)
+        raise TimeoutError(last_error or "Modbus read failed.")
+
     def _send_write(self, register: ModbusRegister, values: list[int]) -> bool:
         for _attempt in range(self._config.retry_count + 1):
             self._request_count += 1
@@ -249,11 +381,27 @@ class ModbusRtuFlowmeterDevice(FlowmeterDevice):
             self._record_transport_error(response.error)
         return False
 
+    def _send_coil_write(self, register: ModbusRegister, value: bool) -> bool:
+        for _attempt in range(self._config.retry_count + 1):
+            self._request_count += 1
+            response = self._transport.write_coil(
+                register.address,
+                value,
+                self._config.unit_id,
+            )
+            if response.ok:
+                self._record_success()
+                return True
+            self._record_transport_error(response.error)
+        return False
+
     def _validate_write(self, register: ModbusRegister, value: Any) -> str | None:
         if not register.writable:
             return f"Register is not writable: {register.name}"
-        if register.kind is not RegisterKind.HOLDING:
-            return f"Only holding registers are writable in M3: {register.name}"
+        if register.kind not in (RegisterKind.HOLDING, RegisterKind.COIL):
+            return f"Only holding registers and coils are writable: {register.name}"
+        if register.kind is RegisterKind.COIL and not isinstance(value, bool | int):
+            return f"Coil value must be boolean-like: {register.name}"
         if isinstance(value, int | float):
             if register.minimum is not None and value < register.minimum:
                 return f"Value below minimum for {register.name}: {value}"
@@ -297,3 +445,20 @@ def _string_or_none(value: Any | None) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _contiguous_register_groups(
+    registers: list[ModbusRegister],
+) -> tuple[tuple[ModbusRegister, ...], ...]:
+    groups: list[list[ModbusRegister]] = []
+    for register in sorted(registers, key=lambda item: (item.kind.value, item.address)):
+        if not groups:
+            groups.append([register])
+            continue
+        current = groups[-1]
+        current_end = max(item.address + item.word_count for item in current)
+        if register.kind is current[-1].kind and register.address <= current_end:
+            current.append(register)
+            continue
+        groups.append([register])
+    return tuple(tuple(group) for group in groups)

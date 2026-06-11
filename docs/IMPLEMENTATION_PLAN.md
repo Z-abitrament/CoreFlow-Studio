@@ -70,11 +70,14 @@ Deliverables:
 - Serial configuration model for port, baud rate, parity, stop bits, timeout, and unit ID.
 - Modbus RTU client wrapper using pyserial and pymodbus or equivalent.
 - Register-map abstraction with configurable addresses, data types, scaling, and writable flags.
+- Coil and discrete-input support for calibration start/status signals where the register map configures them.
+- Headless variable sampling service that stores timestamped configured variables in SQLite.
 - Timeout, retry, and protocol error reporting.
 
 Done when:
 
 - Protocol tests pass against a fake or loopback Modbus target.
+- Configured Modbus variables can be sampled and stored without opening real hardware.
 - No workflow imports serial or Modbus implementation details.
 
 ### M4: Storage Foundation
@@ -103,12 +106,15 @@ Deliverables:
 - Audit-ready representation of proposed parameter writes.
 - Dry-run execution path for write-capable calibration steps.
 - Write-guard service that validates workflow state, writable permission, value ranges, and actor/source before any parameter write is allowed.
+- Headless zero calibration workflow using a configured start coil/parameter and before/after `zero_offset` and `delta_t` records.
+- Headless K factor calibration workflow using manual accumulated-mass and standard-mass inputs, guarded K factor write, and audit record.
 
 Done when:
 
 - Calibration preview runs end-to-end against simulator data.
 - Unknown production formulas are isolated behind configurable or replaceable calculation modules.
 - Write attempts can be previewed, rejected, dry-run audited, or applied to simulator state through one guarded application-level path.
+- Zero and K factor calibration workflows can run against fake or simulator devices without physical hardware.
 
 ### M6: Automated Factory Test Workflow
 Implement a fixed test sequence.
@@ -132,6 +138,7 @@ Deliverables:
 
 - Error metrics against reference values.
 - Repeatability metrics.
+- Manual mass-total error/repeatability calculations for three flow points with three trials per point.
 - Short-term stability metrics.
 - Drift and noise estimates.
 - Configurable thresholds.
@@ -244,6 +251,23 @@ Done when:
 - On the lab PC, the CLI can detect the configured ASIO device or report the exact missing backend/driver condition.
 - With the two IIS groups physically connected, the loopback smoke test passes against the BRAVO-HD hardware. The current verified hardware command uses native ASIO at 44100 Hz, ASIOSTInt24LSB, 2 input channels, 2 output channels, and 4410 samples per frame.
 - The UI can open the ASIO/IIS window, edit parameters, connect and disconnect the module, and report status/log messages without changing other device-channel connection state.
+
+### M14: Modbus Listener Diagnostics
+Implement a separate read-only Modbus listener/sniffer tool path for lab diagnostics using com0com and hub4com after the virtual-port tooling is available.
+
+Deliverables:
+
+- Documented com0com/hub4com setup checklist.
+- Listener configuration model for source/destination virtual COM ports, baud rate, parity, stop bits, and capture path.
+- Read-only frame capture and timestamped diagnostic artifact storage.
+- Fake serial endpoint or recorded-frame tests before opening virtual COM ports.
+- UI or CLI diagnostics that clearly distinguish listener mode from the normal Modbus master path.
+
+Done when:
+
+- Automated tests pass without com0com/hub4com installed.
+- On a lab PC with approved virtual-port tooling, the listener can capture frames from a known test route and store a diagnostic artifact.
+- Listener mode cannot perform parameter writes or proxy/inject frames without an explicit future safety review.
 
 ## Implementation Defaults
 - Use PySide6 for Qt unless a documented blocker appears.

@@ -11,6 +11,8 @@ M3 implements the first Modbus RTU protocol adapter behind the M1 `FlowmeterDevi
 - `ModbusTransport` abstraction for fake/loopback testing.
 - `PymodbusSerialTransport` wrapper for pymodbus 3.13 using `device_id`.
 - `ModbusRtuFlowmeterDevice` implementing `FlowmeterDevice`.
+- Configured coil/discrete-input reads and coil writes for calibration control/status where the register map allows them.
+- `VariableSamplingService` for timestamped storage of configured device variables without opening real hardware in tests.
 - Timeout/retry diagnostics and write validation before protocol transmission.
 
 ## Commands Run
@@ -30,4 +32,4 @@ conda run -n coreflow-studio python -m coreflow --version
 ## Notes
 - Physical USB-to-serial hardware tests remain deferred until register maps, serial settings, and safety rules are available.
 - Production register addresses are not hard-coded; tests use local fixture register maps.
-- Coil/discrete input support is modeled but not implemented for reads in M3 because v1 measurement/configuration needs are register-oriented.
+- Coil/discrete input support is implemented at the transport/device boundary for configured variables; production coil semantics remain unknown until firmware documentation is provided.

@@ -16,6 +16,7 @@ from coreflow.storage.models import (
     AuditLogRecord,
     DeviceRecord,
     RunSummary,
+    VariableSampleRecord,
 )
 from coreflow.workflows.models import RunSession, WorkflowStep
 
@@ -131,10 +132,19 @@ class StorageRepository:
             return None
         return _run_session_from_row(row)
 
+    def update_run_notes(self, run_id: str, notes: str) -> None:
+        with self._database.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE run_sessions SET notes = ? WHERE run_id = ?",
+                (notes, run_id),
+            )
+            if cursor.rowcount == 0:
+                raise KeyError(f"Unknown run: {run_id}")
+
     def list_runs(self, limit: int | None = None) -> tuple[RunSummary, ...]:
         query = """
             SELECT run_id, run_type, workflow_name, status, device_id, operator,
-                   started_at, ended_at, software_version
+                   started_at, ended_at, software_version, notes
             FROM run_sessions
             ORDER BY COALESCE(started_at, '') DESC, run_id DESC
         """
@@ -302,6 +312,56 @@ class StorageRepository:
                 ),
             )
 
+    def save_variable_sample(self, record: VariableSampleRecord) -> None:
+        with self._database.connect() as connection:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO variable_samples (
+                    sample_id, device_id, run_id, step_id, variable_name,
+                    captured_at, value_json, unit, source_channel, metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.sample_id,
+                    record.device_id,
+                    record.run_id,
+                    record.step_id,
+                    record.variable_name,
+                    _dt(record.captured_at),
+                    _to_json(record.value),
+                    record.unit,
+                    record.source_channel,
+                    _to_json(record.metadata),
+                ),
+            )
+
+    def list_variable_samples(
+        self,
+        *,
+        run_id: str | None = None,
+        device_id: str | None = None,
+        variable_name: str | None = None,
+    ) -> tuple[VariableSampleRecord, ...]:
+        clauses: list[str] = []
+        parameters: list[Any] = []
+        if run_id is not None:
+            clauses.append("run_id = ?")
+            parameters.append(run_id)
+        if device_id is not None:
+            clauses.append("device_id = ?")
+            parameters.append(device_id)
+        if variable_name is not None:
+            clauses.append("variable_name = ?")
+            parameters.append(variable_name)
+        query = "SELECT * FROM variable_samples"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY captured_at, sample_id"
+        with self._database.connect() as connection:
+            rows = connection.execute(query, tuple(parameters)).fetchall()
+        return tuple(_variable_sample_from_row(row) for row in rows)
+
     def count_rows(self, table_name: str) -> int:
         if table_name not in {
             "devices",
@@ -311,6 +371,7 @@ class StorageRepository:
             "artifacts",
             "audit_logs",
             "schema_migrations",
+            "variable_samples",
         }:
             raise ValueError(f"Unsupported table: {table_name}")
         with self._database.connect() as connection:
@@ -379,6 +440,7 @@ def _run_summary_from_row(row: sqlite3.Row) -> RunSummary:
         started_at=_parse_dt(row["started_at"]),
         ended_at=_parse_dt(row["ended_at"]),
         software_version=row["software_version"],
+        notes=row["notes"],
     )
 
 
@@ -396,6 +458,21 @@ def _workflow_step_from_row(row: sqlite3.Row) -> WorkflowStep:
         input_configuration=_from_json(row["input_configuration_json"], {}),
         output_summary=_from_json(row["output_summary_json"], {}),
         error_message=row["error_message"],
+    )
+
+
+def _variable_sample_from_row(row: sqlite3.Row) -> VariableSampleRecord:
+    return VariableSampleRecord(
+        sample_id=row["sample_id"],
+        device_id=row["device_id"],
+        run_id=row["run_id"],
+        step_id=row["step_id"],
+        variable_name=row["variable_name"],
+        captured_at=_parse_dt(row["captured_at"]) or _utc_now(),
+        value=_from_json(row["value_json"], None),
+        unit=row["unit"],
+        source_channel=row["source_channel"],
+        metadata=_from_json(row["metadata_json"], {}),
     )
 
 

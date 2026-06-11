@@ -18,7 +18,7 @@ def decode_registers(register: ModbusRegister, words: list[int]) -> Any:
 
     if len(words) != register.word_count:
         raise ValueError(
-            f"Register {register.name} expected {register.word_count} words, "
+            f"Register {register.name} expected {register.word_count} values, "
             f"got {len(words)}."
         )
     ordered_words = _apply_word_order(words, register.word_order)
@@ -26,13 +26,19 @@ def decode_registers(register: ModbusRegister, words: list[int]) -> Any:
     if register.data_type is ModbusDataType.BOOL:
         return bool(ordered_words[0])
     if register.data_type is ModbusDataType.UINT16:
-        raw = ordered_words[0]
+        raw = _apply_byte_order_word(ordered_words[0], register.byte_order)
     elif register.data_type is ModbusDataType.INT16:
-        raw = _to_signed(ordered_words[0], 16)
+        raw = _to_signed(
+            _apply_byte_order_word(ordered_words[0], register.byte_order),
+            16,
+        )
     elif register.data_type is ModbusDataType.UINT32:
-        raw = _combine_words(ordered_words)
+        raw = _combine_words(_apply_byte_order_words(ordered_words, register.byte_order))
     elif register.data_type is ModbusDataType.INT32:
-        raw = _to_signed(_combine_words(ordered_words), 32)
+        raw = _to_signed(
+            _combine_words(_apply_byte_order_words(ordered_words, register.byte_order)),
+            32,
+        )
     elif register.data_type is ModbusDataType.FLOAT32:
         raw = _decode_float32(ordered_words, register.byte_order)
     else:
@@ -64,6 +70,8 @@ def encode_registers(register: ModbusRegister, value: Any) -> list[int]:
             words = _encode_float32(float(unscaled), register.byte_order)
         else:
             raise ValueError(f"Unsupported data type: {register.data_type}")
+        if register.data_type is not ModbusDataType.FLOAT32:
+            words = _apply_byte_order_words(words, register.byte_order)
     return _apply_word_order(words, register.word_order)
 
 
@@ -71,6 +79,16 @@ def _apply_word_order(words: list[int], word_order: WordOrder) -> list[int]:
     if word_order is WordOrder.LITTLE:
         return list(reversed(words))
     return list(words)
+
+
+def _apply_byte_order_words(words: list[int], byte_order: ByteOrder) -> list[int]:
+    return [_apply_byte_order_word(word, byte_order) for word in words]
+
+
+def _apply_byte_order_word(word: int, byte_order: ByteOrder) -> int:
+    if byte_order is ByteOrder.LITTLE:
+        return ((word & 0xFF) << 8) | ((word >> 8) & 0xFF)
+    return word
 
 
 def _combine_words(words: list[int]) -> int:

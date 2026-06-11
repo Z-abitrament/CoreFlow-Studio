@@ -28,6 +28,7 @@ class FakeModbusTransport:
     transient_read_errors: dict[int, list[str]] = field(default_factory=dict)
     write_errors: dict[int, str] = field(default_factory=dict)
     writes: list[tuple[int, list[int], int]] = field(default_factory=list)
+    coil_writes: list[tuple[int, bool, int]] = field(default_factory=list)
 
     def connect(self) -> bool:
         self.connected = True
@@ -61,6 +62,16 @@ class FakeModbusTransport:
         self.writes.append((address, list(values), unit_id))
         self.registers[address] = list(values)
         return TransportResponse(values=values)
+
+    def write_coil(
+        self,
+        address: int,
+        value: bool,
+        unit_id: int,
+    ) -> TransportResponse:
+        self.coil_writes.append((address, value, unit_id))
+        self.registers[address] = [1 if value else 0]
+        return TransportResponse(values=[1 if value else 0])
 
 
 def _register_map() -> ModbusRegisterMap:
@@ -128,6 +139,14 @@ def _register_map() -> ModbusRegisterMap:
                 data_type=ModbusDataType.UINT16,
                 writable=False,
             ),
+            ModbusRegister(
+                name="zero_calibration_start",
+                kind=RegisterKind.COIL,
+                address=30,
+                word_count=1,
+                data_type=ModbusDataType.BOOL,
+                writable=True,
+            ),
         ),
     )
 
@@ -152,6 +171,7 @@ def _transport() -> FakeModbusTransport:
             10: [12345],
             20: [0],
             21: [1],
+            30: [0],
         }
     )
 
@@ -241,6 +261,25 @@ def test_modbus_device_write_preview_dry_run_apply_and_reject() -> None:
     assert transport.writes == [(20, [125], 7)]
     assert rejected_read_only.status is WriteResultStatus.REJECTED
     assert rejected_range.status is WriteResultStatus.REJECTED
+
+
+def test_modbus_device_writes_coils() -> None:
+    transport = _transport()
+    device = _device(transport)
+    device.connect()
+
+    result = device.write_configuration(
+        ParameterWriteRequest(
+            parameter_name="zero_calibration_start",
+            new_value=True,
+            mode=WriteMode.ARMED,
+            actor="pytest",
+            workflow_state="calibration_write_armed",
+        )
+    )
+
+    assert result.status is WriteResultStatus.APPLIED
+    assert transport.coil_writes == [(30, True, 7)]
 
 
 def test_modbus_device_records_transport_errors() -> None:

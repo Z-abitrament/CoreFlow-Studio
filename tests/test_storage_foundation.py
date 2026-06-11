@@ -10,6 +10,7 @@ from coreflow.storage import (
     Database,
     DeviceRecord,
     StorageRepository,
+    VariableSampleRecord,
     check_artifact_integrity,
 )
 from coreflow.workflows import (
@@ -114,9 +115,24 @@ def test_repository_persists_run_metadata_and_artifacts(tmp_path) -> None:
             result="dry_run",
         )
     )
+    repository.save_variable_sample(
+        VariableSampleRecord(
+            sample_id="VAR-001",
+            device_id="SIM-001",
+            run_id="RUN-20260605-000001",
+            step_id="STEP-001",
+            variable_name="mass_acc",
+            captured_at=created_at,
+            value=123.45,
+            unit="kg",
+            source_channel="SIM-001",
+            metadata={"register_kind": "input"},
+        )
+    )
 
     stored_device = repository.get_device("SIM-001")
     artifacts = repository.list_artifacts("RUN-20260605-000001")
+    samples = repository.list_variable_samples(run_id="RUN-20260605-000001")
     issues = check_artifact_integrity(repository, tmp_path)
 
     assert stored_device is not None
@@ -125,6 +141,9 @@ def test_repository_persists_run_metadata_and_artifacts(tmp_path) -> None:
     assert repository.count_rows("workflow_steps") == 1
     assert repository.count_rows("analysis_results") == 1
     assert repository.count_rows("audit_logs") == 1
+    assert repository.count_rows("variable_samples") == 1
+    assert samples[0].variable_name == "mass_acc"
+    assert samples[0].value == 123.45
     assert artifacts[0].artifact_id == "ART-001"
     assert artifacts[0].file_path.as_posix().endswith("raw/samples.csv")
     assert (tmp_path / artifacts[0].file_path).exists()

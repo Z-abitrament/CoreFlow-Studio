@@ -103,6 +103,21 @@ Fields for small samples:
 - Status flags.
 - Source channel.
 
+### Variable Sample
+Stores timestamped values from configured Modbus or simulator logical variables, especially low-rate variables used by operator workflows.
+
+Fields:
+
+- Sample ID.
+- Device ID.
+- Run ID and step ID when the sample belongs to a workflow.
+- Variable name, such as `mass_acc`, `delta_t`, `zero_offset`, or `k_factor`.
+- Timestamp.
+- Value as typed JSON.
+- Unit.
+- Source channel.
+- Metadata copied from the register map or simulator parameter definition.
+
 ### Analysis Result
 Stores calculated outputs from calibration, error analysis, stability analysis, signal processing, or ML inference.
 
@@ -132,6 +147,9 @@ Fields:
 - Acceptance thresholds used.
 - Preview or applied status.
 - Write audit references.
+- Zero calibration before/after `zero_offset`, `delta_t`, timestamps, control parameter, and completion status.
+- K factor calibration accumulated-mass before/after, measured mass delta, standard mass, current K factor, corrected K factor, and write result.
+- Manual repeatability test flow points, trial inputs, percent errors, and per-flow-point repeatability standard deviations.
 
 ### Artifact
 Represents a file linked to a run, step, or result.
@@ -216,6 +234,7 @@ The run ID must be unique even if multiple runs start in the same second.
 - Raw data used for final results must not be overwritten by later processing.
 - Processed outputs must reference the raw artifact and processing configuration used to create them.
 - Calibration and write-capable runs must reference the register map, thresholds, and workflow template used for validation.
+- Variable samples linked to a run must reference an existing device, run, and workflow step.
 - Audit log entries must not be deleted by normal run cleanup or report export actions.
 
 ## Backup And Portability
@@ -234,3 +253,4 @@ Full backup and restore tools are future work.
 - Required checksum or signing policy.
 - Whether production systems require operator login or electronic signature.
 - Whether customer or regulatory systems require a specific export schema.
+- Whether low-rate variable samples require retention outside workflow-linked runs for routine diagnostics.

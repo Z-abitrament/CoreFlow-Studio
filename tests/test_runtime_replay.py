@@ -25,3 +25,4 @@ def test_runtime_runs_experiment_against_replay_device(tmp_path) -> None:
     assert stored_device.connection_metadata["scenario"] == "csv_replay"
     assert stored_device.connection_metadata["replay_source"] == str(replay_path)
     assert any(artifact.artifact_id.endswith("EXPERIMENT-RAW") for artifact in artifacts)
+

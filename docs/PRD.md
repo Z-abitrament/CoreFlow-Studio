@@ -29,6 +29,7 @@ v1 must deliver the software foundation for:
 - A workflow engine that can run fixed factory procedures without embedding logic in the UI.
 - Data capture, storage, and export using SQLite plus linked files.
 - Protocol abstraction that allows real Modbus RTU transmitters to replace simulated devices later.
+- A Modbus RTU master operator path for configurable variable maps, timestamped variable reads, zero calibration, K factor calibration, and manual mass-total repeatability tests.
 - Extension points for signal processing, fixture control, and machine learning experiments.
 - An ASIO-backed IIS frame I/O module for lab hardware tests, exposed through an independent UI window after the headless module is verified.
 
@@ -39,6 +40,7 @@ v1 must deliver the software foundation for:
 - Final fixture drivers until test-bench hardware is specified.
 - Regulatory certification tooling.
 - Full machine learning model lifecycle management.
+- Production use of a com0com/hub4com Modbus listener until virtual-port tooling is installed, tested, and approved on the lab PC.
 
 ## Primary Workflows
 
@@ -51,6 +53,10 @@ Acceptance criteria:
 - Connection status is visible per port or device.
 - Communication errors are logged without freezing the UI.
 - Simulated and real-device connection paths expose the same application-level device interface.
+- Serial Modbus setup exposes normal parameters, port identification, and Modbus unit ID without hard-coding COM port numbers.
+- Modbus variable definitions can be configured by logical name, address, register/coil type, data type, scale, unit, and read/write permission.
+- Required logical variables include read-only `mass_rate`, `mass_acc`, `temperature`, `delta_t`, `zero_offset`, and `frequency`, plus writable `k_factor` and `low_threshold` when the register map marks them writable.
+- Timestamped Modbus variable reads are stored in SQLite with device identity and optional run or workflow-step linkage.
 
 ### 2. Factory Calibration
 The user can run a guided calibration workflow using known reference points. The workflow collects readings, calculates provisional calibration results, validates limits, and records the outcome.
@@ -61,6 +67,8 @@ Acceptance criteria:
 - Calibration steps are explicit and resumable after recoverable failures.
 - Writes to transmitter parameters are separated from calculation and preview.
 - Every calibration run stores raw data, input configuration, calculated outputs, and pass/fail status.
+- Zero calibration uses a configurable coil or parameter to start the operation, records `zero_offset`, `delta_t`, and timestamps before and after, and blocks unrelated write-capable operations until the calibration completion state is read.
+- K factor calibration supports manual valve-operation timing, records accumulated mass before and after, accepts the standard mass from the operator, calculates `k_s = k_r / m_r * m_s`, and writes the new K factor only through the write guard.
 
 ### 3. Automated Factory Test
 The user can run a fixed outgoing test procedure that checks communication, basic health, measurement behavior, error against reference values, and stability over time.
@@ -81,6 +89,8 @@ Acceptance criteria:
 - Error metrics are calculated reproducibly from stored data.
 - Plots and tables can be generated from completed runs.
 - Unknown production thresholds remain configurable.
+- Manual mass-total repeatability supports three operator-entered flow points with three trials per point.
+- Each trial records accumulated mass before and after, standard mass, percent error `e = (m_1 - m_2) / m_2 * 100%`, and the repeatability standard deviation for each flow point.
 
 ### 5. Stability Analysis
 The user can collect data over a configured duration and evaluate short-term stability, drift, noise, and abnormal interruptions.
@@ -128,6 +138,8 @@ Acceptance criteria:
 | PRD-FR-010 | Provide extension points for experiments, signal processing, fixture control, and ML. | M10 | TP-EXT-001 |
 | PRD-FR-011 | Guard safety-sensitive device writes with preview, validation, dry-run support, and audit logging. | M5, M11 | TP-SAFE-001 |
 | PRD-FR-012 | Support an ASIO/IIS frame-stream module for USB sound-card hardware, including independent connection state, configurable frame format, output, input capture, status/log diagnostics, and loopback verification. | M13 | TP-ASIO-001, TP-ASIO-002, TP-UI-003 |
+| PRD-FR-013 | Support a Modbus master operator module with configurable variables, timestamped variable sampling, zero calibration, K factor calibration, and manual mass-total error/repeatability tests. | M3, M5, M7, M8, M11 | TP-PROTO-001, TP-DATA-001, TP-WF-003, TP-CALC-003, TP-SAFE-001 |
+| PRD-FR-014 | Support a read-only Modbus listener/sniffer workflow using com0com and hub4com for lab diagnostics after virtual-port tooling is installed and approved. | M14 | TP-PROTO-002 |
 
 ## Non-Functional Requirements
 - The UI must remain responsive during communication, capture, analysis, and report generation.
@@ -166,5 +178,9 @@ This repository is considered ready for first implementation when:
 - Acceptance thresholds for calibration, error, repeatability, drift, stability, and communication quality.
 - Required report format for customers, quality systems, or regulatory records.
 - Required cybersecurity or access-control policy for parameter writes.
+- Final addresses, data types, scaling, and writable ranges for `mass_rate`, `mass_acc`, `temperature`, `delta_t`, `zero_offset`, `frequency`, `k_factor`, `low_threshold`, and zero-calibration start/status.
+- Whether zero calibration completion is represented by the same start coil returning to zero or by a separate status register on production firmware.
+- Whether K factor calibration must verify the written value by readback or by an additional transmitter commit/apply action.
+- Lab permission to install and configure com0com/hub4com virtual serial ports and permission to open serial devices for listener diagnostics.
 - Exact ASIO driver capabilities for the BRAVO-HD USB sound-card module, including supported sample rates, channel layout, sample formats, and whether the Python audio backend exposes the vendor ASIO driver directly.
 - Final production meaning of IIS frame payloads beyond loopback transport validation.

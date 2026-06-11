@@ -141,4 +141,21 @@ SCHEMA_STATEMENTS = (
         FOREIGN KEY(run_id) REFERENCES run_sessions(run_id)
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS variable_samples (
+        sample_id TEXT PRIMARY KEY,
+        device_id TEXT NOT NULL,
+        run_id TEXT,
+        step_id TEXT,
+        variable_name TEXT NOT NULL,
+        captured_at TEXT NOT NULL,
+        value_json TEXT NOT NULL,
+        unit TEXT,
+        source_channel TEXT,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        FOREIGN KEY(device_id) REFERENCES devices(device_id),
+        FOREIGN KEY(run_id) REFERENCES run_sessions(run_id),
+        FOREIGN KEY(step_id) REFERENCES workflow_steps(step_id)
+    )
+    """,
 )

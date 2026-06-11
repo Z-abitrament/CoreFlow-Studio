@@ -87,8 +87,26 @@ class WriteGuardService:
         device: FlowmeterDevice,
         request: ParameterWriteRequest,
     ) -> WriteGuardDecision:
-        audit_id = f"AUD-{uuid4().hex}"
         previous = self._read_parameter(device, request.parameter_name)
+        return self._evaluate_with_previous(device, request, previous)
+
+    def evaluate_known_parameter(
+        self,
+        device: FlowmeterDevice,
+        request: ParameterWriteRequest,
+        parameter: ConfigurationParameter,
+    ) -> WriteGuardDecision:
+        """Evaluate a write when validated parameter metadata is already loaded."""
+
+        return self._evaluate_with_previous(device, request, parameter)
+
+    def _evaluate_with_previous(
+        self,
+        device: FlowmeterDevice,
+        request: ParameterWriteRequest,
+        previous: ConfigurationParameter | None,
+    ) -> WriteGuardDecision:
+        audit_id = f"AUD-{uuid4().hex}"
         validation_error = self._validate(request, previous)
         if validation_error is not None:
             result = ParameterWriteResult(
@@ -148,7 +166,12 @@ class WriteGuardService:
     def _read_parameter(
         self, device: FlowmeterDevice, parameter_name: str
     ) -> ConfigurationParameter | None:
-        for parameter in device.read_configuration():
+        reader = getattr(device, "read_configuration_parameters", None)
+        if callable(reader):
+            parameters = reader((parameter_name,))
+        else:
+            parameters = device.read_configuration()
+        for parameter in parameters:
             if parameter.name == parameter_name:
                 return parameter
         return None

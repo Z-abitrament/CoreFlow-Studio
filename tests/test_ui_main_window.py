@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QSplitter
 
 from coreflow.app import CoreFlowRuntime
 from coreflow.simulation import replay_template_csv
@@ -159,6 +160,58 @@ def test_main_window_opens_independent_asio_iis_window(qtbot, tmp_path) -> None:
     window.asioModuleAction.trigger()
     assert window.asioWindow is not None
     assert window.asioWindow.isVisible()
+
+
+def test_main_window_opens_independent_modbus_window(qtbot, tmp_path) -> None:
+    runtime = CoreFlowRuntime(data_root=tmp_path)
+    window = MainWindow(runtime=runtime)
+    qtbot.addWidget(window)
+    window.show()
+
+    _click(qtbot, window.modbusModuleButton)
+
+    assert window.modbusWindow is not None
+    modbus_window = window.modbusWindow
+    assert modbus_window.isVisible()
+    assert modbus_window.isWindow()
+    assert modbus_window.statusValueLabel.text() == "Disconnected"
+    assert not modbus_window.sampleVariablesAction.isEnabled()
+    assert not hasattr(modbus_window, "sampleVariablesButton")
+    assert modbus_window.menuBar.objectName() == "modbusMenuBar"
+    assert modbus_window.kFactorInputsGroup.isHidden()
+    assert not hasattr(modbus_window, "variableTable")
+    assert modbus_window.frameTable.objectName() == "modbusFrameTable"
+    assert modbus_window.openConnectionButton.text() == "Connection..."
+    assert modbus_window.variableMapTable.minimumHeight() <= 160
+    assert modbus_window.findChild(QSplitter, "modbusBodySplitter") is not None
+    assert modbus_window.variableMapTable.rowCount() == 8
+    assert modbus_window.variableMapTable.columnCount() == 12
+    assert not modbus_window.variableMapTable.verticalHeader().isVisible()
+    assert modbus_window.variableMapTable.horizontalHeader().sectionsMovable()
+    assert modbus_window.variableMapTable.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+    assert modbus_window.addVariableButton.text() == "Add Variable"
+    assert modbus_window.deleteVariableButton.text() == "Delete Variable"
+    assert not hasattr(modbus_window, "moveVariableUpButton")
+    assert not hasattr(modbus_window, "moveVariableDownButton")
+    assert modbus_window.pollingButton.text() == "Start Polling"
+    _click(qtbot, modbus_window.openConnectionButton)
+    qtbot.waitUntil(lambda: modbus_window.connectionDialog is not None, timeout=5000)
+    connection_dialog = modbus_window.connectionDialog
+    assert connection_dialog is not None
+    assert connection_dialog.isVisible()
+    assert not connection_dialog.portCombo.isEditable()
+    assert connection_dialog.refreshPortsButton.text() == "Refresh Ports"
+    assert connection_dialog.unitIdSpinBox.value() == 1
+    assert connection_dialog.orderCombo.currentText() == "ABCD"
+    qtbot.waitUntil(lambda: not modbus_window._busy, timeout=5000)
+    assert window.deviceTable.rowCount() == 0
+
+    window.modbusWindow.close()
+    window.modbusWindow = None
+    window.modbusModuleAction.trigger()
+    assert window.modbusWindow is not None
+    assert window.modbusWindow.isVisible()
+    assert window.modbusWindow.isWindow()
 
 
 def test_asio_iis_window_fake_connection_does_not_change_device_channels(qtbot, tmp_path) -> None:
