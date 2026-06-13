@@ -14,6 +14,7 @@ Run from the repository root:
 ```powershell
 conda env create -f environment.yml
 conda activate coreflow-studio
+git config core.hooksPath .githooks
 ```
 
 If the environment already exists, update it instead:
@@ -30,6 +31,7 @@ Run:
 python -m pytest
 python -m coreflow
 python -m coreflow --version
+python scripts/check_version_update.py
 python -m coreflow --write-register-map-template .\config\register_maps\placeholder_modbus.json
 python -m coreflow --simulator-smoke --data-root .\CoreFlowStudioData\smoke
 python -m coreflow --asio-list-devices
@@ -44,6 +46,8 @@ Expected behavior:
 - The test suite passes.
 - The default entry point prints that the M0 bootstrap is ready.
 - The version command prints the package version.
+- The version check confirms `pyproject.toml` and `src\coreflow\__init__.py` agree and the staged commit satisfies the project version policy.
+- Pytest temporary and cache files stay under `.tmp\` instead of the repository root.
 - The register-map command writes a placeholder Modbus template for hardware acceptance preparation.
 - The simulator smoke command runs headless simulator-backed calibration preview, factory test, experiment, and export generation.
 - The ASIO device-list command prints available audio host APIs/devices or clearly reports that the optional ASIO backend is unavailable.

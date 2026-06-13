@@ -22,6 +22,8 @@ Scenarios:
 
 - Confirm git is initialized locally.
 - Confirm `.gitignore` excludes virtual environments, Python caches, build outputs, logs, SQLite runtime files, and generated artifacts.
+- Confirm the repository Git hook path can be set to `.githooks`.
+- Confirm `scripts/check_version_update.py` passes when the software version in `pyproject.toml` and `src/coreflow/__init__.py` is synchronized.
 - Create or update the `coreflow-studio` conda environment from `environment.yml`.
 - Install development dependencies.
 - Run the test suite with pytest.

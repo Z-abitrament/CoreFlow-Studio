@@ -44,6 +44,6 @@ pythonpath = ["src"]
 addopts = [
   "--strict-markers",
   "--strict-config",
-  "--basetemp=pytest-temp"
+  "--basetemp=.tmp/pytest-temp"
 ]
-cache_dir = "pytest-cache-temp"
+cache_dir = ".tmp/pytest-cache"

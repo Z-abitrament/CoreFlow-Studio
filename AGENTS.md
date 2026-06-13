@@ -68,6 +68,8 @@ If documents disagree, prefer this order:
 - Initialize a local git repository before implementation work if `.git` is absent.
 - Use checkpoint commits after coherent passing slices.
 - Use Conventional Commits for all non-WIP commit messages, for example `feat(ui): add simulator channel table`, `fix(packaging): hide console for UI executable`, or `docs(workflow): document conda setup`.
+- Keep the project software version synchronized in `pyproject.toml` and `src/coreflow/__init__.py`.
+- Install the repository hook with `git config core.hooksPath .githooks` so each commit automatically checks whether staged code or packaging changes require a version update.
 - Never commit failing or half-written work unless the commit message clearly marks it as `WIP:`.
 - Never rewrite history, delete user changes, or run destructive git commands without explicit approval.
 - Do not push to a remote unless the user provides a remote and asks for it.

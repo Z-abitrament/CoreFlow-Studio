@@ -29,6 +29,8 @@ git config user.email "codex@local.invalid"
 - Use Conventional Commits for all non-WIP commits.
 - Commit only coherent changes that can be explained in one sentence.
 - Do not commit failing or half-written work unless the commit message clearly starts with `WIP:`.
+- Keep the project software version in `pyproject.toml` and `src/coreflow/__init__.py` synchronized.
+- Before every commit, run the version check or install the repository Git hook so staged code and packaging changes are reviewed for a required version bump.
 - Before handing back, report commit hashes and test results.
 
 Recommended commit format:
@@ -56,6 +58,40 @@ build(windows): use conda environment for packaging
 fix(packaging): hide console for UI executable
 ```
 
+## Versioning
+The current project software version is `0.1.0`. It is defined in exactly two
+places and both must match:
+
+- `pyproject.toml` under `[project].version`.
+- `src/coreflow/__init__.py` as `__version__`.
+
+Use semantic versioning for the application version:
+
+- Patch version for bug fixes, documentation shipped with the app, packaging
+  fixes, and low-risk internal corrections.
+- Minor version for new user-visible workflows, UI capabilities, protocol
+  support, storage/report formats, or hardware-module features.
+- Major version for incompatible storage, workflow, protocol, or operator
+  behavior changes after a stable release line exists.
+
+Every non-documentation commit must explicitly consider whether the version
+should change. The repository includes a pre-commit check that blocks staged
+`src/` or `packaging/` changes unless both version files are part of the commit.
+Documentation-only, test-only, and local test-tooling configuration commits may
+keep the same version.
+
+Install the hook once per checkout:
+
+```powershell
+git config core.hooksPath .githooks
+```
+
+Run the same check manually when needed:
+
+```powershell
+python scripts/check_version_update.py
+```
+
 ## Overnight Autonomous Run Checklist
 Before an unattended run:
 
@@ -65,6 +101,7 @@ Before an unattended run:
 - Confirm network-dependent commands may request approval.
 - Avoid hardware access, destructive git commands, and parameter-write workflows unless explicitly requested.
 - Make checkpoint commits after coherent passing slices.
+- Let the pre-commit version check run before each checkpoint commit and update the version when the commit changes shipped behavior or packaging.
 - Leave a final summary with completed work, tests, blockers, and commit hashes.
 
 ## Permission Checklist
@@ -72,8 +109,9 @@ Expected safe permissions for M0:
 
 - Workspace file writes inside this repository.
 - Local git commands: `git init`, `git add`, `git commit`, `git status`, `git diff`, and `git log`.
+- Local git configuration for repository hooks: `git config core.hooksPath .githooks`.
 - Conda environment creation and updates from `environment.yml`.
-- Test execution with pytest.
+- Test execution with pytest. Pytest cache and temporary directories should stay under `.tmp/`.
 
 Commands that require explicit approval:
 

@@ -1,0 +1,9 @@
+#!/usr/bin/env sh
+if command -v python >/dev/null 2>&1; then
+  python scripts/check_version_update.py
+elif command -v py >/dev/null 2>&1; then
+  py -3 scripts/check_version_update.py
+else
+  echo "Version check failed: Python is required to run scripts/check_version_update.py." >&2
+  exit 1
+fi
