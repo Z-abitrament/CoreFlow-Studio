@@ -135,7 +135,6 @@ class FlowSegmentCaptureConfig:
     max_wait_stop_polls: int = 600
     cancel_message: str = "Flow segment capture canceled."
     cancel_requested: Callable[[], bool] | None = None
-    flow_rate_reader: Callable[[FlowmeterDevice, str], float] | None = None
     flow_rate_source: str = "device"
 
 
@@ -861,7 +860,7 @@ def capture_flow_segment(
     started_at: datetime | None = None
     for _ in range(config.max_wait_start_polls):
         _raise_if_flow_segment_canceled(config)
-        start_flow = _read_flow_segment_value(device, config)
+        start_flow = _read_float_parameter(device, config.flow_rate_parameter)
         poll_count += 1
         if abs(start_flow) > config.nonzero_threshold:
             started_at = datetime.now(UTC)
@@ -875,7 +874,7 @@ def capture_flow_segment(
     if config.post_start_sample_s:
         _sleep_flow_segment(config.post_start_sample_s, config)
     _raise_if_flow_segment_canceled(config)
-    instant_flow = _read_flow_segment_value(device, config)
+    instant_flow = _read_float_parameter(device, config.flow_rate_parameter)
     poll_count += 1
     instant_flow_at = datetime.now(UTC)
 
@@ -883,7 +882,7 @@ def capture_flow_segment(
     stopped = False
     for _ in range(config.max_wait_stop_polls):
         _raise_if_flow_segment_canceled(config)
-        stop_flow = _read_flow_segment_value(device, config)
+        stop_flow = _read_float_parameter(device, config.flow_rate_parameter)
         poll_count += 1
         if abs(stop_flow) <= config.nonzero_threshold:
             stopped = True
@@ -924,15 +923,6 @@ def _sleep_flow_segment(seconds: float, config: FlowSegmentCaptureConfig) -> Non
         sleep(interval)
         remaining -= interval
     _raise_if_flow_segment_canceled(config)
-
-
-def _read_flow_segment_value(
-    device: FlowmeterDevice,
-    config: FlowSegmentCaptureConfig,
-) -> float:
-    if config.flow_rate_reader is not None:
-        return float(config.flow_rate_reader(device, config.flow_rate_parameter))
-    return _read_float_parameter(device, config.flow_rate_parameter)
 
 
 def _samples_csv(samples: list[object]) -> bytes:

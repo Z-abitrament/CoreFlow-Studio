@@ -188,22 +188,6 @@ History operation name:
 manual_error_repeatability
 ```
 
-## PC Simulated Flow Segment
-
-K Factor and Repeatability include `PC simulate flow segment` for lab checks when
-a Modbus slave is connected but real flow is not available.
-
-When enabled:
-
-- The runtime still reads the configured flow-rate and accumulator variables
-  from the Modbus slave so communication is exercised.
-- The PC supplies the flow-segment state used for start/instant/stop timing.
-- `PC Sim Delta m` may supply the measured mass delta used in calculations.
-- The runtime does not write the flow-rate variable to the slave.
-- Saved history is marked with `flow_rate_source=pc_simulated`.
-
-This mode is not a production calibration substitute.
-
 ## Calibration History
 
 Calibration history is derived from SQLite run sessions and analysis results.

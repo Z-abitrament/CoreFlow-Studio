@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 from datetime import UTC, datetime
 from time import sleep
@@ -13,7 +14,6 @@ from coreflow.app.modbus_runtime import (
     ModbusConnectionSettings,
     ModbusModuleRuntime,
     ModbusOperationMetadata,
-    PcFlowSimulationSettings,
 )
 from coreflow.hardware import SerialPortInfo, SerialPortScanner
 from coreflow.protocols.modbus import (
@@ -356,74 +356,6 @@ def test_modbus_module_runtime_saves_single_point_repeatability_summary(
     assert history[0].metrics["mode"] == "single_point"
     assert history[0].metrics["expected_trials_per_point"] == 4
     assert len(history[0].metrics["trials"]) == 4
-
-
-def test_modbus_module_runtime_pc_simulated_flow_keeps_device_reads(
-    tmp_path,
-) -> None:
-    repository = _repository(tmp_path)
-    transports = []
-    runtime = ModbusModuleRuntime(
-        repository,
-        transport_factory=placeholder_transport_factory(transports),
-        k_factor_post_start_sample_s=0.0,
-        k_factor_post_stop_delay_s=0.0,
-    )
-    runtime.configure_operation_metadata(
-        ModbusOperationMetadata(
-            device_model="CFM-K",
-            tube_model="T-K",
-            transmitter_model="TX-K",
-        )
-    )
-    runtime.connect(ModbusConnectionSettings(port="COM9", unit_id=1))
-    transport = transports[0]
-    register_map = runtime.register_map
-    mass_rate = register_map.by_name("mass_rate")
-    mass_acc = register_map.by_name("mass_acc")
-    transport.read_sequences[mass_rate.address] = [
-        encode_registers(mass_rate, 0.0),
-        encode_registers(mass_rate, 0.0),
-        encode_registers(mass_rate, 0.0),
-    ]
-    transport.read_sequences[mass_acc.address] = [
-        encode_registers(mass_acc, 100.0),
-        encode_registers(mass_acc, 100.0),
-        encode_registers(mass_acc, 100.0),
-    ]
-
-    capture = runtime.capture_k_factor_simple_trial(
-        snapshot_variable_names=(),
-        flow_rate_parameter="mass_rate",
-        flow_acc_parameter="mass_acc",
-        k_factor_parameter="k_factor",
-        poll_interval_s=0.05,
-        pc_flow_simulation=PcFlowSimulationSettings(
-            enabled=True,
-            start_flow=6.0,
-            instant_flow=6.5,
-            stop_flow=0.0,
-            mass_delta=12.0,
-        ),
-    )
-    result = runtime.calculate_k_factor_simple_result(
-        capture,
-        standard_mass=12.6,
-    )
-
-    assert capture.segment.flow_rate_source == "pc_simulated"
-    assert capture.segment.start_flow == 6.0
-    assert capture.segment.instant_flow == 6.5
-    assert capture.measured_mass_delta == 12.0
-    assert result.corrected_k_factor == 525.0
-    assert any(read[1] == mass_rate.address for read in transport.reads)
-    assert any(read[1] == mass_acc.address for read in transport.reads)
-    history = runtime.list_calibration_history(operation="k_factor_calibration")
-    assert len(history) == 1
-    assert history[0].metrics["flow_rate_source"] == "pc_simulated"
-    assert history[0].metrics["device_model"] == "CFM-K"
-    assert history[0].metrics["tube_model"] == "T-K"
-    assert history[0].metrics["transmitter_model"] == "TX-K"
 
 
 def test_modbus_module_manual_zero_start_write_sends_fc05_first(tmp_path) -> None:
@@ -777,6 +709,9 @@ def test_modbus_module_window_uses_own_connection_state(qtbot, tmp_path) -> None
         timeout=5000,
     )
     assert window.kFactorDialog is not None
+    assert not hasattr(window.kFactorDialog, "pcFlowSimulationCheckBox")
+    assert not hasattr(window.kFactorDialog, "pcFlowValueSpinBox")
+    assert not hasattr(window.kFactorDialog, "pcMassDeltaSpinBox")
     window.repeatabilityAction.trigger()
     qtbot.waitUntil(
         lambda: window.repeatabilityDialog is not None
@@ -787,6 +722,9 @@ def test_modbus_module_window_uses_own_connection_state(qtbot, tmp_path) -> None
     assert window.repeatabilityDialog.modeCombo.currentData() == "three_point"
     assert window.repeatabilityDialog.modeCombo.model().item(1).isEnabled()
     assert not window.repeatabilityDialog.modeCombo.model().item(2).isEnabled()
+    assert not hasattr(window.repeatabilityDialog, "pcFlowSimulationCheckBox")
+    assert not hasattr(window.repeatabilityDialog, "pcFlowValueSpinBox")
+    assert not hasattr(window.repeatabilityDialog, "pcMassDeltaSpinBox")
 
     assert window.statusValueLabel.text() == "Connected modbus:COM9:7"
     assert window.frameTable.rowCount() >= 14
@@ -855,6 +793,18 @@ def test_modbus_module_window_uses_own_connection_state(qtbot, tmp_path) -> None
     assert window.resetVariableMapButton.isEnabled()
     _set_table_text(window.variableMapTable, mass_acc_row, 2, "31")
     assert _table_text(window.variableMapTable, mass_acc_row, 2) == "31"
+
+
+def test_modbus_operation_runtime_no_pc_flow_simulation_parameter(tmp_path) -> None:
+    repository = _repository(tmp_path)
+    runtime = ModbusModuleRuntime(repository)
+
+    assert "pc_flow_simulation" not in inspect.signature(
+        runtime.capture_k_factor_simple_trial
+    ).parameters
+    assert "pc_flow_simulation" not in inspect.signature(
+        runtime.capture_repeatability_simple_trial
+    ).parameters
 
 
 def test_modbus_module_window_k_factor_simple_flow_calculates_and_writes(
@@ -955,88 +905,6 @@ def test_modbus_module_window_k_factor_simple_flow_calculates_and_writes(
     assert len(history) == 1
     assert history[0].metrics["write_verified"] is True
     assert history[0].metrics["corrected_k_factor"] == 525.0
-
-
-def test_modbus_module_window_k_factor_pc_simulated_flow(
-    qtbot,
-    tmp_path,
-) -> None:
-    repository = _repository(tmp_path)
-    transports = []
-    runtime = ModbusModuleRuntime(
-        repository,
-        transport_factory=placeholder_transport_factory(transports),
-        zero_calibration_wait_s=0.0,
-        k_factor_post_start_sample_s=0.0,
-        k_factor_post_stop_delay_s=0.0,
-    )
-    scanner = SerialPortScanner(provider=lambda: (SerialPortInfo(port="COM9"),))
-    window = ModbusModuleWindow(repository, runtime=runtime, port_scanner=scanner)
-    qtbot.addWidget(window)
-    window.show()
-    dialog = _open_connection_dialog(qtbot, window)
-    _wait_for_scanned_ports(qtbot, dialog, 1)
-    _click(qtbot, dialog.connectButton)
-    qtbot.waitUntil(
-        lambda: window.statusValueLabel.text() == "Connected modbus:COM9:1",
-        timeout=5000,
-    )
-    register_map = runtime.register_map
-    mass_rate = register_map.by_name("mass_rate")
-    mass_acc = register_map.by_name("mass_acc")
-    transports[0].read_sequences[mass_rate.address] = [
-        encode_registers(mass_rate, 0.0),
-        encode_registers(mass_rate, 0.0),
-        encode_registers(mass_rate, 0.0),
-    ]
-    transports[0].read_sequences[mass_acc.address] = [
-        encode_registers(mass_acc, 100.0),
-        encode_registers(mass_acc, 100.0),
-        encode_registers(mass_acc, 100.0),
-    ]
-
-    window.kFactorAction.trigger()
-    qtbot.waitUntil(
-        lambda: window.kFactorDialog is not None and window.kFactorDialog.isVisible(),
-        timeout=5000,
-    )
-    assert window.kFactorDialog is not None
-    k_dialog = window.kFactorDialog
-    k_dialog.pcFlowSimulationCheckBox.setChecked(True)
-    k_dialog.pcFlowValueSpinBox.setValue(6.0)
-    k_dialog.pcMassDeltaSpinBox.setValue(12.0)
-    k_dialog.standardMassSpinBox.setValue(12.6)
-
-    _click(qtbot, k_dialog.startButton)
-    qtbot.waitUntil(
-        lambda: "K factor captured" in window.logTextEdit.toPlainText(),
-        timeout=5000,
-    )
-    assert (
-        _table_text(
-            k_dialog.resultTable,
-            _find_metric_row(k_dialog.resultTable, "flow_rate_source"),
-            1,
-        )
-        == "pc_simulated"
-    )
-    assert _table_text(
-        k_dialog.resultTable,
-        _find_metric_row(k_dialog.resultTable, "delta_m"),
-        1,
-    ) == "12"
-    _click(qtbot, k_dialog.calculateButton)
-    qtbot.waitUntil(
-        lambda: "K factor calculated" in window.logTextEdit.toPlainText(),
-        timeout=5000,
-    )
-    assert "525" in _table_text(
-        k_dialog.resultTable,
-        _find_metric_row(k_dialog.resultTable, "K1"),
-        1,
-    )
-    assert any(read[1] == mass_rate.address for read in transports[0].reads)
-    assert any(read[1] == mass_acc.address for read in transports[0].reads)
 
 
 def test_modbus_module_window_repeatability_simple_records_nine_trials(
@@ -1300,98 +1168,6 @@ def test_modbus_module_window_repeatability_single_point_appends_trials(
     assert history[0].metrics["expected_trials_per_point"] == 4
     assert len(history[0].metrics["trials"]) == 4
     assert rep_dialog.startButton.isEnabled()
-
-
-def test_modbus_module_window_repeatability_pc_simulated_flow_trial(
-    qtbot,
-    tmp_path,
-) -> None:
-    repository = _repository(tmp_path)
-    transports = []
-    runtime = ModbusModuleRuntime(
-        repository,
-        transport_factory=placeholder_transport_factory(transports),
-        k_factor_post_start_sample_s=0.0,
-        k_factor_post_stop_delay_s=0.0,
-    )
-    scanner = SerialPortScanner(provider=lambda: (SerialPortInfo(port="COM9"),))
-    window = ModbusModuleWindow(
-        repository,
-        runtime=runtime,
-        port_scanner=scanner,
-        data_root=tmp_path,
-    )
-    qtbot.addWidget(window)
-    window.show()
-    dialog = _open_connection_dialog(qtbot, window)
-    _wait_for_scanned_ports(qtbot, dialog, 1)
-    _click(qtbot, dialog.connectButton)
-    qtbot.waitUntil(
-        lambda: window.statusValueLabel.text() == "Connected modbus:COM9:1",
-        timeout=5000,
-    )
-    transport = transports[0]
-    register_map = runtime.register_map
-    mass_rate = register_map.by_name("mass_rate")
-    mass_acc = register_map.by_name("mass_acc")
-    transport.read_sequences[mass_rate.address] = [
-        encode_registers(mass_rate, 0.0),
-        encode_registers(mass_rate, 0.0),
-        encode_registers(mass_rate, 0.0),
-    ]
-    transport.read_sequences[mass_acc.address] = [
-        encode_registers(mass_acc, 100.0),
-        encode_registers(mass_acc, 100.0),
-        encode_registers(mass_acc, 100.0),
-    ]
-
-    window.repeatabilityAction.trigger()
-    qtbot.waitUntil(
-        lambda: window.repeatabilityDialog is not None
-        and window.repeatabilityDialog.isVisible(),
-        timeout=5000,
-    )
-    assert window.repeatabilityDialog is not None
-    rep_dialog = window.repeatabilityDialog
-    rep_dialog.modeCombo.setCurrentIndex(
-        rep_dialog.modeCombo.findData("single_point")
-    )
-    rep_dialog.pollIntervalSpinBox.setValue(0.05)
-    rep_dialog.pcFlowSimulationCheckBox.setChecked(True)
-    rep_dialog.pcFlowValueSpinBox.setValue(6.0)
-    rep_dialog.pcMassDeltaSpinBox.setValue(100.0)
-    rep_dialog.standardMassSpinBox.setValue(100.0)
-
-    _click(qtbot, rep_dialog.startButton)
-    qtbot.waitUntil(
-        lambda: "Repeatability captured" in window.logTextEdit.toPlainText(),
-        timeout=5000,
-    )
-    assert (
-        _table_text(
-            rep_dialog.resultTable,
-            _find_metric_row(rep_dialog.resultTable, "flow_rate_source"),
-            1,
-        )
-        == "pc_simulated"
-    )
-    _click(qtbot, rep_dialog.saveTrialButton)
-    qtbot.waitUntil(
-        lambda: len(rep_dialog.trial_results()) == 1,
-        timeout=5000,
-    )
-    assert _table_text(rep_dialog.trialTable, 0, 5) == "100"
-    assert _table_text(rep_dialog.trialTable, 0, 9) == "0"
-    assert (
-        _table_text(
-            rep_dialog.resultTable,
-            _find_metric_row(rep_dialog.resultTable, "last_flow_rate_source"),
-            1,
-        )
-        == "pc_simulated"
-    )
-    assert any(read[1] == mass_rate.address for read in transport.reads)
-    assert any(read[1] == mass_acc.address for read in transport.reads)
 
 
 def test_modbus_module_window_repeatability_close_discards_incomplete_capture(

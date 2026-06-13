@@ -129,13 +129,13 @@ Scenarios:
 - Confirm the K Factor dialog can persist and reload selected variables, polling interval, and pre-operation snapshot selections without persisting write-to-device intent.
 - Confirm corrected K factor is calculated as `k_s = k_r / m_r * m_s`.
 - Confirm K factor apply writes only through the write guard, rereads the configured K factor parameter for verification, and stores run, analysis, and audit records with write-request/apply/verify status.
-- Confirm K factor PC flow simulation still reads the configured slave `flow_rate` and accumulator variables, does not write the flow-rate variable, uses `PC Sim Delta m` for the calculation, and marks the result as `flow_rate_source=pc_simulated`.
+- Confirm K factor operation no longer exposes PC-side flow simulation controls or runtime parameters; captured flow segments must come from configured device reads.
 - Run error/repeatability testing from selected pre-test variables, configured flow-rate and accumulated-mass variables, and either three operator-configured target-flow ranges with three non-zero-to-zero flow-segment trials per range or a single target-flow range with operator-appended trials.
 - Confirm the Repeatability dialog can persist and reload selected variables, polling interval, mode, target-flow range settings, and pre-test snapshot selections.
 - Confirm each repeatability trial displays captured process data before the operator saves the standard-scale mass, and that each saved trial immediately displays its percent error.
 - Confirm Three Flow Ranges mode calculates a flow-range repeatability standard deviation immediately after that range's third saved trial and writes history only after the completed nine-trial test is saved.
 - Confirm Single Flow Range mode keeps a pending next-trial row available after each saved trial, updates the current repeatability summary after every saved trial, and writes the current trial set only when `Save Summary` is clicked.
-- Confirm repeatability PC flow simulation still reads the configured slave `flow_rate` and accumulator variables, uses `PC Sim Delta m` for the saved trial, and marks the trial source as `pc_simulated`.
+- Confirm repeatability operation no longer exposes PC-side flow simulation controls or runtime parameters; trial flow segments must come from configured device reads.
 - Confirm repeatability trial tables and history details store trial errors, `v1`, `v_mean`, per-range repeatability standard deviations, and summary metrics for review/export.
 
 ID: TP-WF-002

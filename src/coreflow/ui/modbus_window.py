@@ -48,7 +48,6 @@ from coreflow.app.modbus_runtime import (
     ModbusKFactorSimpleResult,
     ModbusModuleRuntime,
     ModbusOperationMetadata,
-    PcFlowSimulationSettings,
     ModbusRepeatabilityFlowSummary,
     ModbusRepeatabilitySimpleCapture,
     ModbusRepeatabilitySimpleResult,
@@ -505,19 +504,6 @@ class KFactorCalibrationDialog(QDialog):
         self.pollIntervalSpinBox.setSingleStep(0.1)
         self.pollIntervalSpinBox.setValue(1.0)
         settings.addRow("Poll Interval (s)", self.pollIntervalSpinBox)
-        self.pcFlowSimulationCheckBox = QCheckBox("PC simulate flow segment")
-        self.pcFlowSimulationCheckBox.setObjectName(
-            "modbusKFactorPcFlowSimulationCheckBox"
-        )
-        settings.addRow("", self.pcFlowSimulationCheckBox)
-        self.pcFlowValueSpinBox = _float_input(5.0)
-        self.pcFlowValueSpinBox.setObjectName("modbusKFactorPcFlowValueSpinBox")
-        self.pcFlowValueSpinBox.setMinimum(0.000001)
-        settings.addRow("PC Sim Flow", self.pcFlowValueSpinBox)
-        self.pcMassDeltaSpinBox = _float_input(12.0)
-        self.pcMassDeltaSpinBox.setObjectName("modbusKFactorPcMassDeltaSpinBox")
-        self.pcMassDeltaSpinBox.setMinimum(0.000001)
-        settings.addRow("PC Sim Delta m", self.pcMassDeltaSpinBox)
         self.standardMassSpinBox = _float_input(12.6)
         self.standardMassSpinBox.setObjectName("modbusKFactorStandardMassSpinBox")
         self.standardMassSpinBox.setMinimum(0.000001)
@@ -726,9 +712,6 @@ class KFactorCalibrationDialog(QDialog):
             "flow_acc_parameter": self.flowAccCombo.currentText(),
             "k_factor_parameter": self.kFactorCombo.currentText(),
             "poll_interval_s": self.pollIntervalSpinBox.value(),
-            "pc_flow_simulation_enabled": self.pcFlowSimulationCheckBox.isChecked(),
-            "pc_flow_simulation_value": self.pcFlowValueSpinBox.value(),
-            "pc_mass_delta": self.pcMassDeltaSpinBox.value(),
         }
 
     def apply_configuration(self, settings: dict[str, object]) -> None:
@@ -738,15 +721,6 @@ class KFactorCalibrationDialog(QDialog):
         poll_interval = settings.get("poll_interval_s")
         if isinstance(poll_interval, (int, float)):
             self.pollIntervalSpinBox.setValue(float(poll_interval))
-        pc_enabled = settings.get("pc_flow_simulation_enabled")
-        if isinstance(pc_enabled, bool):
-            self.pcFlowSimulationCheckBox.setChecked(pc_enabled)
-        pc_value = settings.get("pc_flow_simulation_value")
-        if isinstance(pc_value, (int, float)):
-            self.pcFlowValueSpinBox.setValue(float(pc_value))
-        pc_mass_delta = settings.get("pc_mass_delta")
-        if isinstance(pc_mass_delta, (int, float)):
-            self.pcMassDeltaSpinBox.setValue(float(pc_mass_delta))
         snapshot_names = settings.get("snapshot_variable_names")
         if isinstance(snapshot_names, (list, tuple)):
             selected = {str(name) for name in snapshot_names}
@@ -836,9 +810,6 @@ class KFactorCalibrationDialog(QDialog):
             self.flowAccCombo,
             self.kFactorCombo,
             self.pollIntervalSpinBox,
-            self.pcFlowSimulationCheckBox,
-            self.pcFlowValueSpinBox,
-            self.pcMassDeltaSpinBox,
             self.standardMassSpinBox,
             self.saveHistoryCheckBox,
             self.writeToDeviceCheckBox,
@@ -906,24 +877,6 @@ class RepeatabilityTestDialog(QDialog):
         self.pollIntervalSpinBox.setSingleStep(0.1)
         self.pollIntervalSpinBox.setValue(1.0)
         settings.addRow("Poll Interval (s)", self.pollIntervalSpinBox)
-        self.pcFlowSimulationCheckBox = QCheckBox("PC simulate flow segment")
-        self.pcFlowSimulationCheckBox.setObjectName(
-            "modbusRepeatabilityPcFlowSimulationCheckBox"
-        )
-        settings.addRow("", self.pcFlowSimulationCheckBox)
-        self.pcFlowValueSpinBox = _float_input(5.0)
-        self.pcFlowValueSpinBox.setObjectName(
-            "modbusRepeatabilityPcFlowValueSpinBox"
-        )
-        self.pcFlowValueSpinBox.setMinimum(0.000001)
-        settings.addRow("PC Sim Flow", self.pcFlowValueSpinBox)
-        self.pcMassDeltaSpinBox = _float_input(100.0)
-        self.pcMassDeltaSpinBox.setObjectName(
-            "modbusRepeatabilityPcMassDeltaSpinBox"
-        )
-        self.pcMassDeltaSpinBox.setMinimum(0.000001)
-        settings.addRow("PC Sim Delta m", self.pcMassDeltaSpinBox)
-
         self.flowPointSpinBoxes: list[QDoubleSpinBox] = []
         for index, value in enumerate((600.0, 300.0, 100.0), start=1):
             spin = _float_input(value)
@@ -1104,9 +1057,6 @@ class RepeatabilityTestDialog(QDialog):
             "flow_rate_parameter": self.flowRateCombo.currentText(),
             "flow_acc_parameter": self.flowAccCombo.currentText(),
             "poll_interval_s": self.pollIntervalSpinBox.value(),
-            "pc_flow_simulation_enabled": self.pcFlowSimulationCheckBox.isChecked(),
-            "pc_flow_simulation_value": self.pcFlowValueSpinBox.value(),
-            "pc_mass_delta": self.pcMassDeltaSpinBox.value(),
             "flow_points": self.flow_points(),
         }
 
@@ -1121,15 +1071,6 @@ class RepeatabilityTestDialog(QDialog):
         poll_interval = settings.get("poll_interval_s")
         if isinstance(poll_interval, (int, float)):
             self.pollIntervalSpinBox.setValue(float(poll_interval))
-        pc_enabled = settings.get("pc_flow_simulation_enabled")
-        if isinstance(pc_enabled, bool):
-            self.pcFlowSimulationCheckBox.setChecked(pc_enabled)
-        pc_value = settings.get("pc_flow_simulation_value")
-        if isinstance(pc_value, (int, float)):
-            self.pcFlowValueSpinBox.setValue(float(pc_value))
-        pc_mass_delta = settings.get("pc_mass_delta")
-        if isinstance(pc_mass_delta, (int, float)):
-            self.pcMassDeltaSpinBox.setValue(float(pc_mass_delta))
         flow_points = settings.get("flow_points")
         if isinstance(flow_points, (list, tuple)):
             for spin, value in zip(self.flowPointSpinBoxes, flow_points):
@@ -1479,9 +1420,6 @@ class RepeatabilityTestDialog(QDialog):
             self.flowRateCombo,
             self.flowAccCombo,
             self.pollIntervalSpinBox,
-            self.pcFlowSimulationCheckBox,
-            self.pcFlowValueSpinBox,
-            self.pcMassDeltaSpinBox,
             self.snapshotTable,
         ):
             widget.setEnabled(enabled)
@@ -2565,7 +2503,6 @@ class ModbusModuleWindow(QDialog):
         cancel_event = Event()
         self._k_factor_cancel_event = cancel_event
         dialog.set_running()
-        pc_flow_simulation = _pc_flow_simulation_from_settings(settings)
         self._run_task(
             "K factor",
             lambda: self.runtime.capture_k_factor_simple_trial(
@@ -2574,7 +2511,6 @@ class ModbusModuleWindow(QDialog):
                 flow_acc_parameter=str(settings["flow_acc_parameter"]),
                 k_factor_parameter=str(settings["k_factor_parameter"]),
                 poll_interval_s=float(settings["poll_interval_s"]),
-                pc_flow_simulation=pc_flow_simulation,
                 cancel_requested=cancel_event.is_set,
             ),
             self._k_factor_capture_finished,
@@ -2745,7 +2681,6 @@ class ModbusModuleWindow(QDialog):
         dialog.set_running()
         run_id = dialog.current_run_id()
         capture_snapshot = not dialog.trial_results()
-        pc_flow_simulation = _pc_flow_simulation_from_settings(settings)
         self._run_task(
             "Repeatability",
             lambda: self.runtime.capture_repeatability_simple_trial(
@@ -2757,7 +2692,6 @@ class ModbusModuleWindow(QDialog):
                 flow_acc_parameter=str(settings["flow_acc_parameter"]),
                 poll_interval_s=float(settings["poll_interval_s"]),
                 capture_snapshot=capture_snapshot,
-                pc_flow_simulation=pc_flow_simulation,
                 cancel_requested=cancel_event.is_set,
             ),
             self._repeatability_capture_finished,
@@ -3858,27 +3792,6 @@ def _operation_label(value: str) -> str:
         "manual_error_repeatability": "Repeatability",
     }
     return labels.get(value, value)
-
-
-def _pc_flow_simulation_from_settings(
-    settings: dict[str, object],
-) -> PcFlowSimulationSettings:
-    enabled = bool(settings.get("pc_flow_simulation_enabled"))
-    value = settings.get("pc_flow_simulation_value")
-    flow_value = float(value) if isinstance(value, (int, float)) else 5.0
-    mass_delta_value = settings.get("pc_mass_delta")
-    mass_delta = (
-        float(mass_delta_value)
-        if isinstance(mass_delta_value, (int, float))
-        else None
-    )
-    return PcFlowSimulationSettings(
-        enabled=enabled,
-        start_flow=flow_value,
-        instant_flow=flow_value,
-        stop_flow=0.0,
-        mass_delta=mass_delta,
-    )
 
 
 def _metric_value(metrics: dict[str, object], key: str) -> str:

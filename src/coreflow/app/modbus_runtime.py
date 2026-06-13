@@ -329,17 +329,6 @@ class ModbusCalibrationHistoryImportResult:
     errors: tuple[str, ...] = ()
 
 
-@dataclass(frozen=True, slots=True)
-class PcFlowSimulationSettings:
-    """PC-side flow segment used for lab workflow dry checks with real Modbus reads."""
-
-    enabled: bool = False
-    start_flow: float = 5.0
-    instant_flow: float = 5.0
-    stop_flow: float = 0.0
-    mass_delta: float | None = None
-
-
 TransportFactory = Callable[[SerialConfig], ModbusTransport | None]
 FrameLogger = Callable[[str, str, str], None]
 
@@ -635,7 +624,6 @@ class ModbusModuleRuntime:
         max_wait_start_polls: int = 600,
         max_wait_stop_polls: int = 600,
         cancel_requested: Callable[[], bool] | None = None,
-        pc_flow_simulation: PcFlowSimulationSettings | None = None,
     ) -> ModbusKFactorSimpleCapture:
         run_id = self._next_run_id()
         device = self._require_device()
@@ -679,10 +667,6 @@ class ModbusModuleRuntime:
                 max_wait_stop_polls=max_wait_stop_polls,
                 cancel_message="K factor capture canceled.",
                 cancel_requested=cancel_requested,
-                flow_rate_reader=_pc_flow_simulation_reader(pc_flow_simulation),
-                flow_rate_source="pc_simulated"
-                if pc_flow_simulation is not None and pc_flow_simulation.enabled
-                else "device",
             ),
         )
         after_parameters = _read_selected_parameters(
@@ -690,14 +674,7 @@ class ModbusModuleRuntime:
             (flow_acc_parameter,),
             merge_adjacent=False,
         )
-        device_mass_acc_after = float(
-            _find_parameter(after_parameters, flow_acc_parameter).value
-        )
-        mass_acc_after = _pc_simulated_mass_acc_after(
-            mass_acc_before,
-            device_mass_acc_after,
-            pc_flow_simulation,
-        )
+        mass_acc_after = float(_find_parameter(after_parameters, flow_acc_parameter).value)
         return ModbusKFactorSimpleCapture(
             run_id=run_id,
             flow_rate_parameter=flow_rate_parameter,
@@ -875,7 +852,6 @@ class ModbusModuleRuntime:
         max_wait_stop_polls: int = 600,
         capture_snapshot: bool = True,
         cancel_requested: Callable[[], bool] | None = None,
-        pc_flow_simulation: PcFlowSimulationSettings | None = None,
     ) -> ModbusRepeatabilitySimpleCapture:
         if trial_index < 1:
             raise ValueError("Repeatability trial index must be at least 1.")
@@ -925,10 +901,6 @@ class ModbusModuleRuntime:
                 max_wait_stop_polls=max_wait_stop_polls,
                 cancel_message="Repeatability capture canceled.",
                 cancel_requested=cancel_requested,
-                flow_rate_reader=_pc_flow_simulation_reader(pc_flow_simulation),
-                flow_rate_source="pc_simulated"
-                if pc_flow_simulation is not None and pc_flow_simulation.enabled
-                else "device",
             ),
         )
         after_parameters = _read_selected_parameters(
@@ -936,14 +908,7 @@ class ModbusModuleRuntime:
             (flow_acc_parameter,),
             merge_adjacent=False,
         )
-        device_mass_acc_after = float(
-            _find_parameter(after_parameters, flow_acc_parameter).value
-        )
-        mass_acc_after = _pc_simulated_mass_acc_after(
-            mass_acc_before,
-            device_mass_acc_after,
-            pc_flow_simulation,
-        )
+        mass_acc_after = float(_find_parameter(after_parameters, flow_acc_parameter).value)
         return ModbusRepeatabilitySimpleCapture(
             run_id=capture_run_id,
             flow_point=flow_point,
@@ -1860,37 +1825,6 @@ def _sample_one_variable(
         )
     )
     return sample
-
-
-def _pc_flow_simulation_reader(
-    settings: PcFlowSimulationSettings | None,
-) -> Callable[[FlowmeterDevice, str], float] | None:
-    if settings is None or not settings.enabled:
-        return None
-    sequence = [
-        settings.start_flow,
-        settings.instant_flow,
-        settings.stop_flow,
-    ]
-    state = {"index": 0}
-
-    def read(device: FlowmeterDevice, parameter_name: str) -> float:
-        _read_selected_parameters(device, (parameter_name,), merge_adjacent=False)
-        index = min(state["index"], len(sequence) - 1)
-        state["index"] += 1
-        return float(sequence[index])
-
-    return read
-
-
-def _pc_simulated_mass_acc_after(
-    mass_acc_before: float,
-    device_mass_acc_after: float,
-    settings: PcFlowSimulationSettings | None,
-) -> float:
-    if settings is None or not settings.enabled or settings.mass_delta is None:
-        return device_mass_acc_after
-    return mass_acc_before + float(settings.mass_delta)
 
 
 def _pre_calibration_snapshot(
