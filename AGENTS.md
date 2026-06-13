@@ -15,6 +15,7 @@ Read these documents before implementation work:
 - `docs/PROTOCOLS.md`: communication and protocol contracts.
 - `docs/DATA_MODEL.md`: storage model, file layout, and data traceability.
 - `docs/SIMULATION.md`: simulator requirements and hardware-free development path.
+- `docs/MODBUS_OPERATIONS.md`: standalone Modbus Module operation logic, history fields, and extension rules.
 - `docs/DEVELOPMENT_WORKFLOW.md`: local git workflow, overnight run checklist, permissions, and developer setup.
 - `docs/DEVELOPER_SETUP.md`: Windows PowerShell setup and M0 verification commands.
 

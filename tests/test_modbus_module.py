@@ -12,6 +12,7 @@ from coreflow.app.modbus_runtime import (
     ModbusCalibrationHistoryEntry,
     ModbusConnectionSettings,
     ModbusModuleRuntime,
+    ModbusOperationMetadata,
     PcFlowSimulationSettings,
 )
 from coreflow.hardware import SerialPortInfo, SerialPortScanner
@@ -135,6 +136,13 @@ def test_modbus_module_runtime_runs_without_simulator(tmp_path) -> None:
         zero_calibration_wait_s=0.0,
     )
     runtime.set_frame_logger(lambda direction, operation, data: frames.append((direction, operation, data)))
+    runtime.configure_operation_metadata(
+        ModbusOperationMetadata(
+            device_model="CFM-100",
+            tube_model="T-25",
+            transmitter_model="TX-9",
+        )
+    )
 
     status = runtime.connect(ModbusConnectionSettings(port="COM9", unit_id=7))
     sample_result = runtime.sample_variables()
@@ -181,6 +189,14 @@ def test_modbus_module_runtime_runs_without_simulator(tmp_path) -> None:
         for frame in frames
     )
     assert all(" " in frame[2] or frame[2] for frame in frames)
+    zero_history = runtime.list_calibration_history(operation="zero_calibration")
+    assert len(zero_history) == 1
+    assert zero_history[0].metrics["device_model"] == "CFM-100"
+    assert zero_history[0].metrics["tube_model"] == "T-25"
+    assert zero_history[0].metrics["transmitter_model"] == "TX-9"
+    zero_run = repository.get_run(zero_result.run_id)
+    assert zero_run is not None
+    assert zero_run.configuration_snapshot["device_model"] == "CFM-100"
 
 
 def test_modbus_module_runtime_captures_simple_repeatability_history(tmp_path) -> None:
@@ -191,6 +207,13 @@ def test_modbus_module_runtime_captures_simple_repeatability_history(tmp_path) -
         transport_factory=placeholder_transport_factory(transports),
         k_factor_post_start_sample_s=0.0,
         k_factor_post_stop_delay_s=0.0,
+    )
+    runtime.configure_operation_metadata(
+        ModbusOperationMetadata(
+            device_model="CFM-R",
+            tube_model="T-R",
+            transmitter_model="TX-R",
+        )
     )
     runtime.connect(ModbusConnectionSettings(port="COM9", unit_id=1))
     transport = transports[0]
@@ -251,6 +274,9 @@ def test_modbus_module_runtime_captures_simple_repeatability_history(tmp_path) -
     assert len(history) == 1
     assert history[0].metrics["max_abs_percent_error"] == 2.0
     assert history[0].metrics["flow_point_300_repeatability_stddev_percent"] == 2.0
+    assert history[0].metrics["device_model"] == "CFM-R"
+    assert history[0].metrics["tube_model"] == "T-R"
+    assert history[0].metrics["transmitter_model"] == "TX-R"
     assert len(history[0].metrics["trials"]) == 9
 
 
@@ -343,6 +369,13 @@ def test_modbus_module_runtime_pc_simulated_flow_keeps_device_reads(
         k_factor_post_start_sample_s=0.0,
         k_factor_post_stop_delay_s=0.0,
     )
+    runtime.configure_operation_metadata(
+        ModbusOperationMetadata(
+            device_model="CFM-K",
+            tube_model="T-K",
+            transmitter_model="TX-K",
+        )
+    )
     runtime.connect(ModbusConnectionSettings(port="COM9", unit_id=1))
     transport = transports[0]
     register_map = runtime.register_map
@@ -388,6 +421,9 @@ def test_modbus_module_runtime_pc_simulated_flow_keeps_device_reads(
     history = runtime.list_calibration_history(operation="k_factor_calibration")
     assert len(history) == 1
     assert history[0].metrics["flow_rate_source"] == "pc_simulated"
+    assert history[0].metrics["device_model"] == "CFM-K"
+    assert history[0].metrics["tube_model"] == "T-K"
+    assert history[0].metrics["transmitter_model"] == "TX-K"
 
 
 def test_modbus_module_manual_zero_start_write_sends_fc05_first(tmp_path) -> None:
@@ -639,6 +675,14 @@ def test_modbus_module_window_uses_own_connection_state(qtbot, tmp_path) -> None
     window = ModbusModuleWindow(repository, runtime=runtime, port_scanner=scanner)
     qtbot.addWidget(window)
     window.show()
+    window.deviceModelLineEdit.setText("CFM-200")
+    window.tubeModelLineEdit.setText("T-50")
+    window.transmitterModelLineEdit.setText("TX-11")
+    assert runtime.operation_metadata == ModbusOperationMetadata(
+        device_model="CFM-200",
+        tube_model="T-50",
+        transmitter_model="TX-11",
+    )
     dialog = _open_connection_dialog(qtbot, window)
     _wait_for_scanned_ports(qtbot, dialog, 2)
     dialog.portCombo.setCurrentIndex(dialog.portCombo.findData("COM9"))
@@ -765,7 +809,12 @@ def test_modbus_module_window_uses_own_connection_state(qtbot, tmp_path) -> None
         _table_text(window.calibrationHistoryDialog.historyTable, 0, 3)
         or _table_text(window.calibrationHistoryDialog.historyTable, 1, 3)
     )
-    assert "Run ID:" in window.calibrationHistoryDialog.detailTextEdit.toPlainText()
+    detail_text = window.calibrationHistoryDialog.detailTextEdit.toPlainText()
+    assert "Run ID:" in detail_text
+    assert "Device Metadata" in detail_text
+    assert "Device Model: CFM-200" in detail_text
+    assert "Tube Model: T-50" in detail_text
+    assert "Transmitter Model: TX-11" in detail_text
     window.calibrationHistoryDialog.operationCombo.setCurrentIndex(
         window.calibrationHistoryDialog.operationCombo.findData("zero_calibration")
     )

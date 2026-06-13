@@ -47,6 +47,7 @@ from coreflow.app.modbus_runtime import (
     ModbusKFactorSimpleCapture,
     ModbusKFactorSimpleResult,
     ModbusModuleRuntime,
+    ModbusOperationMetadata,
     PcFlowSimulationSettings,
     ModbusRepeatabilityFlowSummary,
     ModbusRepeatabilitySimpleCapture,
@@ -1968,6 +1969,22 @@ class ModbusModuleWindow(QDialog):
         status_row.addWidget(self.disconnectButton)
         root.addLayout(status_row)
 
+        metadata = QGroupBox("Device Metadata")
+        metadata.setObjectName("modbusDeviceMetadataGroup")
+        metadata_form = QFormLayout(metadata)
+        self.deviceModelLineEdit = QLineEdit()
+        self.deviceModelLineEdit.setObjectName("modbusDeviceModelLineEdit")
+        self.tubeModelLineEdit = QLineEdit()
+        self.tubeModelLineEdit.setObjectName("modbusTubeModelLineEdit")
+        self.transmitterModelLineEdit = QLineEdit()
+        self.transmitterModelLineEdit.setObjectName(
+            "modbusTransmitterModelLineEdit"
+        )
+        metadata_form.addRow("Device Model", self.deviceModelLineEdit)
+        metadata_form.addRow("Tube Model", self.tubeModelLineEdit)
+        metadata_form.addRow("Transmitter Model", self.transmitterModelLineEdit)
+        root.addWidget(metadata)
+
         mapping = QGroupBox("Variable Map")
         mapping_layout = QVBoxLayout(mapping)
         self.variableMapTable = VariableMapTableWidget(0, 12)
@@ -2110,6 +2127,11 @@ class ModbusModuleWindow(QDialog):
         self.saveVariableMapButton.clicked.connect(self._save_variable_map)
         self.pollingButton.clicked.connect(self._toggle_polling)
         self.disconnectButton.clicked.connect(self._disconnect)
+        self.deviceModelLineEdit.textChanged.connect(self._sync_operation_metadata)
+        self.tubeModelLineEdit.textChanged.connect(self._sync_operation_metadata)
+        self.transmitterModelLineEdit.textChanged.connect(
+            self._sync_operation_metadata
+        )
         self.sampleVariablesAction.triggered.connect(self._sample_variables)
         self.zeroCalibrationAction.triggered.connect(self._zero_calibration)
         self.kFactorAction.triggered.connect(self._k_factor)
@@ -2147,6 +2169,15 @@ class ModbusModuleWindow(QDialog):
             self._port_scanner.list_ports,
             self._connection_ports_finished,
             requires_connection=False,
+        )
+
+    def _sync_operation_metadata(self) -> None:
+        self.runtime.configure_operation_metadata(
+            ModbusOperationMetadata(
+                device_model=self.deviceModelLineEdit.text().strip(),
+                tube_model=self.tubeModelLineEdit.text().strip(),
+                transmitter_model=self.transmitterModelLineEdit.text().strip(),
+            )
         )
 
     def _load_saved_register_map(self) -> None:
@@ -2362,11 +2393,14 @@ class ModbusModuleWindow(QDialog):
             dialog.set_error("connect the Modbus module first")
             self._log("Zero calibration failed: connect the Modbus module first.")
             return
+        self._sync_operation_metadata()
+        metadata = self.runtime.operation_metadata
         dialog.set_running()
         self._run_task(
             "Zero calibration",
             lambda: self.runtime.run_zero_calibration(
                 snapshot_variable_names=snapshot_names,
+                operation_metadata=metadata,
             ),
             self._zero_calibration_finished,
             requires_connection=True,
@@ -2553,11 +2587,14 @@ class ModbusModuleWindow(QDialog):
         if capture is None:
             dialog.set_error("capture a flow segment first")
             return
+        self._sync_operation_metadata()
+        metadata = self.runtime.operation_metadata
         try:
             result = self.runtime.calculate_k_factor_simple_result(
                 capture,
                 standard_mass=dialog.standard_mass(),
                 save_history=dialog.save_history(),
+                operation_metadata=metadata,
             )
         except Exception as exc:
             dialog.set_error(str(exc))
@@ -2833,6 +2870,8 @@ class ModbusModuleWindow(QDialog):
             mode = "three_point"
         if dialog.is_single_point_mode() and not force_single_summary:
             return
+        self._sync_operation_metadata()
+        metadata = self.runtime.operation_metadata
         try:
             result = self.runtime.calculate_repeatability_simple_result(
                 trials,
@@ -2841,6 +2880,7 @@ class ModbusModuleWindow(QDialog):
                 expected_flow_point_count=expected_flow_point_count,
                 expected_trials_per_point=expected_trials_per_point,
                 require_complete=require_complete,
+                operation_metadata=metadata,
             )
         except Exception as exc:
             dialog.set_error(str(exc))
@@ -3584,6 +3624,9 @@ class ModbusModuleWindow(QDialog):
         self.saveVariableMapButton.setEnabled(enabled and not connected)
         self.pollingButton.setEnabled(enabled and connected)
         for widget in (
+            self.deviceModelLineEdit,
+            self.tubeModelLineEdit,
+            self.transmitterModelLineEdit,
             self.massAccBeforeSpinBox,
             self.massAccAfterSpinBox,
             self.standardMassSpinBox,
@@ -3905,6 +3948,10 @@ def _history_detail_text(entry: ModbusCalibrationHistoryEntry) -> str:
     if result_lines:
         lines.extend(("", "Result", *result_lines))
 
+    metadata_lines = _history_device_metadata_lines(entry.metrics)
+    if metadata_lines:
+        lines.extend(("", "Device Metadata", *metadata_lines))
+
     snapshot = entry.metrics.get("pre_snapshot")
     if isinstance(snapshot, dict) and snapshot:
         lines.extend(
@@ -3922,6 +3969,19 @@ def _history_detail_text(entry: ModbusCalibrationHistoryEntry) -> str:
     if extra_lines:
         lines.extend(("", "Other Metrics", *extra_lines))
     return "\n".join(lines)
+
+
+def _history_device_metadata_lines(metrics: dict[str, object]) -> list[str]:
+    rows: list[str] = []
+    for label, key in (
+        ("Device Model", "device_model"),
+        ("Tube Model", "tube_model"),
+        ("Transmitter Model", "transmitter_model"),
+    ):
+        value = _metric_value(metrics, key)
+        if value:
+            rows.append(f"{label}: {value}")
+    return rows
 
 
 def _history_result_lines(metrics: dict[str, object]) -> list[str]:
@@ -4005,6 +4065,9 @@ def _history_extra_metric_lines(metrics: dict[str, object]) -> list[str]:
         "flow_points",
         "trials",
         "pre_snapshot",
+        "device_model",
+        "tube_model",
+        "transmitter_model",
     }
     rows: list[str] = []
     for name, value in _flatten_metrics(metrics):

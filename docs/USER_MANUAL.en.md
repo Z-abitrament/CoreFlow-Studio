@@ -137,6 +137,8 @@ Open the Modbus Module from the main toolbar or `Modules` menu. The module has i
 
 The current module still uses the placeholder register-map template unless engineering supplies a validated map. Do not use the placeholder map as production transmitter documentation.
 
+For implementation-level operation sequences and history fields, see `docs/MODBUS_OPERATIONS.md`.
+
 ## Factory Test
 Factory Test runs a fixed simulator-backed outgoing-test path:
 

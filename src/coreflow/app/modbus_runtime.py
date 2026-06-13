@@ -174,6 +174,7 @@ class ModbusKFactorSimpleResult:
     write_verified: bool = False
     readback_k_factor: float | None = None
     audit_id: str | None = None
+    operation_metadata: ModbusOperationMetadata | None = None
 
     @property
     def duration_s(self) -> float:
@@ -289,6 +290,22 @@ class ModbusCalibrationHistoryEntry:
 
 
 @dataclass(frozen=True, slots=True)
+class ModbusOperationMetadata:
+    """Operator-supplied device context attached to Modbus operation history."""
+
+    device_model: str = ""
+    tube_model: str = ""
+    transmitter_model: str = ""
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "device_model": self.device_model,
+            "tube_model": self.tube_model,
+            "transmitter_model": self.transmitter_model,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ModbusCalibrationHistoryExportResult:
     """Summary of one Modbus calibration-history export file."""
 
@@ -355,6 +372,7 @@ class ModbusModuleRuntime:
         self._transport_factory = transport_factory
         self._frame_logger: FrameLogger | None = None
         self._operator = operator
+        self._operation_metadata = ModbusOperationMetadata()
         self._zero_calibration_wait_s = zero_calibration_wait_s
         self._k_factor_post_start_sample_s = k_factor_post_start_sample_s
         self._k_factor_post_stop_delay_s = k_factor_post_stop_delay_s
@@ -381,6 +399,16 @@ class ModbusModuleRuntime:
         if self._device is not None:
             raise RuntimeError("Disconnect before changing the Modbus variable map.")
         self._register_map = register_map
+
+    @property
+    def operation_metadata(self) -> ModbusOperationMetadata:
+        return self._operation_metadata
+
+    def configure_operation_metadata(
+        self,
+        metadata: ModbusOperationMetadata,
+    ) -> None:
+        self._operation_metadata = metadata
 
     def set_frame_logger(self, logger: FrameLogger | None) -> None:
         self._frame_logger = logger
@@ -558,7 +586,9 @@ class ModbusModuleRuntime:
         self,
         *,
         snapshot_variable_names: tuple[str, ...] = (),
+        operation_metadata: ModbusOperationMetadata | None = None,
     ) -> ModbusZeroCalibrationResult:
+        metadata = operation_metadata or self._operation_metadata
         run_id = self._next_run_id()
         parameter_names = _unique_names(
             (
@@ -582,6 +612,7 @@ class ModbusModuleRuntime:
                 software_version=__version__,
             ),
         )
+        self._attach_operation_metadata_to_run(result.run_id, metadata)
         return ModbusZeroCalibrationResult(
             run_id=run_id,
             record=result.record,
@@ -687,6 +718,7 @@ class ModbusModuleRuntime:
         *,
         standard_mass: float,
         save_history: bool = True,
+        operation_metadata: ModbusOperationMetadata | None = None,
     ) -> ModbusKFactorSimpleResult:
         if standard_mass <= 0:
             raise ValueError("K factor calibration requires positive standard mass.")
@@ -724,9 +756,14 @@ class ModbusModuleRuntime:
             poll_interval_s=capture.poll_interval_s,
             flow_rate_source=capture.segment.flow_rate_source,
             history_saved=save_history,
+            operation_metadata=operation_metadata or self._operation_metadata,
         )
         if save_history:
-            self._save_k_factor_simple_history(result, status=RunStatus.PASSED)
+            self._save_k_factor_simple_history(
+                result,
+                status=RunStatus.PASSED,
+                operation_metadata=operation_metadata,
+            )
         return result
 
     def apply_k_factor_simple_result(
@@ -811,11 +848,13 @@ class ModbusModuleRuntime:
             write_verified=verified,
             readback_k_factor=readback,
             audit_id=decision.audit_id,
+            operation_metadata=result.operation_metadata,
         )
         if updated.history_saved:
             self._save_k_factor_simple_history(
                 updated,
                 status=RunStatus.PASSED if verified else RunStatus.FAILED,
+                operation_metadata=updated.operation_metadata,
             )
         return updated
 
@@ -985,6 +1024,7 @@ class ModbusModuleRuntime:
         expected_flow_point_count: int = 3,
         expected_trials_per_point: int = 3,
         require_complete: bool = True,
+        operation_metadata: ModbusOperationMetadata | None = None,
     ) -> ModbusRepeatabilitySimpleResult:
         if not trials:
             raise ValueError("Repeatability test requires at least one trial.")
@@ -1044,7 +1084,11 @@ class ModbusModuleRuntime:
             expected_trials_per_point=expected_trials_per_point,
         )
         if save_history:
-            self._save_repeatability_simple_history(result, status=RunStatus.PASSED)
+            self._save_repeatability_simple_history(
+                result,
+                status=RunStatus.PASSED,
+                operation_metadata=operation_metadata,
+            )
         return result
 
     def run_k_factor_calibration(
@@ -1054,7 +1098,9 @@ class ModbusModuleRuntime:
         mass_acc_after: float,
         standard_mass: float,
         current_k_factor: float,
+        operation_metadata: ModbusOperationMetadata | None = None,
     ) -> str:
+        metadata = operation_metadata or self._operation_metadata
         run_id = self._next_run_id()
         KFactorCalibrationWorkflow(self._repository).run(
             _SelectedParameterDevice(
@@ -1072,12 +1118,16 @@ class ModbusModuleRuntime:
                 software_version=__version__,
             ),
         )
+        self._attach_operation_metadata_to_run(run_id, metadata)
         return run_id
 
     def run_repeatability_test(
         self,
         trials: tuple[RepeatabilityTrial, ...],
+        *,
+        operation_metadata: ModbusOperationMetadata | None = None,
     ) -> str:
+        metadata = operation_metadata or self._operation_metadata
         run_id = self._next_run_id()
         RepeatabilityTestWorkflow(self._repository).run(
             _SelectedParameterDevice(
@@ -1092,6 +1142,7 @@ class ModbusModuleRuntime:
                 software_version=__version__,
             ),
         )
+        self._attach_operation_metadata_to_run(run_id, metadata)
         return run_id
 
     def list_calibration_history(
@@ -1101,29 +1152,39 @@ class ModbusModuleRuntime:
     ) -> tuple[ModbusCalibrationHistoryEntry, ...]:
         operation_filter = None if operation in (None, "", "all") else operation
         entries: list[ModbusCalibrationHistoryEntry] = []
-        for run in self._repository.list_runs():
-            if run.workflow_name not in _CALIBRATION_HISTORY_WORKFLOWS:
+        for run_summary in self._repository.list_runs():
+            if run_summary.workflow_name not in _CALIBRATION_HISTORY_WORKFLOWS:
                 continue
-            status = getattr(run.status, "value", str(run.status))
+            status = getattr(run_summary.status, "value", str(run_summary.status))
             if status not in _CALIBRATION_HISTORY_STATUSES:
                 continue
-            if operation_filter is not None and run.workflow_name != operation_filter:
+            if (
+                operation_filter is not None
+                and run_summary.workflow_name != operation_filter
+            ):
                 continue
+            run = self._repository.get_run(run_summary.run_id)
             metrics: dict[str, Any] = {}
-            analysis_results = self._repository.list_analysis_results(run.run_id)
+            analysis_results = self._repository.list_analysis_results(run_summary.run_id)
             if analysis_results:
                 metrics = dict(analysis_results[-1].summary_metrics)
+            if run is not None:
+                metrics.update(
+                    _operation_metadata_from_configuration(
+                        run.configuration_snapshot
+                    )
+                )
             entries.append(
                 ModbusCalibrationHistoryEntry(
-                    run_id=run.run_id,
-                    operation=run.workflow_name,
-                    status=run.status,
-                    started_at=run.started_at,
-                    ended_at=run.ended_at,
-                    device_id=run.device_id,
-                    operator=run.operator,
+                    run_id=run_summary.run_id,
+                    operation=run_summary.workflow_name,
+                    status=run_summary.status,
+                    started_at=run_summary.started_at,
+                    ended_at=run_summary.ended_at,
+                    device_id=run_summary.device_id,
+                    operator=run_summary.operator,
                     metrics=metrics,
-                    notes=run.notes or "",
+                    notes=run_summary.notes or "",
                 )
             )
         return tuple(entries)
@@ -1343,9 +1404,12 @@ class ModbusModuleRuntime:
         result: ModbusKFactorSimpleResult,
         *,
         status: RunStatus,
+        operation_metadata: ModbusOperationMetadata | None = None,
     ) -> None:
         identity = self._require_identity()
+        metadata = self._operation_metadata_snapshot(operation_metadata)
         metrics = _k_factor_simple_metrics(result)
+        metrics.update(metadata)
         self._repository.save_run(
             RunSession(
                 run_id=result.run_id,
@@ -1358,6 +1422,7 @@ class ModbusModuleRuntime:
                 started_at=result.flow_started_at,
                 ended_at=result.flow_ended_at,
                 configuration_snapshot={
+                    **metadata,
                     "mode": "simple",
                     "flow_rate_parameter": result.flow_rate_parameter,
                     "flow_acc_parameter": result.flow_acc_parameter,
@@ -1377,6 +1442,7 @@ class ModbusModuleRuntime:
                 algorithm_name="simple_flow_segment_k_factor",
                 algorithm_version="0.2",
                 configuration_snapshot={
+                    **metadata,
                     "formula": "K1 = K0 / (m2 - m1) * standard_mass",
                     "mean_flow_formula": "(m2 - m1) / (t2 - t1)",
                 },
@@ -1391,9 +1457,12 @@ class ModbusModuleRuntime:
         result: ModbusRepeatabilitySimpleResult,
         *,
         status: RunStatus,
+        operation_metadata: ModbusOperationMetadata | None = None,
     ) -> None:
         identity = self._require_identity()
+        metadata = self._operation_metadata_snapshot(operation_metadata)
         metrics = _repeatability_simple_metrics(result)
+        metrics.update(metadata)
         started_at = result.started_at
         ended_at = result.ended_at
         self._repository.save_run(
@@ -1408,6 +1477,7 @@ class ModbusModuleRuntime:
                 started_at=started_at,
                 ended_at=ended_at,
                 configuration_snapshot={
+                    **metadata,
                     "mode": result.mode,
                     "flow_rate_parameter": result.flow_rate_parameter,
                     "flow_acc_parameter": result.flow_acc_parameter,
@@ -1432,6 +1502,7 @@ class ModbusModuleRuntime:
             started_at=started_at,
             ended_at=ended_at,
             input_configuration={
+                **metadata,
                 "mode": result.mode,
                 "flow_rate_parameter": result.flow_rate_parameter,
                 "flow_acc_parameter": result.flow_acc_parameter,
@@ -1460,6 +1531,7 @@ class ModbusModuleRuntime:
                 algorithm_name="modbus_simple_mass_total_repeatability",
                 algorithm_version="0.2",
                 configuration_snapshot={
+                    **metadata,
                     "formula": "e = (delta_m - standard_mass) / standard_mass * 100%",
                     "repeatability": "sample standard deviation of percent errors per flow point",
                     "mode": result.mode,
@@ -1495,6 +1567,37 @@ class ModbusModuleRuntime:
             if self._repository.get_run(candidate) is None:
                 return candidate
         raise RuntimeError(f"Unable to create imported run ID for {original_run_id}.")
+
+    def _operation_metadata_snapshot(
+        self,
+        metadata: ModbusOperationMetadata | None = None,
+    ) -> dict[str, str]:
+        return (metadata or self._operation_metadata).to_dict()
+
+    def _attach_operation_metadata_to_run(
+        self,
+        run_id: str,
+        metadata: ModbusOperationMetadata,
+    ) -> None:
+        metadata_snapshot = self._operation_metadata_snapshot(metadata)
+        run = self._repository.get_run(run_id)
+        if run is not None:
+            configuration = dict(run.configuration_snapshot)
+            configuration.update(metadata_snapshot)
+            self._repository.save_run(replace(run, configuration_snapshot=configuration))
+        results = self._repository.list_analysis_results(run_id)
+        for result in results:
+            configuration = dict(result.configuration_snapshot)
+            configuration.update(metadata_snapshot)
+            metrics = dict(result.summary_metrics)
+            metrics.update(metadata_snapshot)
+            self._repository.save_analysis_result(
+                replace(
+                    result,
+                    configuration_snapshot=configuration,
+                    summary_metrics=metrics,
+                )
+            )
 
 
 class _SelectedParameterDevice(FlowmeterDevice):
@@ -1927,6 +2030,20 @@ def _json_metric_value(value: object) -> object:
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
     return str(value)
+
+
+def _operation_metadata_from_configuration(
+    configuration: dict[str, object],
+) -> dict[str, str]:
+    return {
+        key: str(value)
+        for key in (
+            "device_model",
+            "tube_model",
+            "transmitter_model",
+        )
+        if (value := configuration.get(key)) not in (None, "")
+    }
 
 
 def _device_record_to_history_payload(record: DeviceRecord) -> dict[str, object]:
