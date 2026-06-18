@@ -59,7 +59,7 @@ fix(packaging): hide console for UI executable
 ```
 
 ## Versioning
-The current project software version is `0.3.0`. It is defined in exactly two
+The current project software version is `0.4.0`. It is defined in exactly two
 places and both must match:
 
 - `pyproject.toml` under `[project].version`.
@@ -103,6 +103,35 @@ Before an unattended run:
 - Make checkpoint commits after coherent passing slices.
 - Let the pre-commit version check run before each checkpoint commit and update the version when the commit changes shipped behavior or packaging.
 - Leave a final summary with completed work, tests, blockers, and commit hashes.
+
+## UI Bug-Fix Workflow
+When a bug report is about a missing control, invisible field, stale label, or
+history/detail display, treat the report as a full user-path problem rather
+than only a data-layer problem.
+
+- Reproduce or inspect the exact user path first: menu/action, dialog open,
+  control visibility, save action, result/history refresh, and packaged app if
+  that is what the operator is running.
+- Add or update a Qt test that follows the same user path. Prefer clicking the
+  public button or action that opens the dialog, then assert the label text,
+  input widget visibility, placeholder/help text when relevant, saved value,
+  and downstream history/detail display.
+- Do not count direct access to an internal widget as sufficient coverage for a
+  visibility bug. Internal-widget tests can supplement, but at least one test
+  must prove the operator can find the control from the UI.
+- For metadata that moves through several layers, verify the complete chain:
+  configuration capture, persisted configuration, runtime calculation record,
+  database/test-record entry, table column, detail panel, export/report if
+  applicable.
+- If the user is validating a Windows packaged build under `dist/`, compare the
+  `dist\CoreFlowStudio\CoreFlowStudio.exe` timestamp or build metadata with the
+  changed source files. Rebuild the package before asking the user to recheck
+  any UI change that only exists in source.
+- After rebuilding `dist/`, run the packaged UI startup smoke check. Use the
+  console diagnostics executable with `--ui` and captured stdout/stderr, and
+  confirm the app stays alive long enough to prove startup.
+- In the handoff, say which executable was tested and whether the result came
+  from source tests, the packaged build, or both.
 
 ## Permission Checklist
 Expected safe permissions for M0:

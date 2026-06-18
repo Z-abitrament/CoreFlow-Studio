@@ -114,25 +114,25 @@ Calibration Preview 会根据内置参考点采集模拟器样本并保存预览
 当前计算模块仍是占位实现，生产校准公式提供后才能替换为真实算法。
 
 ## 独立 Modbus Module
-可以从主工具栏或 `Modules` 菜单打开 Modbus Module。该模块拥有自己的连接状态、连接弹窗、变量映射、`Operations` 菜单、通信数据码显示区和日志，不需要先在主窗口添加模拟器或 replay 通道。
+可以从主工具栏或 `Modules` 菜单打开 Modbus Module。该模块拥有自己的连接状态、设备档案、连接弹窗、变量映射、`Operations` 菜单、通信数据码显示区和日志，不需要先在主窗口添加模拟器或 replay 通道。
 
-- 点击 `Connection...` 打开 Modbus 连接弹窗。端口列表会根据已接入的串口适配器自动发现。插入或拔出 USB 转串口适配器后，可点击 `Refresh Ports` 重新扫描。`Order` 用于选择 32 位数据的字节/字序，例如 `ABCD`、`BADC`、`CDAB` 或 `DCBA`。`Timeout` 和 `Retries` 可用于容忍从机响应较慢或偶发无响应的情况。
-- 连接前可在 `Variable Map` 表格中编辑每个变量的寄存器类型、地址、字数、数据类型、缩放、单位和是否可写。
+- 连接前先创建或选择 `Device Profile`。点击 `New Profile` 新建设备档案，点击 `Edit Profile` 修改当前选中的设备档案。`Device ID` 是被测设备的稳定资产 ID，独立于 Modbus RTU 的 Unit ID。不要把 `01` 这类简单从站地址当作设备 ID。Modbus Module 打开时会自动选择最近使用过且仍然存在的设备档案。
+- 设备档案会保存设备元数据、连接参数和寄存器映射。选择已有档案后，这些字段会自动加载到 Modbus 窗口。
+- 连接前在设备档案弹窗里编辑完整寄存器映射，包括变量名、寄存器类型、地址、字数、数据类型、缩放、单位和是否可写。`Delete` 只删除当前选中的可复用设备档案配置，不会删除已经保存的设备记录和测试记录。
+- 选择设备档案后，点击 `Connection...` 打开 Modbus 连接弹窗。端口列表会根据已接入的串口适配器自动发现。插入或拔出 USB 转串口适配器后，可点击 `Refresh Ports` 重新扫描。`Order` 用于选择 32 位数据的字节/字序，例如 `ABCD`、`BADC`、`CDAB` 或 `DCBA`。`Timeout` 和 `Retries` 可用于容忍从机响应较慢或偶发无响应的情况。
 - 默认映射包含 `mass_rate`、`mass_acc`、`temperature`、`delta_t`、`zero_offset`、`k_factor`、`low_threshold` 和 `zero_calibration_start`。
-- `Variable Map` 在变量或列较多时会显示滚动条；拖动列头可以调整列顺序。
-- 连接前可用 `Add Variable` 添加自定义变量行，并定义变量名、地址、类型和是否可写。断开连接时可用 `Delete Variable` 删除当前选中的变量行。
-- 连接前可用 `Save Map` 保存当前变量映射。Modbus Module 下次打开时会自动加载保存的映射，因此地址、类型、缩放、单位、是否可写和行顺序不需要重新填写。
-- 可编辑映射包含采样变量以及零点校准启动 coil。如需切换映射，请先断开连接再修改。
-- `Connect` 只会在连接弹窗中打开所选的 Modbus RTU 串口。连接完成后可以手动关闭弹窗，模块窗口会保持已连接状态。
+- 主窗口显示精简的 `Live Variables` 表格，用于运行时读取、写入和轮询；寄存器类型、地址、字数、数据类型、缩放、单位和是否可写等配置列会隐藏，因为这些内容属于设备档案。
+- 在设备档案弹窗里使用 `Add`、`Delete` 和 `Reset` 维护自定义变量行。保存档案后，地址、类型、缩放、单位、是否可写和行顺序会跟随该设备 ID 保存。
+- 可编辑档案映射包含采样变量以及零点校准启动 coil。如需切换映射，请先断开连接再修改。
+- `Connect` 只会在连接弹窗中打开所选的 Modbus RTU 串口。保存数据时使用当前设备档案的 `Device ID`，连接弹窗中的 Unit ID 只作为 Modbus 协议地址保存。连接完成后可以手动关闭弹窗，模块窗口会保持已连接状态。
 - 连接后可使用每行的 `Read` 主动查询一个变量，并刷新 `Value` 显示列。可写变量可填写 `Write Value` 后点击 `Write`；不可写变量会禁用写入控件。写入仍会经过 write guard 和审计日志。
 - 勾选变量行的 `Poll` 后点击 `Start Polling`，会每秒轮询一次选中的变量。每轮轮询会按变量逐个读；同一 Modbus 表内相邻地址会尽量合并成一次读请求。
-- 使用 `Operations` 菜单执行 `Sample Variables`、`Zero Cal`、`K Factor`、`Repeatability` 和 `Calibration History`。当前版本隐藏旧的 `K Factor Inputs` 区域；`K Factor` 会打开独立弹窗。
+- 使用 `Operations` 菜单执行 `Zero Cal`、`K Factor`、`Repeatability`、`Current Device Test Records` 和 `All Test Records`。当前版本隐藏旧的 `K Factor Inputs` 区域；`K Factor` 会打开独立弹窗。旧的 `Sample Variables` 菜单操作已移除；如需读取变量，请使用每行的 `Read` 或勾选变量后启动轮询。
 - 通信数据码表会实时显示读写操作的 TX/RX Modbus 数据码。
-- `Sample Variables` 会逐个读取配置变量，把成功读取的累积质量、Delta T、零点偏移、K factor 和低阈值等值连同时间戳写入数据库，刷新 `Value` 列，并对无响应变量记录 warning。
-- `Zero Cal` 会打开独立弹窗，点击 `Start` 后先读取 `zero_offset` 和 `delta_t`，再通过 write guard 将 `zero_calibration_start` 置 1，等待 3 秒后读取 coil 完成状态，并显示校准前后的 `zero_offset` 和 `delta_t`，供操作员自行判断结果。Variable Map 的 `Value` 列会刷新校准后的值，包括最终的 `zero_calibration_start` coil 状态。
-- `K Factor` 会打开独立弹窗，当前启用 Simple 模式，Advanced 模式先保留选项。Simple 模式会像 Zero Cal 一样先采集用户选择的预快照变量，读取配置的流量累积量和当前 K factor，然后通过配置的瞬时流量变量检测一次从非零流量到回零的流量段；流量段结束后等待用户输入标准称重量，计算 `K1`，并可按用户选择写入从机，写入后会再次回读确认。点击 `Save Configuration` 可保存变量对应、轮询间隔和预快照勾选，下次打开 K Factor 时自动恢复；是否写入从机不会被保存。校准历史会记录此次操作是否请求写入、是否写入成功以及是否回读验证通过。
-- `Repeatability` 会打开独立弹窗，包含 Three Flow Ranges、Single Flow Range 和保留的 Advanced 模式。Three Flow Ranges 一次完整测试包含 9 个流程：3 个用户配置的目标流量范围，每个范围 3 次。每次点击 `Capture Trial` 后，会读取配置的累计流量变量，检测一次从非零流量到回零的流量段，记录有流量后第三秒的瞬时流量 `v1` 和本次平均流量 `v_mean`，再读取结束累计量；随后用户输入标准称重量并点击 `Save Trial`。每次 `Save Trial` 后会立刻计算本次误差 `e = (delta_m - standard_mass) / standard_mass * 100%`；某个目标流量范围的第 3 次保存后，会立刻计算该范围 3 次误差的标准差作为重复性量化值；9 次完成后按设置写入校准历史。Single Flow Range 只使用一个目标流量范围，允许操作员随时追加下一次流程，每次保存后刷新当前误差和重复性摘要，并通过 `Save Summary` 将当前已经完成的流程集合写入校准历史。点击 `Save Configuration` 可保存变量对应、轮询间隔、模式、目标流量范围和预快照勾选，下次打开自动恢复。
-- `Calibration History` 会打开独立历史窗口，可与校准弹窗同时存在。它支持显示全部校准操作或单独筛选某一类操作，表格包含具体时间，并在参数栏汇总 K factor 写入状态或重复性摘要等关键信息，同时允许操作员编辑备注。点击 `Export...` 后可先选择操作类型以及可选的开始/结束时间段，再导出方便其他电脑导入的 JSON 历史包；点击 `Import...` 可导入该历史包。重复运行记录会跳过；如果不同电脑产生了相同 run ID 但内容不同，导入时会自动使用新的 imported run ID 保留下来。Excel 导出入口先保留到后续版本。
+- `Zero Cal` 会打开独立弹窗，点击 `Start` 后先读取 `zero_offset` 和 `delta_t`，再通过 write guard 将 `zero_calibration_start` 置 1，等待 3 秒后读取 coil 完成状态，并显示校准前后的 `zero_offset` 和 `delta_t`，供操作员自行判断结果。Live Variables 的 `Value` 列会刷新校准后的值，包括最终的 `zero_calibration_start` coil 状态。
+- `K Factor` 会打开独立弹窗，当前启用 Simple 模式，Advanced 模式先保留选项。Simple 模式会像 Zero Cal 一样先采集用户选择的预快照变量，读取配置的流量累积量和当前 K factor，然后通过配置的瞬时流量变量检测一次从非零流量到回零的流量段；流量段结束后等待用户输入标准称重量，计算 `K1`，并可按用户选择写入从机，写入后会再次回读确认。点击 `Save Configuration` 可保存变量对应、轮询间隔和预快照勾选，下次打开 K Factor 时自动恢复；是否写入从机不会被保存。测试记录会保存捕获、计算、可选写入状态以及原始 Modbus 轮询曲线 artifact 引用。
+- `Repeatability` 会打开独立弹窗，包含 Three Flow Ranges、Single Flow Range 和保留的 Advanced 模式。主操作弹窗只保留每个 trial 需要改的标准称重量输入；开始第一个 trial 前，点击 `Configuration...` 设置变量对应、轮询间隔、模式、目标流量范围、K Factor 变量、是否保存测试记录、操作备注和预快照勾选，并可点击 `Save Config` 按当前设备档案保存。不同 Device ID 的重复性配置互不共享，也没有全局重复性配置兜底。保存后的操作备注会显示在 Repeatability 操作弹窗中，该操作下每个完成计算的 trial 都会保存同一段备注。每个 trial 开始时会自动读取用户勾选的预快照变量和配置的 K Factor 变量，点击 `Capture Trial` 后会在 Repeatability 操作弹窗中弹出独立进度提示，显示正在获取数据；捕获完成后提示完成，2 秒后自动关闭，也可手动关闭。流量段从非零到回零完成后，输入 `Standard Mass` 并点击 `Calculate Trial Error`，程序才会保存该 trial、计算误差 `e = (delta_m - standard_mass) / standard_mass * 100%`，并记录自动读取的原始 K、`v1`、`v_mean`、流量开始/瞬时采样/结束时间戳，以及原始 Modbus 轮询 artifact。测试记录表中的 trial 时间就是本次 trial 误差计算并保存完成的时间；流量开始/瞬时采样/结束时间仍在详情指标中保留。未完成 9 次时关闭窗口，已经完成的 trial 仍保留在测试记录中；下次打开会进入新的操作，不恢复上次未完成的弹窗状态。`Calculate Repeatability` 用于选择一个流量点和该流量点下连续 3 次 trial 来计算重复性；该重复性记录在测试记录中的时间就是重复性结果计算并保存完成的时间。三个流量点都选好后，`Calculate Final K` 用选中的 9 次 trial、重复性结果和这些 trial 自动读取的原始 K 计算并保存最终 K 预览，重复点击只覆盖上一次最终 K 预览。基础 9 次完成后可用 `Add Trial` 继续追加 trial。
+- `Current Device Test Records` 会打开锁定当前设备档案的测试记录窗口；`All Test Records` 会从 `Operations` 菜单打开所有使用本程序测试过的设备的全局记录窗口。两个窗口都可与校准弹窗同时存在，支持按操作类型筛选，表格包含具体时间，并在参数栏汇总 K factor 写入状态或重复性摘要等关键信息，同时允许在记录关联 run 时编辑备注。点击 `Export...` 后可先选择操作类型以及可选的开始/结束时间段，再导出方便其他电脑导入的 JSON 测试记录包；点击 `Import...` 可导入兼容包。重复运行记录会跳过；如果不同电脑产生了相同 run ID 但内容不同，导入时会自动使用新的 imported run ID 保留下来。Excel 导出入口先保留到后续版本。
 
 当前模块在没有工程提供验证寄存器表时仍使用占位寄存器表模板。不要把占位寄存器表当作生产发射机文档使用。
 

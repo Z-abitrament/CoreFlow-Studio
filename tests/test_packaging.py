@@ -36,6 +36,26 @@ def test_default_user_data_root_falls_back_when_local_app_data_unwritable(
     assert default_user_data_root() == home / ".coreflow-studio"
 
 
+def test_default_user_data_root_falls_back_when_existing_dir_is_not_writable(
+    monkeypatch, tmp_path
+) -> None:
+    local = tmp_path / "local"
+    app = tmp_path / "app"
+    home = tmp_path / "home"
+    home.mkdir()
+
+    def fake_can_create_directory(path: Path) -> bool:
+        return path == app / "CoreFlow Studio"
+
+    monkeypatch.delenv("COREFLOW_DATA_ROOT", raising=False)
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    monkeypatch.setenv("APPDATA", str(app))
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setattr("coreflow.app.paths._can_create_directory", fake_can_create_directory)
+
+    assert default_user_data_root() == app / "CoreFlow Studio"
+
+
 def test_default_user_data_root_uses_working_directory_when_user_dirs_fail(
     monkeypatch, tmp_path
 ) -> None:

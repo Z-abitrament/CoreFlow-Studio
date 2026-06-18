@@ -43,4 +43,15 @@ def _can_create_directory(path: Path) -> bool:
         path.mkdir(parents=True, exist_ok=True)
     except OSError:
         return False
+    probe = path / f".coreflow-write-test-{os.getpid()}"
+    try:
+        with probe.open("w", encoding="utf-8") as handle:
+            handle.write("ok")
+        probe.unlink(missing_ok=True)
+    except OSError:
+        try:
+            probe.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
     return True

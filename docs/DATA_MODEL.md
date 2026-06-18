@@ -151,6 +151,127 @@ Fields:
 - K factor calibration pre-operation snapshot values, flow-rate segment timestamps, instantaneous flow sample, accumulated-mass before/after, measured mass delta, standard mass, current K factor, corrected K factor, mean flow, write request/apply/verify status, and readback value when available.
 - Manual repeatability test mode, configured target-flow ranges, per-trial flow-segment timestamps, third-second instantaneous flow `v1`, mean flow `v_mean`, accumulated-mass before/after values, standard masses, percent errors, per-range repeatability standard deviations, and whether the saved summary came from fixed three-flow-range mode or the appendable single-flow-range mode.
 
+### Modbus Device Profile
+Stores operator-maintained Modbus device context for the standalone Modbus
+module.
+
+Fields:
+
+- Profile ID.
+- Stable Device ID entered by the operator. It is independent from the Modbus
+  RTU unit ID and must not be a simple numeric bus address.
+- Display name.
+- Device model.
+- Tube model.
+- Transmitter model.
+- Connection settings snapshot, including serial port and Modbus unit ID.
+- Register-map configuration snapshot.
+- Notes.
+- Created and updated timestamps.
+
+### Modbus Test Session
+Groups flexible Modbus operation attempts for one device ID.
+
+History JSON export includes Modbus test sessions referenced by exported
+operation attempts and trial records. Import clears source profile references so
+session rows do not depend on a profile that may not exist in the target
+database; when importing for the current device, the session Device ID and
+metadata are retargeted to that current Device ID.
+
+Fields:
+
+- Session ID.
+- Device ID.
+- Profile ID when available.
+- Operator.
+- Status.
+- Start and end time.
+- Device metadata snapshot.
+- Register-map snapshot.
+- Notes.
+
+### Modbus Operation Attempt
+Stores every Modbus operation attempt that should be reviewable later.
+
+Fields:
+
+- Attempt ID.
+- Session ID.
+- Run ID when the attempt belongs to a stored run.
+- Device ID.
+- Operation type, such as `zero_calibration`,
+  `k_factor_calibration_capture`, `k_factor_calibration`,
+  `manual_error_repeatability_trial`, or `manual_error_repeatability`.
+- Status.
+- Start and end time.
+- Operator.
+- Device metadata snapshot.
+- Register-map snapshot.
+- Raw artifact ID when available.
+- Summary metrics.
+- Notes.
+
+### Modbus Trial Record
+Stores each manual error/repeatability trial independently from the final
+summary so rejected, diagnostic, and repeated trials can still be analyzed.
+
+Fields:
+
+- Trial ID.
+- Session ID.
+- Attempt ID.
+- Run ID when available.
+- Device ID.
+- Flow point.
+- Trial index.
+- Trial status: accepted, rejected, diagnostic, or future operator states.
+- Flow-rate variable name and flow-accumulator variable name used for the
+  trial.
+- K factor variable name used for the trial when available.
+- Original K factor value automatically read before the flow segment when
+  available.
+- Accumulated mass before and after.
+- Measured mass delta.
+- Standard mass.
+- Percent error.
+- Mean flow.
+- Instant flow.
+- Flow segment timestamps.
+- Raw Modbus polling artifact ID.
+- Device metadata snapshot.
+- Notes.
+
+The manual error/repeatability workflow keeps every trial, including extra,
+rejected, and diagnostic trials. A standard final-K preview is derived only from
+operator-selected accepted data: three flow points, one consecutive three-trial
+window per flow point, and 9 selected trials total. Stored final-K metrics should
+include:
+
+- selected flow-point count and selected trial count.
+- selected trial indexes and selected trial percent errors per flow point.
+- per-flow-point measurement error, calculated as the arithmetic mean of the
+  three selected trial percent errors.
+- per-flow-point repeatability standard deviation, calculated as sample
+  standard deviation of the same three selected trial percent errors.
+- final `average_error`, calculated as `(max(measurement_errors) +
+  min(measurement_errors)) / 2`.
+- per-flow-point adjusted error, calculated as `measurement_error -
+  average_error`.
+- per-flow-point intermediate K, calculated as `original_k / (1 +
+  adjusted_error_percent / 100)`.
+- final `new_k_factor`, calculated as `(max(intermediate_k_values) +
+  min(intermediate_k_values)) / 2`.
+- the original K factor value and K factor variable name used by the selected
+  trials.
+- optional device-analysis provenance fields when the final-K result is
+  generated from `Current Device Analysis`, including
+  `analysis_source=current_device_analysis`, source repeatability run IDs,
+  saved comparison variable names, and a report artifact ID for the text
+  report.
+- optional write outcome fields when the operator applies the final K to the
+  connected device: `write_requested`, `write_status`, `write_verified`,
+  `readback_k_factor`, and `audit_id`.
+
 ### Artifact
 Represents a file linked to a run, step, or result.
 
@@ -237,6 +358,11 @@ The run ID must be unique even if multiple runs start in the same second.
 - Calibration and write-capable runs must reference the register map, thresholds, and workflow template used for validation.
 - Variable samples linked to a run must reference an existing device, run, and workflow step.
 - Audit log entries must not be deleted by normal run cleanup or report export actions.
+- Modbus operation attempts and trial records must keep both the device ID
+  reference and the device metadata snapshot present at the time of the
+  operation.
+- Modbus raw polling artifacts must be linked from the operation attempt or
+  trial record that produced them.
 
 ## Backup And Portability
 v1 is local-first. A complete run package should be portable by copying:
@@ -248,15 +374,17 @@ v1 is local-first. A complete run package should be portable by copying:
 
 Full backup and restore tools are future work.
 
-Standalone Modbus calibration history can also be moved between PCs with a
-module-specific JSON package. That package stores completed Modbus calibration
-run metadata, workflow steps, analysis metrics, notes, and device metadata for
-zero calibration, K factor calibration, and repeatability records. Import skips
-identical run IDs and preserves conflicting imported runs under a new imported
-run ID so independent test PCs do not overwrite each other's local history. The
-package metadata records the selected operation filter and optional started-at
-time range used for export. Excel export is reserved for a later
-reporting/export pass; JSON remains the portable interchange format for now.
+Standalone Modbus test records can also be moved between PCs with a
+module-specific JSON package. That package stores completed Modbus run
+metadata, workflow steps, analysis metrics, notes, device metadata, artifact
+metadata, operation attempts, and repeatability trial records for zero
+calibration, K factor calibration, and repeatability records. Import remains
+compatible with the earlier run/analysis package shape: it skips identical run
+IDs and preserves conflicting imported runs under a new imported run ID so
+independent test PCs do not overwrite each other's local history. The package
+metadata records the selected operation filter and optional started-at time
+range used for export. Excel export is reserved for a later reporting/export
+pass; JSON remains the portable interchange format for now.
 
 ## Known Unknowns
 - Final report file format.

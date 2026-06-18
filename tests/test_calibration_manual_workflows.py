@@ -81,6 +81,28 @@ def test_analyze_repeatability_calculates_point_stddevs() -> None:
     assert result.flow_points[0].repeatability_stddev_percent == pytest.approx(1.0)
 
 
+def test_analyze_repeatability_accepts_extra_trials_per_flow_point() -> None:
+    result = analyze_repeatability(
+        (
+            RepeatabilityTrial(1.0, 1, 0.0, 10.0, 10.0),
+            RepeatabilityTrial(1.0, 2, 0.0, 10.1, 10.0),
+            RepeatabilityTrial(1.0, 3, 0.0, 9.9, 10.0),
+            RepeatabilityTrial(2.0, 1, 0.0, 20.0, 20.0),
+            RepeatabilityTrial(2.0, 2, 0.0, 20.2, 20.0),
+            RepeatabilityTrial(2.0, 3, 0.0, 19.8, 20.0),
+            RepeatabilityTrial(2.0, 4, 0.0, 20.4, 20.0),
+            RepeatabilityTrial(3.0, 1, 0.0, 30.0, 30.0),
+            RepeatabilityTrial(3.0, 2, 0.0, 30.3, 30.0),
+            RepeatabilityTrial(3.0, 3, 0.0, 29.7, 30.0),
+        )
+    )
+
+    assert result.summary_metrics["flow_point_count"] == 3.0
+    assert result.summary_metrics["trial_count"] == 10.0
+    point_2 = next(point for point in result.flow_points if point.flow_point == 2.0)
+    assert len(point_2.trials) == 4
+
+
 def test_k_factor_workflow_writes_through_guard_and_stores_result(tmp_path) -> None:
     repository = _repository(tmp_path)
     device = SimulatedFlowmeterDevice(

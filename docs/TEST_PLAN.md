@@ -8,6 +8,9 @@ Testing must prove that CoreFlow Studio can automate Coriolis flowmeter workflow
 - Integration test workflows against simulated transmitters.
 - Protocol test Modbus RTU through fake, loopback, or simulator-backed transports.
 - UI smoke test the main Qt workflows.
+- UI bug-fix tests must follow the operator path that exposed the bug, including
+  opening the relevant dialog/window and asserting that the expected label,
+  input, table column, and detail text are visible to the user.
 - Data integrity test SQLite records and referenced artifacts together.
 - Hardware acceptance tests are defined but deferred until real transmitters and register maps are available.
 
@@ -131,10 +134,24 @@ Scenarios:
 - Confirm K factor apply writes only through the write guard, rereads the configured K factor parameter for verification, and stores run, analysis, and audit records with write-request/apply/verify status.
 - Confirm K factor operation no longer exposes PC-side flow simulation controls or runtime parameters; captured flow segments must come from configured device reads.
 - Run error/repeatability testing from selected pre-test variables, configured flow-rate and accumulated-mass variables, and either three operator-configured target-flow ranges with three non-zero-to-zero flow-segment trials per range or a single target-flow range with operator-appended trials.
-- Confirm the Repeatability dialog can persist and reload selected variables, polling interval, mode, target-flow range settings, and pre-test snapshot selections.
-- Confirm each repeatability trial displays captured process data before the operator saves the standard-scale mass, and that each saved trial immediately displays its percent error.
-- Confirm Three Flow Ranges mode calculates a flow-range repeatability standard deviation immediately after that range's third saved trial and writes history only after the completed nine-trial test is saved.
-- Confirm Single Flow Range mode keeps a pending next-trial row available after each saved trial, updates the current repeatability summary after every saved trial, and writes the current trial set only when `Save Summary` is clicked.
+- Confirm the Repeatability dialog can persist and reload selected variables, polling interval, mode, target-flow range settings, and pre-test snapshot selections per Device ID, with no global repeatability configuration fallback.
+- Confirm the Repeatability configuration dialog exposes an operator-visible
+  operation-note input when opened through the `Configuration...` button, can
+  persist and reload operation notes per Device ID, the main operation dialog
+  displays the saved notes, and each calculated trial record stores the same
+  notes.
+- Confirm each repeatability trial reads the selected pre-trial variables automatically, tells the operator when the trial can start, leaves a pending capture after `Capture Trial`, then calculates and stores the trial only after the operator enters `Standard Mass` and clicks `Calculate Trial Error`.
+- Confirm each repeatability trial Test Records timestamp is the `Calculate Trial Error` calculation/save time, not the captured flow-segment start or end time.
+- Confirm each repeatability trial record includes flow start, instant-sample, and end timestamps plus the raw Modbus polling artifact reference.
+- Confirm Three Flow Ranges mode does not write a final summary merely because 9 trials exist; `Calculate Repeatability` must use an operator-selected consecutive three-trial window for one flow point.
+- Confirm Three Flow Ranges `Calculate Repeatability` saves the selected-window error/repeatability calculation as a test record with the operation notes and a timestamp matching the repeatability calculation/save time, and Single Flow Range refreshes and saves the current error/repeatability summary after every `Calculate Trial Error` with the same notes and timestamp semantics.
+- Confirm additional repeatability trials can be appended as soon as any flow point has 3 calculated trials; `Add Trial` opens a flow-point selector that defaults to the most recently completed eligible flow point, preserves earlier trial records, and allows extra trials to be selected as part of a later consecutive three-trial repeatability window.
+- Confirm the selected flow-point `mean` shown in `Selected Trials And K Preview` is the arithmetic mean of that flow point's three selected trial percent errors, and is distinct from the final-K `average_error`.
+- Confirm `Calculate Final K` requires three selected flow points and 9 selected trials, calculates per-flow-point measurement errors, calculates `average_error = (max(measurement_errors) + min(measurement_errors)) / 2`, calculates adjusted errors, intermediate K values, final `new_k = (max(intermediate_k_values) + min(intermediate_k_values)) / 2`, and `delta_k = new_k - original_k`, writes the final-K preview with sufficient K-value precision for manual device entry, preserves operation notes, shows those notes in Test Records table/detail views, and overwrites the previous final-K preview for the same operation when repeated.
+- Confirm `Write New K...` is available only after a final-K preview exists, shows an operator confirmation with Device ID, K factor variable, original K, new K, and delta, writes only through the write guard when confirmed, reads back the K factor variable, records `write_status`, `write_verified`, `readback_k_factor`, and `audit_id`, and leaves the preview unchanged when canceled.
+- Confirm `Current Device Analysis` opens as a single-purpose 9-trial calculation dialog for the selected Device ID, does not show a device-history text summary or per-flow summary table, and does not write to the device.
+- Confirm the device-analysis trial picker shows each accepted trial as a selectable row with Attempt ID, Run ID, old K, error, raw artifact, and comparison values; starts with no trial rows selected; orders rows by trial start time with the most recent trial first; lets the operator reorder columns by dragging table headers; lets the operator choose exactly 9 rows covering exactly three flow points with three consecutive trial indexes per point; saves checkbox-selected comparison-variable display preferences from a popup that closes after `Save`; rejects the 9-trial selection when original K, `zero_offset`, or `low_threshold` do not match; `Select And Calculate...` calculates and previews per-flow `adjusted_error`, per-flow repeatability, and old/new K without saving; and `Save` records the generated text report as `manual_error_repeatability_final_k` with `analysis_source=current_device_analysis`, uses the report save time as the Test Records timestamp while retaining selected-trial time range metrics, refreshes any open Test Records windows, and can be found with operation filter `Repeatability Final K` and status filter `Calculated`.
+- Confirm Single Flow Range mode keeps a pending next-trial row available after each calculated trial and updates the current repeatability summary after every `Calculate Trial Error` save.
 - Confirm repeatability operation no longer exposes PC-side flow simulation controls or runtime parameters; trial flow segments must come from configured device reads.
 - Confirm repeatability trial tables and history details store trial errors, `v1`, `v_mean`, per-range repeatability standard deviations, and summary metrics for review/export.
 
@@ -196,7 +213,14 @@ Scenarios:
 - Confirm missing artifacts are reported clearly.
 - Confirm audit log records parameter-write attempts.
 - Store timestamped variable samples with device identity, variable name, value, unit, source channel, and optional run/step references.
-- Export standalone Modbus calibration history to a portable JSON package with optional operation and started-at time-range filters, import it into another local repository, preserve notes and metrics, skip duplicate runs, and rename conflicting imported run IDs without overwriting local records.
+- Store standalone Modbus device profiles, test sessions, operation attempts,
+  repeatability trial records, and raw Modbus polling artifact references with
+  device metadata snapshots.
+- Export standalone Modbus test records to a portable JSON package with
+  optional operation and started-at time-range filters, include operation
+  attempts, trial records, and artifact metadata, import it into another local
+  repository, preserve notes and metrics, skip duplicate runs, and rename
+  conflicting imported run IDs without overwriting local records.
 
 ### Safety And Write-Guard Tests
 ID: TP-SAFE-001
@@ -225,6 +249,13 @@ Scenarios:
 - Start and cancel a workflow without freezing the UI.
 - Open the standalone Modbus Module from the toolbar or menu.
 - Confirm the Modbus Module has its own connection state and does not create or connect simulator/replay channels in the main window.
+- For every bug fix that adds, moves, or relabels a control in a dialog, open
+  that dialog through the same button/action used by the operator and assert the
+  label and input widget are visible. Do not rely only on direct internal-widget
+  access.
+- For every bug fix that changes data shown in history, reports, or detail
+  panels, assert both the persisted record and the user-visible table/detail
+  text.
 
 ID: TP-UI-002
 
@@ -265,7 +296,10 @@ Scenarios:
 - Generate a factory test report from simulator data.
 - Export measurement and metric CSV files.
 - Confirm reports include device identity, run configuration, timestamps, results, and artifact references.
-- Confirm the standalone Modbus calibration-history window exposes JSON import/export, lets the operator choose an export operation and started-at time range, and reserves Excel export for a later report/export implementation.
+- Confirm the standalone Modbus Test Records window exposes JSON import/export,
+  lets the operator choose an export operation and started-at time range, shows
+  trial-level operation attempts in addition to summaries, and reserves Excel
+  export for a later report/export implementation.
 
 ### Extension Tests
 ID: TP-EXT-001
@@ -313,6 +347,9 @@ Goal: Verify the Windows distributable can be built and can run simulator workfl
 Scenarios:
 
 - Build the PyInstaller distributable folder from a clean checkout or clean working tree.
+- After a user-visible UI fix, confirm the packaged executable timestamp/build
+  metadata is newer than the changed source files before asking operators to
+  verify the fix from `dist\`.
 - Confirm the packaging script uses the configured conda environment rather than a hard-coded local `.venv`.
 - Confirm the main packaged executable opens the UI without a console window.
 - Confirm the console diagnostics executable prints version and build metadata.

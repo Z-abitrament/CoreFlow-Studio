@@ -9,6 +9,10 @@ from coreflow.storage import (
     AuditLogRecord,
     Database,
     DeviceRecord,
+    ModbusDeviceProfileRecord,
+    ModbusOperationAttemptRecord,
+    ModbusTestSessionRecord,
+    ModbusTrialRecord,
     StorageRepository,
     VariableSampleRecord,
     check_artifact_integrity,
@@ -205,3 +209,126 @@ def test_integrity_check_reports_missing_artifacts(tmp_path) -> None:
     assert len(issues) == 1
     assert issues[0].artifact_id == "ART-MISSING"
     assert "Missing artifact file" in issues[0].message
+
+
+def test_repository_persists_modbus_test_records(tmp_path) -> None:
+    database = Database(tmp_path / "coreflow.sqlite")
+    database.initialize()
+    repository = StorageRepository(database)
+    captured_at = datetime(2026, 6, 12, 8, 0, tzinfo=UTC)
+
+    repository.save_modbus_device_profile(
+        ModbusDeviceProfileRecord(
+            profile_id="profile:DEV-1",
+            device_id="DEV-1",
+            device_model="CFM-100",
+            tube_model="T-25",
+            transmitter_model="TX-9",
+            connection_settings={"port": "COM9", "unit_id": 1},
+            register_map={"name": "map-a"},
+        )
+    )
+    repository.save_modbus_test_session(
+        ModbusTestSessionRecord(
+            session_id="SESSION-1",
+            device_id="DEV-1",
+            profile_id="profile:DEV-1",
+            operator="pytest",
+            status="running",
+            started_at=captured_at,
+            device_metadata={
+                "device_model": "CFM-100",
+                "tube_model": "T-25",
+                "transmitter_model": "TX-9",
+            },
+        )
+    )
+    repository.save_modbus_operation_attempt(
+        ModbusOperationAttemptRecord(
+            attempt_id="ATTEMPT-1",
+            session_id="SESSION-1",
+            device_id="DEV-1",
+            operation_type="manual_error_repeatability_trial",
+            status="accepted",
+            started_at=captured_at,
+            ended_at=captured_at,
+            operator="pytest",
+            device_metadata={
+                "device_model": "CFM-100",
+                "tube_model": "T-25",
+                "transmitter_model": "TX-9",
+            },
+            summary={"percent_error": 0.12},
+        )
+    )
+    repository.save_modbus_trial_record(
+        ModbusTrialRecord(
+            trial_id="TRIAL-1",
+            session_id="SESSION-1",
+            attempt_id="ATTEMPT-1",
+            device_id="DEV-1",
+            flow_point=100.0,
+            trial_index=1,
+            trial_status="accepted",
+            k_factor_parameter="k_factor",
+            original_k_factor=500.0,
+            mass_acc_before=0.0,
+            mass_acc_after=10.0,
+            measured_mass_delta=10.0,
+            standard_mass=9.99,
+            percent_error=0.10010010010010009,
+            mean_flow=1.0,
+            instant_flow=1.1,
+            flow_started_at=captured_at,
+            flow_instant_at=captured_at,
+            flow_ended_at=captured_at,
+            device_metadata={
+                "device_model": "CFM-100",
+                "tube_model": "T-25",
+                "transmitter_model": "TX-9",
+            },
+        )
+    )
+
+    profiles = repository.list_modbus_device_profiles()
+    attempts = repository.list_modbus_operation_attempts(tube_model="T-25")
+    trials = repository.list_modbus_trial_records(transmitter_model="TX-9")
+
+    assert profiles[0].device_id == "DEV-1"
+    assert attempts[0].summary["percent_error"] == 0.12
+    assert trials[0].trial_status == "accepted"
+    assert trials[0].k_factor_parameter == "k_factor"
+    assert trials[0].original_k_factor == 500.0
+    assert repository.count_rows("modbus_trial_records") == 1
+
+
+def test_repository_deletes_modbus_profile_without_deleting_test_records(tmp_path) -> None:
+    database = Database(tmp_path / "coreflow.sqlite")
+    database.initialize()
+    repository = StorageRepository(database)
+    captured_at = datetime(2026, 6, 12, 8, 0, tzinfo=UTC)
+
+    repository.save_modbus_device_profile(
+        ModbusDeviceProfileRecord(
+            profile_id="profile:DEV-KEEP-HISTORY",
+            device_id="DEV-KEEP-HISTORY",
+        )
+    )
+    repository.save_modbus_test_session(
+        ModbusTestSessionRecord(
+            session_id="SESSION-KEEP-HISTORY",
+            device_id="DEV-KEEP-HISTORY",
+            profile_id="profile:DEV-KEEP-HISTORY",
+            operator="pytest",
+            status="closed",
+            started_at=captured_at,
+        )
+    )
+
+    assert repository.delete_modbus_device_profile("DEV-KEEP-HISTORY") is True
+
+    assert repository.get_modbus_device_profile("DEV-KEEP-HISTORY") is None
+    sessions = repository.list_modbus_test_sessions(device_id="DEV-KEEP-HISTORY")
+    assert len(sessions) == 1
+    assert sessions[0].device_id == "DEV-KEEP-HISTORY"
+    assert sessions[0].profile_id is None

@@ -254,9 +254,9 @@ def analyze_repeatability(
     all_errors: list[float] = []
     for flow_point in sorted(grouped):
         trial_results = tuple(sorted(grouped[flow_point], key=lambda item: item.trial_index))
-        if len(trial_results) != expected_trials_per_point:
+        if len(trial_results) < expected_trials_per_point:
             raise ValueError(
-                f"Flow point {flow_point} requires {expected_trials_per_point} trials."
+                f"Flow point {flow_point} requires at least {expected_trials_per_point} trials."
             )
         errors = [trial.percent_error for trial in trial_results]
         all_errors.extend(errors)

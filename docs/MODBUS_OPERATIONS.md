@@ -2,14 +2,14 @@
 
 This document describes the current standalone Modbus Module behavior for
 operators, developers, and AI-assisted future edits. It is the working contract
-for the module UI, runtime services, calibration history, and safety behavior.
+for the module UI, runtime services, test records, and safety behavior.
 
 ## Scope
 
 The standalone Modbus Module is a direct Modbus RTU master window. It is
 independent from the main simulator/replay device list and keeps its own
 connection state, variable map, operation dialogs, communication-frame log, and
-calibration history browser.
+test-record browser.
 
 This document covers implemented operation logic only. It does not define
 production transmitter register maps, production calibration acceptance
@@ -17,15 +17,23 @@ thresholds, fixture timing, or customer report templates.
 
 ## Shared Operation Context
 
-The Modbus window has three operator-entered device context fields:
+The Modbus window has a `Device Profile` selector and a stable operator-entered
+`Device ID`. This ID is the business identity for the physical transmitter or
+meter assembly and must be unique across all devices tested with this program.
+It is intentionally separate from the Modbus RTU unit ID. Do not use simple
+unit-address values such as `01`, and do not use connection-derived values such
+as `modbus:COM9:1` as device IDs.
+
+Each device profile stores these operator-entered device context fields:
 
 - Device Model
 - Tube Model
 - Transmitter Model
 
 The runtime stores these fields as `ModbusOperationMetadata`. When an operation
-writes calibration history, the metadata snapshot for that operation is attached
-to the run configuration and analysis summary metrics with these keys:
+writes test records, the metadata snapshot for that operation is attached to
+the run configuration, analysis summary metrics, operation-attempt record, and
+trial record where applicable with these keys:
 
 - `device_model`
 - `tube_model`
@@ -33,17 +41,42 @@ to the run configuration and analysis summary metrics with these keys:
 
 The snapshot is taken at the point where the operation is started or the final
 result is calculated. Later edits in the UI must not rewrite a completed
-operation's history. The calibration history detail pane displays the fields
-under `Device Metadata`, and JSON export/import preserves them through the stored
-run and analysis records.
+operation's record. The test-record detail pane displays the fields under
+`Device Metadata`, and JSON export/import preserves them through the stored run
+and analysis records.
 
 ## Connection And Variable Map
 
-The operator opens `Connection...`, selects a serial port, unit ID, serial
-settings, timeout/retry settings, and byte/word order. The runtime creates a
-`ModbusRtuFlowmeterDevice` using the current variable map and transport.
+The operator first creates or selects a `Device Profile`. The main Modbus
+window keeps this compact: it shows the profile selector, `New Profile`,
+`Edit Profile`, `Delete`, connection controls, and a `Live Variables` table.
+The global `All Test Records` browser remains available from the `Operations`
+menu. The profile dialog owns the stable device ID,
+device metadata, and full register-map configuration. Selecting a saved profile
+loads its device metadata, connection settings, and register-map configuration
+into the Modbus window. When the module opens, it automatically selects the
+most recently used saved profile when that profile still exists, so operators
+do not need to reselect the same device every time. Deleting a profile removes
+only the reusable profile
+configuration; device records and historical test records remain stored under
+the original device ID. Old port-derived profiles such as `modbus:COM9:1` are
+removed from the profile list automatically; any historical records remain tied
+to their original `device_id`.
 
-The `Variable Map` table is editable only while disconnected. It defines:
+After a profile is selected, the operator opens `Connection...`, selects a
+serial port, Modbus RTU unit ID, serial settings, timeout/retry settings, and
+byte/word order. The runtime creates a `ModbusRtuFlowmeterDevice` using the
+current variable map and transport. The selected profile's device ID becomes
+the stored `device_id`; the Modbus RTU unit ID is stored only as protocol
+address and connection metadata.
+
+On connection, the runtime updates the selected Modbus device profile with the
+latest connection settings and register-map snapshot, then starts a Modbus test
+session. The test session groups operation attempts for later device-centered
+review.
+
+The full register map is editable in the profile dialog only while
+disconnected. It defines:
 
 - variable name
 - Modbus table kind
@@ -53,25 +86,84 @@ The `Variable Map` table is editable only while disconnected. It defines:
 - scale
 - unit
 - writable flag
+
+The main window's `Live Variables` table deliberately hides the register kind,
+address, word count, data type, scale, unit, and writable columns because those
+belong to the device profile. The live table keeps only the operator-facing
+runtime controls:
+
+- variable name
 - poll selection
-
-Saved maps are stored in the user data directory under:
-
-```text
-config/register_maps/modbus_module_map.json
-```
+- current value
+- write value
+- row read/write operation
 
 Polling and operation reads use the configured map. Adjacent reads may be merged
 when they are in the same Modbus table and merging is safe for the operation.
 
-## Sample Variables
+## Device-Centered Test Flow
 
-`Sample Variables` reads the standard sample set from the connected device,
-updates the `Value` column, and stores variable samples in SQLite. A failed
-variable read is logged as a warning; successful samples keep their timestamp,
-variable name, value, unit, and source metadata.
+The standalone Modbus workflow is organized around the active device profile.
+Every operation stores enough context to be reviewed later from `Test Records`,
+even when the operator rejects the trial or uses it only for diagnosis.
 
-This operation does not create calibration history.
+```mermaid
+flowchart TD
+    A[Open Modbus Module] --> B[Create or select Device Profile]
+    B --> C[Load device metadata and register map]
+    C --> D[Open Profile dialog to edit metadata or register map if needed]
+    D --> E[Save Device Profile]
+    E --> F[Connection dialog]
+    F --> H[Connect serial port and Modbus unit ID]
+    H --> I[Use profile Device ID as stored identity]
+    I --> J[Update profile connection snapshot]
+    J --> K[Start Test Session]
+    K --> G{Select operation}
+
+    G --> Z[Zero Cal]
+    Z --> Z1[Read snapshots, zero_offset, and delta_t]
+    Z1 --> Z2[Guarded zero-start write]
+    Z2 --> Z3[Read completion and after values]
+    Z3 --> Z4[Store run, analysis, attempt, and raw polling artifact]
+
+    G --> K[K Factor Simple]
+    K --> K1[Capture flow segment]
+    K1 --> K2[Store capture attempt and raw polling artifact]
+    K2 --> K3[Calculate preview K factor]
+    K3 --> K4{Write requested}
+    K4 -->|No| K5[Store calculation attempt]
+    K4 -->|Yes| K6[Guarded write, readback, and audit record]
+
+    G --> R[Error and repeatability trial]
+    R --> R1[Capture one flow segment]
+    R1 --> R2[Operator enters standard mass and notes]
+    R2 --> R2A[Calculate Trial Error]
+    R2A --> R3[Store trial record and raw polling artifact]
+    R3 --> R4{More trials needed}
+    R4 -->|Yes| R1
+    R4 -->|No| R5[Store summary run, analysis, and attempt]
+
+    Z4 --> T[Test Records]
+    K5 --> T
+    K6 --> T
+    R3 --> T
+    R5 --> T
+    T --> CDR[Current Device Test Records]
+    T --> ATR[All Test Records]
+    T --> DA[Current Device Analysis]
+    CDR --> Q[Filter by metadata, session, status, type, and time]
+    ATR --> Q2[Filter across all device IDs and metadata]
+    DA --> Q3[Summarize records, trial errors, latest K, and attention notes]
+    T --> X[Export JSON package]
+```
+
+## Variable Reads And Polling
+
+The former `Sample Variables` menu operation is no longer exposed in the
+operator menu. Operators can still read a single row with the row `Read` button
+or poll selected rows with `Start Polling`. Workflow operations continue to read
+configured variables internally and store operation-specific raw Modbus polling
+curves as artifacts.
 
 ## Zero Calibration
 
@@ -86,13 +178,14 @@ When the operator clicks `Start`:
 6. The runtime reads completion state plus post-calibration `zero_offset` and
    `delta_t`.
 7. The UI refreshes the main variable map values for the result variables.
-8. A calibration run and analysis result are stored in SQLite.
+8. A calibration run, analysis result, operation-attempt test record, and raw
+   Modbus polling artifact are stored.
 
 The current implementation uses the configured write guard and records audit
 data for the zero-start write. It does not apply production acceptance
 thresholds; the operator reviews the before/after values.
 
-History operation name:
+Test-record operation name:
 
 ```text
 zero_calibration
@@ -111,7 +204,7 @@ The operator selects:
 - poll interval
 - optional snapshot variables
 - standard mass
-- whether to record calibration history
+- whether to record test history
 - whether to write the corrected K factor to the device
 
 When the operator clicks `Start`, the runtime captures one flow segment:
@@ -131,20 +224,39 @@ K1 = K0 / measured_mass_delta * standard_mass
 mean_flow = measured_mass_delta / segment_duration_s
 ```
 
-If history recording is enabled, the result is stored as a calibration run and
-analysis result. If device write is enabled, the runtime applies the corrected K
-factor through write guard, reads it back, marks verification status, and updates
-the same history run.
+The capture itself is stored as an operation attempt with a raw Modbus polling
+artifact. If history recording is enabled, the calculated result is stored as a
+calibration run, analysis result, and operation-attempt test record. If device
+write is enabled, the runtime applies the corrected K factor through write
+guard, reads it back, marks verification status, and updates the same run.
 
-History operation name:
+Test-record operation names:
 
 ```text
+k_factor_calibration_capture
 k_factor_calibration
 ```
 
 ## Repeatability Simple Mode
 
-`Repeatability` opens a dedicated dialog. The implemented modes are:
+`Repeatability` opens a dedicated dialog. The operation dialog keeps only the
+per-trial `Standard Mass` entry and calculation controls visible. Variables,
+mode, target-flow points, polling interval, test-record saving, and pre-test
+snapshot selection are edited from the `Configuration...` dialog before the
+first trial; once a trial is captured, those operation-level settings are
+locked for that operation. The implemented modes are:
+
+The configuration dialog also includes operator notes for the current
+error/repeatability operation. Saving the configuration persists those notes
+with the current Device ID, the main repeatability operation dialog displays
+the saved notes, and every trial completed under that operation copies the same
+text into the trial and operation-attempt notes.
+
+Saved repeatability configuration is scoped to the current Device ID under the
+selected device profile. There is no global repeatability configuration
+fallback; selecting another device profile loads that device's saved
+repeatability settings, while an active operation with captured trials keeps its
+locked configuration.
 
 - `Three Flow Ranges`
 - `Single Flow Range`
@@ -152,16 +264,34 @@ k_factor_calibration
 Advanced mode is reserved.
 
 Each trial captures one flow segment using the selected flow-rate and
-flow-accumulator variables. The runtime records:
+flow-accumulator variables. At the start of each trial, the runtime reads the
+operator-selected pre-trial variables plus the configured K Factor variable,
+tells the operator that the selected variables have been read, and then waits
+for the non-zero flow segment. During `Capture Trial`, the repeatability dialog
+opens a small progress popup that reports data acquisition status. When capture
+finishes, the popup shows completion, closes automatically after 2 seconds, and
+can also be closed manually by the operator. The runtime records:
 
 - target flow point
 - trial index
+- pre-trial selected-variable snapshot and snapshot timestamp
+- configured K Factor variable name
+- original K factor value automatically read before the flow segment
 - mass accumulator before and after the segment
 - measured mass delta
 - standard mass entered by the operator
 - instant flow after the configured post-start sample delay
 - mean flow across the captured segment
 - percent error
+- flow segment timestamps: start, instant sample, and end
+- trial status, currently `accepted` by default
+- raw Modbus polling artifact ID
+
+The Test Records timestamp for each trial is the time the operator clicks
+`Calculate Trial Error` and the percent error is calculated and saved. It is not
+the flow-segment start, instant-sample, or end timestamp. Those flow-segment
+timestamps remain stored in the trial metrics and raw polling artifact for
+traceability.
 
 Trial percent error is:
 
@@ -169,45 +299,246 @@ Trial percent error is:
 e = (measured_mass_delta - standard_mass) / standard_mass * 100%
 ```
 
+Where:
+
+- `measured_mass_delta = mass_acc_after - mass_acc_before`
+- `standard_mass` is the standard-scale mass entered by the operator for that
+  trial.
+- `v1` is the instant-flow sample captured after the configured post-start
+  sample delay.
+- `v_mean = measured_mass_delta / flow_segment_duration_s`.
+- `original_k` is read automatically from the configured K Factor variable at
+  the start of each trial.
+
 For `Three Flow Ranges`, the complete result contains 3 flow points and 3 trials
-per flow point. After each third trial at a flow point, the UI shows the
-repeatability summary for that point. After 9 trials, the runtime stores the
-history result when history recording is enabled.
+per flow point. `Capture Trial` captures the device-side flow segment and leaves
+it as the current pending capture. The operator then enters `Standard Mass` and
+clicks `Calculate Trial Error`; that action calculates the percent error and
+stores the trial record. There is no separate `Save Trial` action. Closing the
+dialog before all 9 trials are complete leaves already calculated trials in test
+records, discards any pending uncalculated capture from the dialog state, and
+the next open starts a new operation rather than resuming the old dialog state.
+After any flow point has 3 calculated trials, `Add Trial` becomes available.
+Clicking it opens a flow-point selection dialog. The default selection is the
+most recently completed flow point that already has at least 3 trials, and the
+operator may choose any flow point that has reached that condition. The extra
+trial is appended to the table as a pending row and is stored as another trial
+record after `Calculate Trial Error` without deleting earlier data.
 
-For `Single Flow Range`, the operator may save any number of trials for one flow
-point. The UI refreshes the current summary after each saved trial. `Save
-Summary` stores the current set of trials as history.
-
-Repeatability per flow point is the sample standard deviation of the trial
-percent errors. The history summary also stores mean percent error, maximum
-absolute percent error, trial count, per-flow summaries, and trial details.
-
-History operation name:
+Standard three-flow-range ordering is flexible through the configured target
+flow points, but the base operation is still interpreted as:
 
 ```text
-manual_error_repeatability
+flow_point_1: trial 1, trial 2, trial 3
+flow_point_2: trial 1, trial 2, trial 3
+flow_point_3: trial 1, trial 2, trial 3
 ```
 
-## Calibration History
+Additional trials are appended after these base rows. They are available for
+diagnosis or for selecting a later consecutive three-trial window; earlier
+trials are not cleared or overwritten.
 
-Calibration history is derived from SQLite run sessions and analysis results.
-Only these workflow names are shown:
+For `Single Flow Range`, the operator may save any number of trials for one flow
+point. The UI refreshes the current summary after each `Calculate Trial Error`
+calculation stores a trial, and the refreshed error/repeatability summary is
+saved as a `manual_error_repeatability` test record using the operation notes
+from the repeatability configuration. Final K calculation is not available until
+the operator has selected three flow points with three consecutive trials each.
+
+`Calculate Repeatability` opens a selection dialog. The operator chooses one
+flow point and one consecutive three-trial window from the current operation.
+The UI calculates the sample standard deviation of those three trial percent
+errors and saves the selected-window calculation as a
+`manual_error_repeatability` test record using the operation notes from the
+repeatability configuration. The Test Records timestamp for this repeatability
+record is the time the repeatability result is calculated and saved, while the
+selected trial time range remains in `source_trial_started_at` and
+`source_trial_ended_at`. The operator may repeat this selection;
+recalculating a flow point refreshes the selected repeatability value and shows
+the change.
+
+For one selected flow point with three selected trial errors:
+
+```text
+selected_mean_error = (e1 + e2 + e3) / 3
+repeatability_stddev = sqrt(((e1 - selected_mean_error)^2
+                           + (e2 - selected_mean_error)^2
+                           + (e3 - selected_mean_error)^2) / (3 - 1))
+```
+
+The `Selected Trials And K Preview` text line shows this value as `mean`. For
+example, if a selected flow point has trial errors `0%`, `2%`, and `-2%`, the
+displayed `mean` is:
+
+```text
+mean = (0 + 2 + -2) / 3 = 0%
+```
+
+This displayed `mean` is the selected three-trial mean error for one flow point.
+It is not the final `average_error` used to normalize the three flow-point
+measurement errors during final K calculation.
+
+`Calculate Final K` uses the three operator-selected repeatability windows
+(9 selected trials total). For each flow point, the measurement error is the
+mean percent error of its three selected trials:
+
+```text
+measurement_error_j = (e_j1 + e_j2 + e_j3) / 3
+```
+
+The final-K calculation then uses:
+
+```text
+average_error = (max(measurement_error_1,
+                     measurement_error_2,
+                     measurement_error_3)
+               + min(measurement_error_1,
+                     measurement_error_2,
+                     measurement_error_3)) / 2
+
+adjusted_error_j = measurement_error_j - average_error
+
+intermediate_k_j = original_k / (1 + adjusted_error_j / 100)
+
+new_k = (max(intermediate_k_1,
+             intermediate_k_2,
+             intermediate_k_3)
+       + min(intermediate_k_1,
+             intermediate_k_2,
+             intermediate_k_3)) / 2
+
+delta_k = new_k - original_k
+```
+
+`original_k` is read automatically from the configured K Factor variable during
+each trial; the operator does not type this value into the dialog. Final K
+calculation requires all 9 selected trials to come from the same operation, use
+the same flow-rate and flow-accumulator variables, use the same K Factor
+variable, and share the same original K value. Repeating this action overwrites
+the previous final-K record for the same operation, while all trial records
+remain intact. If the three flow-point errors are symmetric around the computed
+`average_error`, the calculated `new_k` can equal `original_k`; this means the
+formula found no K adjustment after centering the errors, not that the
+calculation was skipped. K values, intermediate K values, and `delta_k` are
+displayed with enough decimal precision for manual entry into a slave device.
+The final-K preview record also carries the same operation notes.
+
+After a final-K preview exists, `Write New K...` becomes available. This is an
+explicit write action, not part of the calculation itself. The UI shows a
+confirmation dialog with the current Device ID, K Factor variable, original K,
+new K, and delta. If the operator confirms, the runtime writes the new K only
+through `WriteGuardService`, reads the same K Factor variable back, verifies the
+readback against the requested value, records an audit log entry, and updates
+the final-K test record with `write_requested`, `write_status`,
+`write_verified`, `readback_k_factor`, and `audit_id`. Canceling the dialog
+leaves the preview saved but does not write the device.
+
+Repeatability per flow point is the sample standard deviation of the trial
+percent errors. The summary also stores mean percent error, maximum absolute
+percent error, trial count, per-flow summaries, and trial details.
+
+Test-record operation names:
+
+```text
+manual_error_repeatability_trial
+manual_error_repeatability
+manual_error_repeatability_final_k
+```
+
+## Test Records
+
+`Test Records` replaces the old `Calibration History` UI label. Test records
+are derived from Modbus operation-attempt rows and remain compatible with older
+run/analysis history rows. These operation names are shown:
 
 - `zero_calibration`
+- `k_factor_calibration_capture`
 - `k_factor_calibration`
+- `manual_error_repeatability_trial`
 - `manual_error_repeatability`
+- `manual_error_repeatability_final_k`
 
-The history table shows timestamp, operation, run ID, parameter summary, and
+The UI exposes two record windows:
+
+- `Current Device Test Records` opens with the selected or connected device ID
+  locked as a filter.
+- `All Test Records` opens the global record browser for every device tested
+  with this program.
+
+The `Current Device Analysis` operation opens a single-purpose calculation
+dialog for the selected or connected Device ID. The dialog does not show a
+device-history text summary or a per-flow summary table. It only lets the
+operator select 9 saved trials, calculate the repeatability/final-K result, and
+save the report. This dialog does not encode hidden pass/fail thresholds and
+does not write to the device.
+
+`Select And Calculate...` shows each accepted trial record
+as its own selectable row, including Attempt ID, Run ID, old K, error, raw
+artifact reference, and comparison values, so the row can be matched directly
+to the Test Records detail. Rows are ordered by trial start time with the most
+recent trial at the top, and the selection table columns can be reordered by
+dragging the column headers. The operator must select exactly 9 rows covering
+exactly three flow points; each flow point must have exactly three selected
+trials, and those three trial indexes must be consecutive. No trial rows are
+selected by default. The
+comparison variables shown in the selection dialog are selected with checkboxes
+from a dedicated variable-selection popup. Clicking `Save` stores the selection
+per Device ID under
+`config/workflow_templates/devices/<device>/modbus_device_analysis.json` and
+closes the popup. The default comparison variables are `zero_offset` and
+`low_threshold`.
+
+After the 9-trial selection is valid, the selection dialog calculates the
+per-flow adjusted error, per-flow repeatability, and old/new K preview before it
+can be accepted. The preview text shows one line per flow point in the form
+`Flow <value>g/s: adjusted_error=<value>%, repeatability=<value>%`, followed by
+`K value: old=<value>, new=<value>`.
+
+Before the result is saved, the runtime verifies that all 9 selected trials
+share the same original K factor and the same `zero_offset` and `low_threshold`
+values from their pre-calibration snapshots. Missing or mismatched values stop
+the operation and show the operator a warning. Unlike the live repeatability
+`Calculate Final K` action, device analysis can use selected saved trials from
+more than one repeatability operation and records the source run IDs in the
+report metrics. `Save` writes the previously calculated selection as a
+plain-text report artifact, and records the action as
+`manual_error_repeatability_final_k` with
+`analysis_source=current_device_analysis`. It does not apply the new K to the
+device. The saved report text is intentionally narrow: it lists only the 9
+selected trial rows, the pre-calibration consistency values used for those
+trials, the per-flow repeatability/final-K intermediate calculations, and the
+final K result. Device-analysis provenance such as source run IDs remains in
+structured metrics, not in the operator report text.
+
+After `Save`, the new record appears in `Current Device Test
+Records` for that Device ID and in `All Test Records`. Use operation filter
+`Repeatability Final K` or `Repeatability`, and status filter `Any Status` or
+`Calculated`. Its parameter summary shows the calculated `new_k` and
+`delta_k` plus `average_error`; the report artifact is listed in the detail pane. The test
+record timestamp is the time this report calculation/save action was performed,
+not the historical time range of the selected trials. The selected-trial time
+range remains traceable in the record metrics as `source_trial_started_at` and
+`source_trial_ended_at`.
+
+The record table shows timestamp, operation, run ID or attempt ID, parameter summary, and
 operator notes. The detail pane shows:
 
 - basic run metadata
 - result summary
 - device metadata
 - pre-calibration snapshot
+- raw artifact references
 - remaining metrics
 
-Notes are stored on the run session. JSON export writes a portable package that
-includes device records, run sessions, workflow steps, and analysis results.
+Notes are stored on the run session when a run exists. JSON export writes a
+portable package that includes device records, run sessions, workflow steps,
+analysis results, artifact metadata, Modbus test sessions, operation attempts,
+and trial records. Import remains compatible with older package shapes: missing
+Modbus test sessions are backfilled from the referenced attempts/trials. When
+the import is launched from `Current Device Test Records`, imported run,
+session, attempt, and trial Device IDs are retargeted to the current Device ID
+while preserving the original Device ID in metadata.
+
 Import skips exact duplicate runs and renames conflicting imported run IDs.
 
 Excel export is reserved for a later release.

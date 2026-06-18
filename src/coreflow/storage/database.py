@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 
 
 class Database:
@@ -25,6 +25,14 @@ class Database:
         with self.connect() as connection:
             for statement in SCHEMA_STATEMENTS:
                 connection.execute(statement)
+            _ensure_columns(
+                connection,
+                "modbus_trial_records",
+                {
+                    "k_factor_parameter": "TEXT",
+                    "original_k_factor": "REAL",
+                },
+            )
             connection.execute(
                 """
                 INSERT OR IGNORE INTO schema_migrations(version, applied_at)
@@ -158,4 +166,100 @@ SCHEMA_STATEMENTS = (
         FOREIGN KEY(step_id) REFERENCES workflow_steps(step_id)
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS modbus_device_profiles (
+        profile_id TEXT PRIMARY KEY,
+        device_id TEXT NOT NULL UNIQUE,
+        display_name TEXT,
+        device_model TEXT,
+        tube_model TEXT,
+        transmitter_model TEXT,
+        connection_settings_json TEXT NOT NULL DEFAULT '{}',
+        register_map_json TEXT NOT NULL DEFAULT '{}',
+        notes TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS modbus_test_sessions (
+        session_id TEXT PRIMARY KEY,
+        device_id TEXT NOT NULL,
+        profile_id TEXT,
+        operator TEXT NOT NULL,
+        status TEXT NOT NULL,
+        started_at TEXT NOT NULL,
+        ended_at TEXT,
+        device_metadata_json TEXT NOT NULL DEFAULT '{}',
+        register_map_snapshot_json TEXT NOT NULL DEFAULT '{}',
+        notes TEXT,
+        FOREIGN KEY(profile_id) REFERENCES modbus_device_profiles(profile_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS modbus_operation_attempts (
+        attempt_id TEXT PRIMARY KEY,
+        session_id TEXT,
+        run_id TEXT,
+        device_id TEXT NOT NULL,
+        operation_type TEXT NOT NULL,
+        status TEXT NOT NULL,
+        started_at TEXT,
+        ended_at TEXT,
+        operator TEXT NOT NULL,
+        device_metadata_json TEXT NOT NULL DEFAULT '{}',
+        register_map_snapshot_json TEXT NOT NULL DEFAULT '{}',
+        raw_artifact_id TEXT,
+        summary_json TEXT NOT NULL DEFAULT '{}',
+        notes TEXT,
+        FOREIGN KEY(session_id) REFERENCES modbus_test_sessions(session_id),
+        FOREIGN KEY(raw_artifact_id) REFERENCES artifacts(artifact_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS modbus_trial_records (
+        trial_id TEXT PRIMARY KEY,
+        session_id TEXT,
+        attempt_id TEXT,
+        run_id TEXT,
+        device_id TEXT NOT NULL,
+        flow_point REAL NOT NULL,
+        trial_index INTEGER NOT NULL,
+        trial_status TEXT NOT NULL,
+        k_factor_parameter TEXT,
+        original_k_factor REAL,
+        mass_acc_before REAL,
+        mass_acc_after REAL,
+        measured_mass_delta REAL,
+        standard_mass REAL,
+        percent_error REAL,
+        mean_flow REAL,
+        instant_flow REAL,
+        flow_started_at TEXT,
+        flow_instant_at TEXT,
+        flow_ended_at TEXT,
+        raw_artifact_id TEXT,
+        device_metadata_json TEXT NOT NULL DEFAULT '{}',
+        notes TEXT,
+        FOREIGN KEY(session_id) REFERENCES modbus_test_sessions(session_id),
+        FOREIGN KEY(attempt_id) REFERENCES modbus_operation_attempts(attempt_id),
+        FOREIGN KEY(raw_artifact_id) REFERENCES artifacts(artifact_id)
+    )
+    """,
 )
+
+
+def _ensure_columns(
+    connection: sqlite3.Connection,
+    table_name: str,
+    columns: dict[str, str],
+) -> None:
+    existing = {
+        row["name"]
+        for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+    }
+    for column_name, declaration in columns.items():
+        if column_name not in existing:
+            connection.execute(
+                f"ALTER TABLE {table_name} ADD COLUMN {column_name} {declaration}"
+            )

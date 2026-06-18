@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import csv
+import io
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
@@ -35,6 +37,7 @@ from coreflow.devices import (
     WriteMode,
 )
 from coreflow.hardware import build_placeholder_register_map
+from coreflow.hardware.register_map import register_map_from_json, register_map_to_json
 from coreflow.protocols.modbus import (
     ModbusDataType,
     ModbusRegister,
@@ -46,8 +49,17 @@ from coreflow.protocols.modbus import (
     SerialConfig,
     TransportResponse,
 )
-from coreflow.storage import StorageRepository
-from coreflow.storage.models import AnalysisResultRecord, DeviceRecord, VariableSampleRecord
+from coreflow.storage import ArtifactStore, ArtifactType, StorageRepository
+from coreflow.storage.models import (
+    AnalysisResultRecord,
+    Artifact,
+    DeviceRecord,
+    ModbusDeviceProfileRecord,
+    ModbusOperationAttemptRecord,
+    ModbusTestSessionRecord,
+    ModbusTrialRecord,
+    VariableSampleRecord,
+)
 from coreflow.workflows.calibration import (
     FlowSegmentCaptureConfig,
     FlowSegmentCaptureResult,
@@ -122,6 +134,8 @@ class ModbusZeroCalibrationResult:
     audit_id: str
     pre_snapshot: dict[str, object] = field(default_factory=dict)
     pre_snapshot_captured_at: datetime | None = None
+    raw_artifact_id: str | None = None
+    test_session_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,6 +153,9 @@ class ModbusKFactorSimpleCapture:
     current_k_factor: float
     segment: FlowSegmentCaptureResult
     poll_interval_s: float
+    raw_curve: tuple[dict[str, object], ...] = ()
+    raw_artifact_id: str | None = None
+    test_session_id: str | None = None
 
     @property
     def measured_mass_delta(self) -> float:
@@ -175,6 +192,8 @@ class ModbusKFactorSimpleResult:
     readback_k_factor: float | None = None
     audit_id: str | None = None
     operation_metadata: ModbusOperationMetadata | None = None
+    raw_artifact_id: str | None = None
+    test_session_id: str | None = None
 
     @property
     def duration_s(self) -> float:
@@ -190,12 +209,17 @@ class ModbusRepeatabilitySimpleCapture:
     trial_index: int
     flow_rate_parameter: str
     flow_acc_parameter: str
+    k_factor_parameter: str
+    original_k_factor: float
     pre_snapshot: dict[str, object]
     pre_snapshot_captured_at: datetime | None
     mass_acc_before: float
     mass_acc_after: float
     segment: FlowSegmentCaptureResult
     poll_interval_s: float
+    raw_curve: tuple[dict[str, object], ...] = ()
+    raw_artifact_id: str | None = None
+    test_session_id: str | None = None
 
     @property
     def measured_mass_delta(self) -> float:
@@ -217,6 +241,8 @@ class ModbusRepeatabilitySimpleTrialResult:
     trial_index: int
     flow_rate_parameter: str
     flow_acc_parameter: str
+    k_factor_parameter: str
+    original_k_factor: float
     pre_snapshot: dict[str, object]
     pre_snapshot_captured_at: datetime | None
     mass_acc_before: float
@@ -231,10 +257,24 @@ class ModbusRepeatabilitySimpleTrialResult:
     flow_ended_at: datetime
     poll_interval_s: float
     flow_rate_source: str = "device"
+    raw_artifact_id: str | None = None
+    test_session_id: str | None = None
+    trial_status: str = "accepted"
+    notes: str = ""
 
     @property
     def duration_s(self) -> float:
         return (self.flow_ended_at - self.flow_started_at).total_seconds()
+
+
+@dataclass(frozen=True, slots=True)
+class ModbusRepeatabilityHistoryTrial:
+    """One repeatability trial reconstructed from saved history records."""
+
+    trial: ModbusRepeatabilitySimpleTrialResult
+    attempt_id: str | None
+    pre_snapshot: dict[str, object]
+    device_metadata: dict[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,6 +287,40 @@ class ModbusRepeatabilityFlowSummary:
     max_abs_percent_error: float
     repeatability_stddev_percent: float
     trial_errors: tuple[float, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ModbusDeviceAnalysis:
+    """Simple history-derived analysis for one Modbus device ID."""
+
+    device_id: str
+    generated_at: datetime
+    profile: ModbusDeviceProfile | None
+    record_count: int
+    session_count: int
+    operation_counts: dict[str, int]
+    trial_count: int
+    accepted_trial_count: int
+    diagnostic_trial_count: int
+    rejected_trial_count: int
+    overall_mean_error_percent: float | None
+    overall_stddev_error_percent: float | None
+    overall_max_abs_error_percent: float | None
+    flow_summaries: tuple[ModbusRepeatabilityFlowSummary, ...]
+    latest_final_k: dict[str, object] | None
+    latest_k_factor: dict[str, object] | None
+    latest_zero_calibration: dict[str, object] | None
+    notes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ModbusDeviceAnalysisReportResult:
+    """Saved text report produced from device analysis trial selection."""
+
+    run_id: str
+    metrics: dict[str, object]
+    report_text: str
+    report_artifact_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,6 +338,8 @@ class ModbusRepeatabilitySimpleResult:
     history_saved: bool
     mode: str = "three_point"
     expected_trials_per_point: int = 3
+    test_session_id: str | None = None
+    notes: str = ""
 
     @property
     def started_at(self) -> datetime:
@@ -306,6 +382,36 @@ class ModbusOperationMetadata:
 
 
 @dataclass(frozen=True, slots=True)
+class ModbusDeviceProfile:
+    """UI-ready Modbus device profile with stable device identity."""
+
+    device_id: str
+    device_model: str = ""
+    tube_model: str = ""
+    transmitter_model: str = ""
+    display_name: str = ""
+    connection_settings: dict[str, Any] = field(default_factory=dict)
+    register_map: ModbusRegisterMap | None = None
+    notes: str = ""
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    @property
+    def label(self) -> str:
+        if self.display_name and self.display_name != self.device_id:
+            return f"{self.device_id} - {self.display_name}"
+        return self.device_id
+
+    @property
+    def metadata(self) -> ModbusOperationMetadata:
+        return ModbusOperationMetadata(
+            device_model=self.device_model,
+            tube_model=self.tube_model,
+            transmitter_model=self.transmitter_model,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ModbusCalibrationHistoryExportResult:
     """Summary of one Modbus calibration-history export file."""
 
@@ -326,6 +432,7 @@ class ModbusCalibrationHistoryImportResult:
     renamed_runs: int
     imported_analysis_results: int
     imported_workflow_steps: int
+    retargeted_runs: int = 0
     errors: tuple[str, ...] = ()
 
 
@@ -337,9 +444,23 @@ _CALIBRATION_HISTORY_EXPORT_VERSION = 1
 _CALIBRATION_HISTORY_WORKFLOWS = {
     "zero_calibration",
     "k_factor_calibration",
+    "k_factor_calibration_capture",
     "manual_error_repeatability",
+    "manual_error_repeatability_final_k",
+    "manual_error_repeatability_trial",
 }
 _CALIBRATION_HISTORY_STATUSES = {"passed", "failed", "canceled", "error"}
+_RAW_CAPTURE_IMPORT_STATUS_FALLBACKS = {
+    "accepted": RunStatus.PASSED,
+    "captured": RunStatus.PASSED,
+    "passed": RunStatus.PASSED,
+    "calculated": RunStatus.PASSED,
+    "rejected": RunStatus.FAILED,
+    "diagnostic": RunStatus.PASSED,
+    "failed": RunStatus.FAILED,
+    "canceled": RunStatus.CANCELED,
+    "error": RunStatus.ERROR,
+}
 
 
 class ModbusModuleRuntime:
@@ -352,11 +473,21 @@ class ModbusModuleRuntime:
         register_map: ModbusRegisterMap | None = None,
         transport_factory: TransportFactory | None = None,
         operator: str = "operator",
+        data_root: Path | None = None,
         zero_calibration_wait_s: float = 3.0,
         k_factor_post_start_sample_s: float = 3.0,
         k_factor_post_stop_delay_s: float = 3.0,
     ) -> None:
         self._repository = repository
+        default_data_root = getattr(
+            getattr(repository, "_database", None),
+            "path",
+            None,
+        )
+        self._artifact_store = ArtifactStore(
+            data_root
+            or (Path(default_data_root).parent if default_data_root is not None else Path.cwd())
+        )
         self._register_map = register_map or build_placeholder_register_map()
         self._transport_factory = transport_factory
         self._frame_logger: FrameLogger | None = None
@@ -368,6 +499,9 @@ class ModbusModuleRuntime:
         self._device: FlowmeterDevice | None = None
         self._device_id: str | None = None
         self._identity: DeviceIdentity | None = None
+        self._test_session_id: str | None = None
+        self._profile_id: str | None = None
+        self._selected_profile: ModbusDeviceProfile | None = None
         self._sequence = repository.count_rows("run_sessions")
 
     @property
@@ -399,10 +533,133 @@ class ModbusModuleRuntime:
     ) -> None:
         self._operation_metadata = metadata
 
+    def list_device_profiles(self) -> tuple[ModbusDeviceProfile, ...]:
+        return tuple(
+            _profile_from_record(record)
+            for record in self._repository.list_modbus_device_profiles()
+        )
+
+    def delete_legacy_port_profiles(self) -> int:
+        if self._device is not None:
+            return 0
+        deleted = self._repository.delete_legacy_modbus_device_profiles()
+        if (
+            self._selected_profile is not None
+            and self._selected_profile.device_id.lower().startswith("modbus:")
+        ):
+            self._selected_profile = None
+            self._profile_id = None
+        return deleted
+
+    def get_device_profile(self, device_id: str) -> ModbusDeviceProfile | None:
+        record = self._repository.get_modbus_device_profile(device_id)
+        if record is None:
+            return None
+        return _profile_from_record(record)
+
+    def select_device_profile(self, device_id: str) -> ModbusDeviceProfile:
+        if self._device is not None:
+            raise RuntimeError("Disconnect before changing the device profile.")
+        profile = self.get_device_profile(device_id)
+        if profile is None:
+            raise ValueError(f"Unknown Modbus device profile: {device_id}")
+        self._selected_profile = profile
+        self._profile_id = f"profile:{profile.device_id}"
+        self._operation_metadata = profile.metadata
+        if profile.register_map is not None:
+            self._register_map = profile.register_map
+        return profile
+
+    def save_device_profile(
+        self,
+        *,
+        device_id: str,
+        metadata: ModbusOperationMetadata | None = None,
+        register_map: ModbusRegisterMap | None = None,
+        connection_settings: ModbusConnectionSettings | None = None,
+        display_name: str | None = None,
+        notes: str | None = None,
+        select: bool = True,
+    ) -> ModbusDeviceProfile:
+        if self._device is not None:
+            raise RuntimeError("Disconnect before saving a device profile.")
+        normalized_device_id = _validate_modbus_device_id(device_id)
+        existing = self._repository.get_modbus_device_profile(normalized_device_id)
+        metadata = metadata or self._operation_metadata
+        register_map = register_map or self._register_map
+        connection_payload = (
+            _connection_settings_to_payload(connection_settings)
+            if connection_settings is not None
+            else (
+                dict(existing.connection_settings)
+                if existing is not None
+                else {}
+            )
+        )
+        self._repository.save_device(
+            DeviceRecord(
+                device_id=normalized_device_id,
+                device_type=DeviceType.MODBUS_RTU.value,
+                model=metadata.device_model or None,
+                connection_metadata={
+                    "tube_model": metadata.tube_model,
+                    "transmitter_model": metadata.transmitter_model,
+                    "profile_created_from": "modbus_module",
+                },
+            )
+        )
+        self._repository.save_modbus_device_profile(
+            ModbusDeviceProfileRecord(
+                profile_id=(
+                    existing.profile_id
+                    if existing is not None
+                    else f"profile:{normalized_device_id}"
+                ),
+                device_id=normalized_device_id,
+                display_name=display_name
+                if display_name not in (None, "")
+                else (existing.display_name if existing is not None else None),
+                device_model=metadata.device_model or None,
+                tube_model=metadata.tube_model or None,
+                transmitter_model=metadata.transmitter_model or None,
+                connection_settings=connection_payload,
+                register_map=_register_map_payload(register_map),
+                notes=notes if notes is not None else (existing.notes if existing else None),
+                created_at=existing.created_at if existing is not None else None,
+            )
+        )
+        saved = self.get_device_profile(normalized_device_id)
+        if saved is None:
+            raise RuntimeError(f"Failed to save Modbus device profile: {normalized_device_id}")
+        if select:
+            self._selected_profile = saved
+            self._profile_id = f"profile:{saved.device_id}"
+            self._operation_metadata = saved.metadata
+            if saved.register_map is not None:
+                self._register_map = saved.register_map
+        return saved
+
+    def delete_device_profile(self, device_id: str) -> bool:
+        if self._device is not None:
+            raise RuntimeError("Disconnect before deleting a device profile.")
+        normalized_device_id = str(device_id).strip()
+        if not normalized_device_id:
+            raise ValueError("Device ID is required.")
+        deleted = self._repository.delete_modbus_device_profile(normalized_device_id)
+        if (
+            self._selected_profile is not None
+            and self._selected_profile.device_id == normalized_device_id
+        ):
+            self._selected_profile = None
+            self._profile_id = None
+        return deleted
+
     def set_frame_logger(self, logger: FrameLogger | None) -> None:
         self._frame_logger = logger
 
     def connect(self, settings: ModbusConnectionSettings) -> ModbusModuleStatus:
+        if self._selected_profile is None:
+            raise RuntimeError("Create or select a device profile before connecting.")
         serial_config = settings.serial_config()
         transport = (
             self._transport_factory(serial_config)
@@ -418,26 +675,33 @@ class ModbusModuleRuntime:
         )
         device.connect()
         self._device = device
-        self._device_id = f"modbus:{settings.port}:{settings.unit_id}"
+        self._device_id = self._selected_profile.device_id
         self._identity = DeviceIdentity(
             device_id=self._device_id,
             device_type=DeviceType.MODBUS_RTU,
+            model=self._selected_profile.device_model or None,
             protocol_address=str(settings.unit_id),
             metadata={
                 "port": settings.port,
+                "unit_id": settings.unit_id,
                 "register_map": self._register_map.name,
                 "register_map_version": self._register_map.version,
                 "order": settings.order,
             },
         )
+        self._ensure_modbus_device_profile(settings)
+        self._start_modbus_test_session()
         return self.status
 
     def disconnect(self) -> ModbusModuleStatus:
+        self._finish_modbus_test_session(status="closed")
         if self._device is not None:
             self._device.disconnect()
         self._device = None
         self._device_id = None
         self._identity = None
+        self._test_session_id = None
+        self._profile_id = None
         return self.status
 
     def sample_variables(
@@ -602,12 +866,44 @@ class ModbusModuleRuntime:
             ),
         )
         self._attach_operation_metadata_to_run(result.run_id, metadata)
+        raw_points = _zero_calibration_raw_points(result.record, result.pre_snapshot)
+        raw_artifact_id = self._save_raw_curve_artifact(
+            run_id=result.run_id,
+            operation_type="zero_calibration",
+            points=raw_points,
+            created_at=result.record.before.captured_at,
+        )
+        summary = {
+            "zero_offset_before": result.record.before.zero_offset,
+            "zero_offset_after": result.record.after.zero_offset,
+            "zero_offset_change": result.record.zero_offset_change,
+            "delta_t_before": result.record.before.delta_t,
+            "delta_t_after": result.record.after.delta_t,
+            "delta_t_change": result.record.delta_t_change,
+            "completed": result.record.completed,
+            "audit_id": result.audit_id,
+            "pre_snapshot": result.pre_snapshot,
+            "raw_artifact_id": raw_artifact_id,
+        }
+        self._save_modbus_operation_attempt(
+            attempt_id=f"{result.run_id}-ZERO-ATTEMPT",
+            operation_type="zero_calibration",
+            status="passed" if result.record.completed else "failed",
+            run_id=result.run_id,
+            started_at=result.record.before.captured_at,
+            ended_at=result.record.after.captured_at,
+            raw_artifact_id=raw_artifact_id,
+            summary=summary,
+            metadata=metadata,
+        )
         return ModbusZeroCalibrationResult(
             run_id=run_id,
             record=result.record,
             audit_id=result.audit_id,
             pre_snapshot=result.pre_snapshot,
             pre_snapshot_captured_at=result.pre_snapshot_captured_at,
+            raw_artifact_id=raw_artifact_id,
+            test_session_id=self._test_session_id,
         )
 
     def capture_k_factor_simple_trial(
@@ -624,9 +920,15 @@ class ModbusModuleRuntime:
         max_wait_start_polls: int = 600,
         max_wait_stop_polls: int = 600,
         cancel_requested: Callable[[], bool] | None = None,
+        status_callback: Callable[[str], None] | None = None,
     ) -> ModbusKFactorSimpleCapture:
         run_id = self._next_run_id()
         device = self._require_device()
+        recording_device = _RawCurveRecordingDevice(
+            device,
+            register_map=self._register_map,
+            default_phase="k_factor_capture",
+        )
         identity = self._require_identity()
         self._repository.save_device(
             DeviceRecord(
@@ -640,19 +942,27 @@ class ModbusModuleRuntime:
                 connection_metadata=identity.metadata,
             )
         )
+        _emit_status(status_callback, "Reading selected variables before this trial...")
+        recording_device.set_phase("pre_snapshot")
         pre_snapshot, pre_snapshot_captured_at = _pre_calibration_snapshot(
-            device,
+            recording_device,
             _unique_names(snapshot_variable_names),
         )
+        recording_device.set_phase("before_segment")
         before_parameters = _read_selected_parameters(
-            device,
+            recording_device,
             (flow_acc_parameter, k_factor_parameter),
             merge_adjacent=False,
         )
         mass_acc_before = float(_find_parameter(before_parameters, flow_acc_parameter).value)
         current_k_factor = float(_find_parameter(before_parameters, k_factor_parameter).value)
+        _emit_status(
+            status_callback,
+            "Selected variables read. Start this trial when the device flow is ready.",
+        )
+        recording_device.set_phase("flow_segment")
         segment = capture_flow_segment(
-            device,
+            recording_device,
             FlowSegmentCaptureConfig(
                 flow_rate_parameter=flow_rate_parameter,
                 poll_interval_s=poll_interval_s,
@@ -669,12 +979,42 @@ class ModbusModuleRuntime:
                 cancel_requested=cancel_requested,
             ),
         )
+        _emit_status(status_callback, "Flow segment captured. Reading ending variables...")
+        recording_device.set_phase("after_segment")
         after_parameters = _read_selected_parameters(
-            device,
+            recording_device,
             (flow_acc_parameter,),
             merge_adjacent=False,
         )
         mass_acc_after = float(_find_parameter(after_parameters, flow_acc_parameter).value)
+        raw_curve = tuple(recording_device.points)
+        raw_artifact_id = self._save_raw_curve_artifact(
+            run_id=run_id,
+            operation_type="k_factor_calibration",
+            points=raw_curve,
+            created_at=segment.started_at,
+        )
+        self._save_modbus_operation_attempt(
+            attempt_id=f"{run_id}-KFACTOR-CAPTURE",
+            operation_type="k_factor_calibration_capture",
+            status="captured",
+            run_id=run_id,
+            started_at=segment.started_at,
+            ended_at=segment.ended_at,
+            raw_artifact_id=raw_artifact_id,
+            summary={
+                "flow_rate_parameter": flow_rate_parameter,
+                "flow_acc_parameter": flow_acc_parameter,
+                "k_factor_parameter": k_factor_parameter,
+                "mass_acc_before": mass_acc_before,
+                "mass_acc_after": mass_acc_after,
+                "measured_mass_delta": mass_acc_after - mass_acc_before,
+                "current_k_factor": current_k_factor,
+                "instant_flow": segment.instant_flow,
+                "duration_s": segment.duration_s,
+                "raw_artifact_id": raw_artifact_id,
+            },
+        )
         return ModbusKFactorSimpleCapture(
             run_id=run_id,
             flow_rate_parameter=flow_rate_parameter,
@@ -687,6 +1027,9 @@ class ModbusModuleRuntime:
             current_k_factor=current_k_factor,
             segment=segment,
             poll_interval_s=poll_interval_s,
+            raw_curve=raw_curve,
+            raw_artifact_id=raw_artifact_id,
+            test_session_id=self._start_modbus_test_session(),
         )
 
     def calculate_k_factor_simple_result(
@@ -734,6 +1077,8 @@ class ModbusModuleRuntime:
             flow_rate_source=capture.segment.flow_rate_source,
             history_saved=save_history,
             operation_metadata=operation_metadata or self._operation_metadata,
+            raw_artifact_id=capture.raw_artifact_id,
+            test_session_id=capture.test_session_id,
         )
         if save_history:
             self._save_k_factor_simple_history(
@@ -826,6 +1171,8 @@ class ModbusModuleRuntime:
             readback_k_factor=readback,
             audit_id=decision.audit_id,
             operation_metadata=result.operation_metadata,
+            raw_artifact_id=result.raw_artifact_id,
+            test_session_id=result.test_session_id,
         )
         if updated.history_saved:
             self._save_k_factor_simple_history(
@@ -844,6 +1191,7 @@ class ModbusModuleRuntime:
         snapshot_variable_names: tuple[str, ...] = (),
         flow_rate_parameter: str = "mass_rate",
         flow_acc_parameter: str = "mass_acc",
+        k_factor_parameter: str = "k_factor",
         poll_interval_s: float = 1.0,
         nonzero_threshold: float = 0.0,
         post_start_sample_s: float | None = None,
@@ -852,6 +1200,7 @@ class ModbusModuleRuntime:
         max_wait_stop_polls: int = 600,
         capture_snapshot: bool = True,
         cancel_requested: Callable[[], bool] | None = None,
+        status_callback: Callable[[str], None] | None = None,
     ) -> ModbusRepeatabilitySimpleCapture:
         if trial_index < 1:
             raise ValueError("Repeatability trial index must be at least 1.")
@@ -859,6 +1208,11 @@ class ModbusModuleRuntime:
             raise ValueError("Repeatability poll interval must be positive.")
         capture_run_id = run_id or self._next_run_id()
         device = self._require_device()
+        recording_device = _RawCurveRecordingDevice(
+            device,
+            register_map=self._register_map,
+            default_phase="repeatability_trial",
+        )
         identity = self._require_identity()
         self._repository.save_device(
             DeviceRecord(
@@ -872,21 +1226,30 @@ class ModbusModuleRuntime:
                 connection_metadata=identity.metadata,
             )
         )
+        _emit_status(status_callback, "Reading selected variables before this trial...")
         if capture_snapshot:
+            recording_device.set_phase("pre_snapshot")
             pre_snapshot, pre_snapshot_captured_at = _pre_calibration_snapshot(
-                device,
+                recording_device,
                 _unique_names(snapshot_variable_names),
             )
         else:
             pre_snapshot, pre_snapshot_captured_at = {}, None
+        recording_device.set_phase("before_segment")
         before_parameters = _read_selected_parameters(
-            device,
-            (flow_acc_parameter,),
+            recording_device,
+            _unique_names((flow_acc_parameter, k_factor_parameter)),
             merge_adjacent=False,
         )
         mass_acc_before = float(_find_parameter(before_parameters, flow_acc_parameter).value)
+        original_k_factor = float(_find_parameter(before_parameters, k_factor_parameter).value)
+        _emit_status(
+            status_callback,
+            "Selected variables read. Start this trial when the device flow is ready.",
+        )
+        recording_device.set_phase("flow_segment")
         segment = capture_flow_segment(
-            device,
+            recording_device,
             FlowSegmentCaptureConfig(
                 flow_rate_parameter=flow_rate_parameter,
                 poll_interval_s=poll_interval_s,
@@ -903,24 +1266,38 @@ class ModbusModuleRuntime:
                 cancel_requested=cancel_requested,
             ),
         )
+        _emit_status(status_callback, "Flow segment captured. Reading ending variables...")
+        recording_device.set_phase("after_segment")
         after_parameters = _read_selected_parameters(
-            device,
+            recording_device,
             (flow_acc_parameter,),
             merge_adjacent=False,
         )
         mass_acc_after = float(_find_parameter(after_parameters, flow_acc_parameter).value)
+        raw_curve = tuple(recording_device.points)
+        raw_artifact_id = self._save_raw_curve_artifact(
+            run_id=capture_run_id,
+            operation_type="manual_error_repeatability_trial",
+            points=raw_curve,
+            created_at=segment.started_at,
+        )
         return ModbusRepeatabilitySimpleCapture(
             run_id=capture_run_id,
             flow_point=flow_point,
             trial_index=trial_index,
             flow_rate_parameter=flow_rate_parameter,
             flow_acc_parameter=flow_acc_parameter,
+            k_factor_parameter=k_factor_parameter,
+            original_k_factor=original_k_factor,
             pre_snapshot=pre_snapshot,
             pre_snapshot_captured_at=pre_snapshot_captured_at,
             mass_acc_before=mass_acc_before,
             mass_acc_after=mass_acc_after,
             segment=segment,
             poll_interval_s=poll_interval_s,
+            raw_curve=raw_curve,
+            raw_artifact_id=raw_artifact_id,
+            test_session_id=self._start_modbus_test_session(),
         )
 
     def calculate_repeatability_simple_trial(
@@ -928,17 +1305,21 @@ class ModbusModuleRuntime:
         capture: ModbusRepeatabilitySimpleCapture,
         *,
         standard_mass: float,
+        notes: str = "",
     ) -> ModbusRepeatabilitySimpleTrialResult:
         if standard_mass <= 0:
             raise ValueError("Repeatability test requires positive standard mass.")
         measured_mass_delta = capture.measured_mass_delta
         percent_error = (measured_mass_delta - standard_mass) / standard_mass * 100.0
-        return ModbusRepeatabilitySimpleTrialResult(
+        trial_notes = notes.strip()
+        trial = ModbusRepeatabilitySimpleTrialResult(
             run_id=capture.run_id,
             flow_point=capture.flow_point,
             trial_index=capture.trial_index,
             flow_rate_parameter=capture.flow_rate_parameter,
             flow_acc_parameter=capture.flow_acc_parameter,
+            k_factor_parameter=capture.k_factor_parameter,
+            original_k_factor=capture.original_k_factor,
             pre_snapshot=capture.pre_snapshot,
             pre_snapshot_captured_at=capture.pre_snapshot_captured_at,
             mass_acc_before=capture.mass_acc_before,
@@ -953,7 +1334,13 @@ class ModbusModuleRuntime:
             flow_ended_at=capture.segment.ended_at,
             poll_interval_s=capture.poll_interval_s,
             flow_rate_source=capture.segment.flow_rate_source,
+            raw_artifact_id=capture.raw_artifact_id,
+            test_session_id=capture.test_session_id,
+            trial_status="accepted",
+            notes=trial_notes,
         )
+        self._save_modbus_trial_record(trial)
+        return trial
 
     def summarize_repeatability_flow_point(
         self,
@@ -990,6 +1377,7 @@ class ModbusModuleRuntime:
         expected_trials_per_point: int = 3,
         require_complete: bool = True,
         operation_metadata: ModbusOperationMetadata | None = None,
+        notes: str = "",
     ) -> ModbusRepeatabilitySimpleResult:
         if not trials:
             raise ValueError("Repeatability test requires at least one trial.")
@@ -999,16 +1387,26 @@ class ModbusModuleRuntime:
             raise ValueError("Repeatability test requires at least one trial per point.")
         flow_points = {trial.flow_point for trial in trials}
         expected_total = expected_flow_point_count * expected_trials_per_point
-        if require_complete and len(trials) != expected_total:
+        if require_complete and len(trials) < expected_total:
             raise ValueError(
                 "Repeatability test requires "
-                f"{expected_total} trials for {expected_flow_point_count} flow point(s)."
+                f"at least {expected_total} trials for {expected_flow_point_count} flow point(s)."
             )
         if len(flow_points) != expected_flow_point_count:
             raise ValueError(
                 "Repeatability test requires "
                 f"{expected_flow_point_count} flow point(s)."
             )
+        if require_complete:
+            for flow_point in flow_points:
+                trial_count = sum(
+                    1 for trial in trials if trial.flow_point == flow_point
+                )
+                if trial_count < expected_trials_per_point:
+                    raise ValueError(
+                        "Repeatability test requires at least "
+                        f"{expected_trials_per_point} trials for flow point {flow_point:g}."
+                    )
         run_ids = {trial.run_id for trial in trials}
         if len(run_ids) != 1:
             raise ValueError("Repeatability trials must belong to one run.")
@@ -1031,6 +1429,10 @@ class ModbusModuleRuntime:
             expected_trials_per_point=expected_trials_per_point,
         )
         first_snapshot_trial = next((trial for trial in trials if trial.pre_snapshot), None)
+        result_notes = notes.strip() or next(
+            (trial.notes for trial in trials if trial.notes),
+            "",
+        )
         result = ModbusRepeatabilitySimpleResult(
             run_id=trials[0].run_id,
             flow_rate_parameter=trials[0].flow_rate_parameter,
@@ -1047,6 +1449,8 @@ class ModbusModuleRuntime:
             history_saved=save_history,
             mode=mode,
             expected_trials_per_point=expected_trials_per_point,
+            test_session_id=trials[0].test_session_id,
+            notes=result_notes,
         )
         if save_history:
             self._save_repeatability_simple_history(
@@ -1055,6 +1459,597 @@ class ModbusModuleRuntime:
                 operation_metadata=operation_metadata,
             )
         return result
+
+    def save_repeatability_flow_summary_history(
+        self,
+        trials: tuple[ModbusRepeatabilitySimpleTrialResult, ...],
+        *,
+        flow_point: float,
+        mode: str = "three_point",
+        save_history: bool = True,
+        operation_metadata: ModbusOperationMetadata | None = None,
+        notes: str = "",
+    ) -> ModbusRepeatabilitySimpleResult:
+        """Persist one operator-selected repeatability/error calculation."""
+
+        selected = tuple(trial for trial in trials if trial.flow_point == flow_point)
+        if not selected:
+            raise ValueError("Repeatability summary requires trials for the flow point.")
+        return self.calculate_repeatability_simple_result(
+            selected,
+            save_history=save_history,
+            mode=mode,
+            expected_flow_point_count=1,
+            expected_trials_per_point=len(selected),
+            require_complete=False,
+            operation_metadata=operation_metadata,
+            notes=notes,
+        )
+
+    def calculate_repeatability_final_k(
+        self,
+        selected_trials_by_flow: dict[
+            float,
+            tuple[ModbusRepeatabilitySimpleTrialResult, ...],
+        ],
+        *,
+        original_k_factor: float | None = None,
+        run_id: str | None = None,
+        allow_new_run_id: bool = False,
+        require_single_operation: bool = True,
+        save_history: bool = True,
+        operation_metadata: ModbusOperationMetadata | None = None,
+        notes: str = "",
+    ) -> dict[str, object]:
+        """Calculate the operator-selected final K preview from three flow points."""
+
+        if len(selected_trials_by_flow) != 3:
+            raise ValueError("Final K calculation requires three selected flow points.")
+        selected_groups: list[tuple[float, tuple[ModbusRepeatabilitySimpleTrialResult, ...]]] = []
+        for flow_point in sorted(selected_trials_by_flow):
+            trials = tuple(selected_trials_by_flow[flow_point])
+            if len(trials) != 3:
+                raise ValueError(
+                    "Final K calculation requires three trials for "
+                    f"flow point {flow_point:g}."
+                )
+            if any(trial.flow_point != flow_point for trial in trials):
+                raise ValueError("Selected repeatability trials do not match their flow point.")
+            trial_indexes = tuple(trial.trial_index for trial in trials)
+            expected_indexes = tuple(range(trial_indexes[0], trial_indexes[0] + 3))
+            if trial_indexes != expected_indexes:
+                raise ValueError("Selected repeatability trials must be consecutive.")
+            selected_groups.append((flow_point, trials))
+
+        all_trials = tuple(
+            trial
+            for _flow_point, trials in selected_groups
+            for trial in trials
+        )
+        run_ids = {trial.run_id for trial in all_trials}
+        if require_single_operation and len(run_ids) != 1:
+            raise ValueError("Final K calculation requires trials from one operation.")
+        resolved_run_id = run_id or next(iter(run_ids))
+        if resolved_run_id not in run_ids and not allow_new_run_id:
+            raise ValueError("Final K run ID must match the selected trials.")
+        flow_rate_parameters = {trial.flow_rate_parameter for trial in all_trials}
+        flow_acc_parameters = {trial.flow_acc_parameter for trial in all_trials}
+        if len(flow_rate_parameters) != 1 or len(flow_acc_parameters) != 1:
+            raise ValueError("Final K calculation requires one variable configuration.")
+        k_factor_parameters = {trial.k_factor_parameter for trial in all_trials}
+        if len(k_factor_parameters) != 1:
+            raise ValueError("Final K calculation requires one K factor variable.")
+        original_k_values = {trial.original_k_factor for trial in all_trials}
+        if len(original_k_values) != 1:
+            raise ValueError("Final K calculation requires one original K value.")
+        captured_original_k = next(iter(original_k_values))
+        if original_k_factor is None:
+            original_k_factor = captured_original_k
+        elif original_k_factor != captured_original_k:
+            raise ValueError("Final K original K must match the selected trials.")
+        if original_k_factor <= 0:
+            raise ValueError("Final K calculation requires a positive original K factor.")
+
+        flow_rows: list[dict[str, object]] = []
+        measurement_errors = []
+        for flow_point, trials in selected_groups:
+            errors = tuple(trial.percent_error for trial in trials)
+            measurement_error = sum(errors) / len(errors)
+            measurement_errors.append(measurement_error)
+            summary = self.summarize_repeatability_flow_point(
+                trials,
+                flow_point=flow_point,
+            )
+            flow_rows.append(
+                {
+                    "flow_point": flow_point,
+                    "trial_indexes": [trial.trial_index for trial in trials],
+                    "trial_errors_percent": list(errors),
+                    "measurement_error_percent": measurement_error,
+                    "repeatability_stddev_percent": (
+                        summary.repeatability_stddev_percent
+                    ),
+                    "repeatability_mean_percent_error": (
+                        summary.mean_percent_error
+                    ),
+                    "raw_artifact_ids": [
+                        trial.raw_artifact_id
+                        for trial in trials
+                        if trial.raw_artifact_id is not None
+                    ],
+                }
+            )
+
+        average_error = (max(measurement_errors) + min(measurement_errors)) / 2.0
+        intermediate_k_values = []
+        for row in flow_rows:
+            adjusted_error = float(row["measurement_error_percent"]) - average_error
+            denominator = 1.0 + adjusted_error / 100.0
+            if denominator == 0:
+                raise ValueError("Final K calculation produced a zero denominator.")
+            intermediate_k = original_k_factor / denominator
+            row["adjusted_error_percent"] = adjusted_error
+            row["intermediate_k_factor"] = intermediate_k
+            intermediate_k_values.append(intermediate_k)
+
+        new_k_factor = (
+            max(intermediate_k_values) + min(intermediate_k_values)
+        ) / 2.0
+        delta_k_factor = new_k_factor - original_k_factor
+        source_started_at = min(trial.flow_started_at for trial in all_trials)
+        source_ended_at = max(trial.flow_ended_at for trial in all_trials)
+        calculated_at = datetime.now(UTC)
+        metadata = self._operation_metadata_snapshot(operation_metadata)
+        result_notes = notes.strip() or next(
+            (trial.notes for trial in all_trials if trial.notes),
+            "",
+        )
+        metrics: dict[str, object] = {
+            **metadata,
+            "run_id": resolved_run_id,
+            "original_k_factor": original_k_factor,
+            "average_error": average_error,
+            "average_error_percent": average_error,
+            "new_k_factor": new_k_factor,
+            "delta_k_factor": delta_k_factor,
+            "notes": result_notes,
+            "flow_rate_parameter": all_trials[0].flow_rate_parameter,
+            "flow_acc_parameter": all_trials[0].flow_acc_parameter,
+            "k_factor_parameter": all_trials[0].k_factor_parameter,
+            "selected_flow_point_count": len(flow_rows),
+            "selected_trial_count": len(all_trials),
+            "history_saved": save_history,
+            "write_requested": False,
+            "write_status": "not_requested",
+            "write_verified": False,
+            "readback_k_factor": None,
+            "audit_id": None,
+            "started_at": calculated_at.isoformat(),
+            "ended_at": calculated_at.isoformat(),
+            "source_trial_started_at": source_started_at.isoformat(),
+            "source_trial_ended_at": source_ended_at.isoformat(),
+            "flow_points": flow_rows,
+            "trials": [
+                {
+                    "flow_point": trial.flow_point,
+                    "trial_index": trial.trial_index,
+                    "k_factor_parameter": trial.k_factor_parameter,
+                    "original_k_factor": trial.original_k_factor,
+                    "mass_acc_before": trial.mass_acc_before,
+                    "mass_acc_after": trial.mass_acc_after,
+                    "measured_mass_delta": trial.measured_mass_delta,
+                    "standard_mass": trial.standard_mass,
+                    "percent_error": trial.percent_error,
+                    "mean_flow": trial.mean_flow,
+                    "instant_flow": trial.instant_flow,
+                    "trial_status": trial.trial_status,
+                    "raw_artifact_id": trial.raw_artifact_id,
+                    "test_session_id": trial.test_session_id,
+                    "duration_s": trial.duration_s,
+                    "flow_started_at": trial.flow_started_at.isoformat(),
+                    "flow_instant_at": trial.flow_instant_at.isoformat(),
+                    "flow_ended_at": trial.flow_ended_at.isoformat(),
+                    "notes": trial.notes,
+                }
+                for trial in all_trials
+            ],
+        }
+        for row in flow_rows:
+            label = _flow_point_metric_label(float(row["flow_point"]))
+            metrics[f"{label}_measurement_error_percent"] = row[
+                "measurement_error_percent"
+            ]
+            metrics[f"{label}_adjusted_error_percent"] = row[
+                "adjusted_error_percent"
+            ]
+            metrics[f"{label}_repeatability_stddev_percent"] = row[
+                "repeatability_stddev_percent"
+            ]
+            metrics[f"{label}_intermediate_k_factor"] = row[
+                "intermediate_k_factor"
+            ]
+
+        if save_history:
+            self._save_repeatability_final_k_history(
+                run_id=resolved_run_id,
+                started_at=calculated_at,
+                ended_at=calculated_at,
+                metrics=metrics,
+                input_artifact_ids=tuple(
+                    trial.raw_artifact_id
+                    for trial in all_trials
+                    if trial.raw_artifact_id is not None
+                ),
+                operation_metadata=operation_metadata,
+                notes=result_notes,
+            )
+        return metrics
+
+    def list_repeatability_history_trials(
+        self,
+        device_id: str,
+        *,
+        accepted_only: bool = True,
+    ) -> tuple[ModbusRepeatabilityHistoryTrial, ...]:
+        """Return saved repeatability trials with their operation-attempt snapshots."""
+
+        normalized_device_id = str(device_id).strip()
+        if not normalized_device_id:
+            raise ValueError("Device ID is required.")
+        records = self._repository.list_modbus_trial_records(
+            device_id=normalized_device_id,
+            trial_status="accepted" if accepted_only else None,
+        )
+        attempts = {
+            attempt.attempt_id: attempt
+            for attempt in self._repository.list_modbus_operation_attempts(
+                device_id=normalized_device_id,
+                operation_type="manual_error_repeatability_trial",
+            )
+        }
+        history_trials: list[ModbusRepeatabilityHistoryTrial] = []
+        for record in records:
+            attempt = attempts.get(record.attempt_id or "")
+            pre_snapshot = (
+                _history_summary_pre_snapshot(attempt.summary)
+                if attempt is not None
+                else {}
+            )
+            flow_started_at = record.flow_started_at or record.flow_instant_at
+            flow_ended_at = record.flow_ended_at or record.flow_instant_at
+            flow_instant_at = (
+                record.flow_instant_at
+                or flow_started_at
+                or flow_ended_at
+                or datetime.now(UTC)
+            )
+            if flow_started_at is None:
+                flow_started_at = flow_instant_at
+            if flow_ended_at is None:
+                flow_ended_at = flow_instant_at
+            history_trials.append(
+                ModbusRepeatabilityHistoryTrial(
+                    trial=ModbusRepeatabilitySimpleTrialResult(
+                        run_id=record.run_id or record.trial_id,
+                        flow_point=record.flow_point,
+                        trial_index=record.trial_index,
+                        flow_rate_parameter=str(
+                            pre_snapshot.get("flow_rate_parameter")
+                            or (
+                                attempt.summary.get("flow_rate_parameter")
+                                if attempt is not None
+                                else ""
+                            )
+                            or "mass_rate"
+                        ),
+                        flow_acc_parameter=str(
+                            pre_snapshot.get("flow_acc_parameter")
+                            or (
+                                attempt.summary.get("flow_acc_parameter")
+                                if attempt is not None
+                                else ""
+                            )
+                            or "mass_acc"
+                        ),
+                        k_factor_parameter=(
+                            record.k_factor_parameter
+                            or str(
+                                attempt.summary.get("k_factor_parameter")
+                                if attempt is not None
+                                else ""
+                            )
+                            or "k_factor"
+                        ),
+                        original_k_factor=_history_trial_original_k_factor(
+                            record,
+                            attempt.summary if attempt is not None else {},
+                        ),
+                        pre_snapshot=pre_snapshot,
+                        pre_snapshot_captured_at=_history_datetime(
+                            attempt.summary.get("pre_snapshot_captured_at")
+                        )
+                        if attempt is not None
+                        else None,
+                        mass_acc_before=record.mass_acc_before or 0.0,
+                        mass_acc_after=record.mass_acc_after or 0.0,
+                        measured_mass_delta=record.measured_mass_delta or 0.0,
+                        standard_mass=record.standard_mass or 0.0,
+                        percent_error=record.percent_error or 0.0,
+                        mean_flow=record.mean_flow or 0.0,
+                        instant_flow=record.instant_flow or 0.0,
+                        flow_started_at=flow_started_at,
+                        flow_instant_at=flow_instant_at,
+                        flow_ended_at=flow_ended_at,
+                        poll_interval_s=float(
+                            attempt.summary.get("poll_interval_s", 0.0)
+                            if attempt is not None
+                            else 0.0
+                        ),
+                        raw_artifact_id=record.raw_artifact_id,
+            test_session_id=record.session_id,
+            trial_status=record.trial_status,
+            notes=record.notes or "",
+        ),
+                    attempt_id=record.attempt_id,
+                    pre_snapshot=pre_snapshot,
+                    device_metadata=dict(record.device_metadata),
+                )
+            )
+        return tuple(
+            sorted(
+                history_trials,
+                key=lambda item: (
+                    item.trial.flow_point,
+                    item.trial.trial_index,
+                    item.trial.flow_started_at,
+                    item.attempt_id or "",
+                ),
+            )
+        )
+
+    def validate_repeatability_analysis_snapshot_consistency(
+        self,
+        selected_trials_by_flow: dict[
+            float,
+            tuple[ModbusRepeatabilityHistoryTrial, ...],
+        ],
+        *,
+        variable_names: tuple[str, ...] = ("zero_offset", "low_threshold"),
+    ) -> None:
+        """Validate old K and required pre-calibration snapshot variables match."""
+
+        history_trials = tuple(
+            history_trial
+            for trials in selected_trials_by_flow.values()
+            for history_trial in trials
+        )
+        if len(history_trials) != 9:
+            raise ValueError("Device analysis requires exactly 9 selected trials.")
+        _ensure_selected_history_trials_have_consistent_snapshot(
+            history_trials,
+            variable_names=variable_names,
+        )
+
+    def calculate_device_analysis_repeatability_preview(
+        self,
+        selected_trials_by_flow: dict[
+            float,
+            tuple[ModbusRepeatabilityHistoryTrial, ...],
+        ],
+        *,
+        run_id: str | None = None,
+    ) -> dict[str, object]:
+        """Calculate current-device final-K preview without saving history."""
+
+        self.validate_repeatability_analysis_snapshot_consistency(
+            selected_trials_by_flow,
+            variable_names=("zero_offset", "low_threshold"),
+        )
+        trial_groups = {
+            flow_point: tuple(item.trial for item in trials)
+            for flow_point, trials in selected_trials_by_flow.items()
+        }
+        metrics = self.calculate_repeatability_final_k(
+            trial_groups,
+            run_id=run_id or "PREVIEW-DEVICE-ANALYSIS",
+            allow_new_run_id=True,
+            require_single_operation=False,
+            save_history=False,
+            operation_metadata=self._operation_metadata,
+        )
+        source_trial_started_at = _datetime_from_metric(
+            metrics.get("source_trial_started_at")
+        )
+        source_trial_ended_at = _datetime_from_metric(
+            metrics.get("source_trial_ended_at")
+        )
+        source_run_ids = sorted(
+            {
+                history_trial.trial.run_id
+                for trials in selected_trials_by_flow.values()
+                for history_trial in trials
+            }
+        )
+        return {
+            **metrics,
+            "source_repeatability_run_ids": source_run_ids,
+            "source_trial_started_at": source_trial_started_at.isoformat()
+            if source_trial_started_at is not None
+            else None,
+            "source_trial_ended_at": source_trial_ended_at.isoformat()
+            if source_trial_ended_at is not None
+            else None,
+        }
+
+    def calculate_device_analysis_repeatability_report(
+        self,
+        device_id: str,
+        selected_trials_by_flow: dict[
+            float,
+            tuple[ModbusRepeatabilityHistoryTrial, ...],
+        ],
+        *,
+        comparison_variable_names: tuple[str, ...] = (),
+        save_history: bool = True,
+    ) -> ModbusDeviceAnalysisReportResult:
+        normalized_device_id = _validate_modbus_device_id(device_id)
+        operation_started_at = datetime.now(UTC)
+        comparison_names = _unique_names(
+            (
+                "zero_offset",
+                "low_threshold",
+                *comparison_variable_names,
+            )
+        )
+        self.validate_repeatability_analysis_snapshot_consistency(
+            selected_trials_by_flow,
+            variable_names=("zero_offset", "low_threshold"),
+        )
+        run_id = self._next_run_id()
+        metrics = self.calculate_device_analysis_repeatability_preview(
+            selected_trials_by_flow,
+            run_id=run_id,
+        )
+        source_run_ids = list(metrics.get("source_repeatability_run_ids", []))
+        report_text = _device_analysis_repeatability_report_text(
+            metrics=metrics,
+            selected_trials_by_flow=selected_trials_by_flow,
+            comparison_variable_names=comparison_names,
+        )
+        operation_ended_at = datetime.now(UTC)
+        metrics = {
+            **metrics,
+            "started_at": operation_started_at.isoformat(),
+            "ended_at": operation_ended_at.isoformat(),
+        }
+        report_artifact_id = None
+        if save_history:
+            metrics = dict(metrics)
+            metrics.update(
+                {
+                    "run_id": run_id,
+                    "device_id": normalized_device_id,
+                    "analysis_source": "current_device_analysis",
+                    "source_repeatability_run_ids": source_run_ids,
+                    "report_text": report_text,
+                    "comparison_variable_names": list(comparison_names),
+                }
+            )
+            report_artifact_id = self._save_repeatability_final_k_history(
+                run_id=run_id,
+                started_at=operation_started_at,
+                ended_at=operation_ended_at,
+                metrics=metrics,
+                input_artifact_ids=tuple(
+                    str(value) for value in _final_k_artifact_ids(metrics)
+                ),
+                operation_metadata=self._operation_metadata,
+                device_id=normalized_device_id,
+                report_text=report_text,
+            )
+            metrics["report_artifact_id"] = report_artifact_id
+        return ModbusDeviceAnalysisReportResult(
+            run_id=run_id,
+            metrics=metrics,
+            report_text=report_text,
+            report_artifact_id=report_artifact_id,
+        )
+
+    def apply_repeatability_final_k_result(
+        self,
+        metrics: dict[str, object],
+        *,
+        operation_metadata: ModbusOperationMetadata | None = None,
+    ) -> dict[str, object]:
+        device = self._require_device()
+        run_id = str(metrics.get("run_id") or "")
+        if not run_id:
+            raise ValueError("Final K write requires a saved final-K result.")
+        k_factor_parameter = str(metrics.get("k_factor_parameter") or "")
+        if not k_factor_parameter:
+            raise ValueError("Final K write requires a K factor variable.")
+        new_k_factor = float(metrics["new_k_factor"])
+        original_k_factor = float(metrics["original_k_factor"])
+        register = self._register_map.by_name(k_factor_parameter)
+        parameter = ConfigurationParameter(
+            name=register.name,
+            value=original_k_factor,
+            unit=register.unit,
+            writable=register.writable,
+            minimum=register.minimum,
+            maximum=register.maximum,
+            metadata={
+                "register_kind": register.kind.value,
+                "address": register.address,
+                "word_count": register.word_count,
+                "data_type": register.data_type.value,
+                "source": "repeatability_final_k",
+            },
+        )
+        write_method = getattr(device, "write_configuration_without_pre_read", None)
+        write_device = (
+            _NoPreReadWriteDevice(device)
+            if callable(write_method)
+            else device
+        )
+        decision = WriteGuardService(
+            self._repository,
+            write_capable_states=("calibration_write_armed",),
+        ).evaluate_known_parameter(
+            write_device,
+            ParameterWriteRequest(
+                parameter_name=k_factor_parameter,
+                new_value=new_k_factor,
+                mode=WriteMode.ARMED,
+                actor=self._operator,
+                workflow_state="calibration_write_armed",
+                run_id=run_id,
+                expected_previous_value=original_k_factor,
+                metadata={"calibration": "repeatability_final_k"},
+            ),
+            parameter,
+        )
+        readback = None
+        verified = False
+        if decision.result.status.value == "applied":
+            parameters = _read_selected_parameters(
+                device,
+                (k_factor_parameter,),
+                merge_adjacent=False,
+            )
+            readback = float(_find_parameter(parameters, k_factor_parameter).value)
+            verified = abs(readback - new_k_factor) <= max(
+                1e-9,
+                abs(new_k_factor) * 1e-6,
+            )
+        updated = dict(metrics)
+        updated.update(
+            {
+                "write_requested": True,
+                "write_status": decision.result.status.value,
+                "write_verified": verified,
+                "readback_k_factor": readback,
+                "audit_id": decision.audit_id,
+            }
+        )
+        if bool(metrics.get("history_saved", True)):
+            started_at = _datetime_from_metric(updated.get("started_at"))
+            ended_at = _datetime_from_metric(updated.get("ended_at"))
+            self._save_repeatability_final_k_history(
+                run_id=run_id,
+                started_at=started_at,
+                ended_at=ended_at,
+                metrics=updated,
+                input_artifact_ids=tuple(
+                    str(artifact_id)
+                    for artifact_id in _final_k_artifact_ids(updated)
+                ),
+                operation_metadata=operation_metadata,
+                status=RunStatus.PASSED if verified else RunStatus.FAILED,
+                attempt_status=decision.result.status.value,
+                notes=str(updated.get("notes") or "") or None,
+            )
+        return updated
 
     def run_k_factor_calibration(
         self,
@@ -1117,6 +2112,14 @@ class ModbusModuleRuntime:
     ) -> tuple[ModbusCalibrationHistoryEntry, ...]:
         operation_filter = None if operation in (None, "", "all") else operation
         entries: list[ModbusCalibrationHistoryEntry] = []
+        accepted_workflows: set[str] | None = None
+        if operation_filter == "manual_error_repeatability":
+            accepted_workflows = {
+                "manual_error_repeatability",
+                "manual_error_repeatability_final_k",
+            }
+        elif operation_filter is not None:
+            accepted_workflows = {operation_filter}
         for run_summary in self._repository.list_runs():
             if run_summary.workflow_name not in _CALIBRATION_HISTORY_WORKFLOWS:
                 continue
@@ -1124,8 +2127,8 @@ class ModbusModuleRuntime:
             if status not in _CALIBRATION_HISTORY_STATUSES:
                 continue
             if (
-                operation_filter is not None
-                and run_summary.workflow_name != operation_filter
+                accepted_workflows is not None
+                and run_summary.workflow_name not in accepted_workflows
             ):
                 continue
             run = self._repository.get_run(run_summary.run_id)
@@ -1139,6 +2142,7 @@ class ModbusModuleRuntime:
                         run.configuration_snapshot
                     )
                 )
+            summary_notes = _history_str(metrics, "notes") or ""
             entries.append(
                 ModbusCalibrationHistoryEntry(
                     run_id=run_summary.run_id,
@@ -1149,10 +2153,253 @@ class ModbusModuleRuntime:
                     device_id=run_summary.device_id,
                     operator=run_summary.operator,
                     metrics=metrics,
-                    notes=run_summary.notes or "",
+                    notes=run_summary.notes or summary_notes,
                 )
             )
-        return tuple(entries)
+        return tuple(
+            sorted(
+                entries,
+                key=lambda item: (
+                    item.started_at or datetime.min.replace(tzinfo=UTC),
+                    item.run_id,
+                ),
+                reverse=True,
+            )
+        )
+
+    def list_test_records(
+        self,
+        *,
+        device_id: str | None = None,
+        session_id: str | None = None,
+        operation: str | None = None,
+        status: str | None = None,
+        started_from: datetime | None = None,
+        started_to: datetime | None = None,
+        device_model: str | None = None,
+        tube_model: str | None = None,
+        transmitter_model: str | None = None,
+    ) -> tuple[ModbusCalibrationHistoryEntry, ...]:
+        """List Modbus test records from operation attempts."""
+
+        operation_filter = None if operation in (None, "", "all") else operation
+        attempts = self._repository.list_modbus_operation_attempts(
+            device_id=device_id,
+            session_id=session_id,
+            operation_type=operation_filter,
+            status=None if status in (None, "", "all") else status,
+            started_from=started_from,
+            started_to=started_to,
+            device_model=device_model,
+            tube_model=tube_model,
+            transmitter_model=transmitter_model,
+        )
+        if operation_filter == "manual_error_repeatability":
+            for related_operation in (
+                "manual_error_repeatability_trial",
+                "manual_error_repeatability_final_k",
+            ):
+                attempts = attempts + self._repository.list_modbus_operation_attempts(
+                    device_id=device_id,
+                    session_id=session_id,
+                    operation_type=related_operation,
+                    status=None if status in (None, "", "all") else status,
+                    started_from=started_from,
+                    started_to=started_to,
+                    device_model=device_model,
+                    tube_model=tube_model,
+                    transmitter_model=transmitter_model,
+                )
+        elif operation_filter == "k_factor_calibration":
+            attempts = attempts + self._repository.list_modbus_operation_attempts(
+                device_id=device_id,
+                session_id=session_id,
+                operation_type="k_factor_calibration_capture",
+                status=None if status in (None, "", "all") else status,
+                started_from=started_from,
+                started_to=started_to,
+                device_model=device_model,
+                tube_model=tube_model,
+                transmitter_model=transmitter_model,
+            )
+        attempts = tuple(
+            sorted(
+                attempts,
+                key=lambda item: (
+                    item.started_at or datetime.min.replace(tzinfo=UTC),
+                    item.attempt_id,
+                ),
+                reverse=True,
+            )
+        )
+        entries: list[ModbusCalibrationHistoryEntry] = []
+        for attempt in attempts:
+            run = self._repository.get_run(attempt.run_id) if attempt.run_id else None
+            summary_notes = _history_str(attempt.summary, "notes") or ""
+            notes = (
+                attempt.notes
+                or summary_notes
+                or (run.notes if run is not None else "")
+                or ""
+            )
+            prefer_attempt_time = attempt.operation_type in {
+                "manual_error_repeatability_trial",
+            }
+            entries.append(
+                ModbusCalibrationHistoryEntry(
+                    run_id=attempt.run_id or attempt.attempt_id,
+                    operation=attempt.operation_type,
+                    status=attempt.status,
+                    started_at=(
+                        attempt.started_at
+                        if prefer_attempt_time and attempt.started_at is not None
+                        else (
+                            run.started_at
+                            if run is not None and run.started_at is not None
+                            else attempt.started_at
+                        )
+                    ),
+                    ended_at=(
+                        attempt.ended_at
+                        if prefer_attempt_time and attempt.ended_at is not None
+                        else (
+                            run.ended_at
+                            if run is not None and run.ended_at is not None
+                            else attempt.ended_at
+                        )
+                    ),
+                    device_id=attempt.device_id,
+                    operator=attempt.operator,
+                    metrics={
+                        **attempt.summary,
+                        **attempt.device_metadata,
+                        "attempt_id": attempt.attempt_id,
+                        "session_id": attempt.session_id,
+                        "raw_artifact_id": attempt.raw_artifact_id,
+                    },
+                    notes=notes,
+                )
+            )
+        covered_run_ids = {
+            attempt.run_id for attempt in attempts if attempt.run_id is not None
+        }
+        for legacy in self.list_calibration_history(operation=operation_filter):
+            if session_id not in (None, ""):
+                continue
+            if legacy.run_id in covered_run_ids:
+                continue
+            if device_id is not None and legacy.device_id != device_id:
+                continue
+            if status not in (None, "", "all") and legacy.status != status:
+                continue
+            if not _history_entry_in_time_range(
+                legacy,
+                started_from=started_from,
+                started_to=started_to,
+            ):
+                continue
+            if not _metadata_filter_matches(
+                legacy.metrics,
+                device_model=device_model,
+                tube_model=tube_model,
+                transmitter_model=transmitter_model,
+            ):
+                continue
+            entries.append(legacy)
+        return tuple(
+            sorted(
+                entries,
+                key=lambda item: (
+                    item.started_at or datetime.min.replace(tzinfo=UTC),
+                    item.run_id,
+                ),
+                reverse=True,
+            )
+        )
+
+    def analyze_device_history(self, device_id: str) -> ModbusDeviceAnalysis:
+        """Build a lightweight, threshold-free analysis summary for one device."""
+
+        normalized_device_id = str(device_id).strip()
+        if not normalized_device_id:
+            raise ValueError("Device ID is required for device analysis.")
+        records = self.list_test_records(device_id=normalized_device_id)
+        sessions = self._repository.list_modbus_test_sessions(
+            device_id=normalized_device_id,
+        )
+        trials = self._repository.list_modbus_trial_records(
+            device_id=normalized_device_id,
+        )
+        operation_counts: dict[str, int] = {}
+        for record in records:
+            operation_counts[record.operation] = (
+                operation_counts.get(record.operation, 0) + 1
+            )
+
+        accepted_trials = tuple(
+            trial for trial in trials if trial.trial_status == "accepted"
+        )
+        error_values = tuple(
+            float(trial.percent_error)
+            for trial in accepted_trials
+            if trial.percent_error is not None
+        )
+        flow_summaries = tuple(
+            _flow_summary_from_trial_records(
+                flow_point,
+                tuple(
+                    trial
+                    for trial in accepted_trials
+                    if trial.flow_point == flow_point
+                ),
+            )
+            for flow_point in sorted({trial.flow_point for trial in accepted_trials})
+        )
+        notes = _device_analysis_notes(
+            records=records,
+            trials=trials,
+            accepted_trials=accepted_trials,
+            flow_summaries=flow_summaries,
+        )
+        return ModbusDeviceAnalysis(
+            device_id=normalized_device_id,
+            generated_at=datetime.now(UTC),
+            profile=self.get_device_profile(normalized_device_id),
+            record_count=len(records),
+            session_count=len(sessions),
+            operation_counts=operation_counts,
+            trial_count=len(trials),
+            accepted_trial_count=len(accepted_trials),
+            diagnostic_trial_count=sum(
+                1 for trial in trials if trial.trial_status == "diagnostic"
+            ),
+            rejected_trial_count=sum(
+                1 for trial in trials if trial.trial_status == "rejected"
+            ),
+            overall_mean_error_percent=(
+                sum(error_values) / len(error_values) if error_values else None
+            ),
+            overall_stddev_error_percent=(
+                _sample_stddev(error_values) if error_values else None
+            ),
+            overall_max_abs_error_percent=(
+                max(abs(error) for error in error_values) if error_values else None
+            ),
+            flow_summaries=flow_summaries,
+            latest_final_k=_latest_record_metrics(
+                records,
+                "manual_error_repeatability_final_k",
+            ),
+            latest_k_factor=_latest_record_metrics(
+                records,
+                "k_factor_calibration",
+            ),
+            latest_zero_calibration=_latest_record_metrics(
+                records,
+                "zero_calibration",
+            ),
+            notes=notes,
+        )
 
     def update_calibration_history_note(self, run_id: str, notes: str) -> None:
         self._repository.update_run_notes(run_id, notes)
@@ -1162,6 +2409,7 @@ class ModbusModuleRuntime:
         path: str | Path,
         *,
         operation: str | None = None,
+        device_id: str | None = None,
         started_from: datetime | None = None,
         started_to: datetime | None = None,
     ) -> ModbusCalibrationHistoryExportResult:
@@ -1179,7 +2427,11 @@ class ModbusModuleRuntime:
         entries: list[dict[str, object]] = []
         analysis_count = 0
         step_count = 0
-        for history_entry in self.list_calibration_history(operation=operation):
+        exported_run_ids: set[str] = set()
+        for history_entry in self.list_test_records(
+            operation=operation,
+            device_id=device_id,
+        ):
             if not _history_entry_in_time_range(
                 history_entry,
                 started_from=started_from,
@@ -1187,11 +2439,61 @@ class ModbusModuleRuntime:
             ):
                 continue
             run = self._repository.get_run(history_entry.run_id)
-            if run is None:
+            if run is not None and run.run_id in exported_run_ids:
                 continue
-            device = self._repository.get_device(run.device_id)
-            steps = self._repository.list_steps(run.run_id)
-            analysis_results = self._repository.list_analysis_results(run.run_id)
+            if run is not None:
+                exported_run_ids.add(run.run_id)
+            entry_device_id = (
+                run.device_id if run is not None else history_entry.device_id
+            )
+            device = self._repository.get_device(entry_device_id)
+            steps = self._repository.list_steps(run.run_id) if run is not None else ()
+            analysis_results = (
+                self._repository.list_analysis_results(run.run_id)
+                if run is not None
+                else ()
+            )
+            artifacts = (
+                self._repository.list_artifacts(run.run_id)
+                if run is not None
+                else ()
+            )
+            attempts = self._repository.list_modbus_operation_attempts(
+                device_id=entry_device_id,
+            )
+            run_attempts = tuple(
+                attempt
+                for attempt in attempts
+                if (
+                    (run is not None and attempt.run_id == run.run_id)
+                    or attempt.attempt_id == history_entry.metrics.get("attempt_id")
+                )
+            )
+            trials = tuple(
+                trial
+                for trial in self._repository.list_modbus_trial_records(
+                    device_id=entry_device_id,
+                )
+                if (
+                    (run is not None and trial.run_id == run.run_id)
+                    or trial.attempt_id == history_entry.metrics.get("attempt_id")
+                )
+            )
+            session_ids = {
+                attempt.session_id
+                for attempt in run_attempts
+                if attempt.session_id is not None
+            }
+            session_ids.update(
+                trial.session_id for trial in trials if trial.session_id is not None
+            )
+            test_sessions = tuple(
+                session
+                for session in self._repository.list_modbus_test_sessions(
+                    device_id=entry_device_id,
+                )
+                if session.session_id in session_ids
+            )
             analysis_count += len(analysis_results)
             step_count += len(steps)
             entries.append(
@@ -1199,13 +2501,31 @@ class ModbusModuleRuntime:
                     "device": _device_record_to_history_payload(device)
                     if device is not None
                     else None,
-                    "run": _run_session_to_history_payload(run),
+                    "run": _run_session_to_history_payload(run)
+                    if run is not None
+                    else None,
                     "workflow_steps": [
                         _workflow_step_to_history_payload(step) for step in steps
                     ],
                     "analysis_results": [
                         _analysis_result_to_history_payload(result)
                         for result in analysis_results
+                    ],
+                    "artifacts": [
+                        _artifact_to_history_payload(artifact)
+                        for artifact in artifacts
+                    ],
+                    "test_sessions": [
+                        _test_session_to_history_payload(session)
+                        for session in test_sessions
+                    ],
+                    "operation_attempts": [
+                        _operation_attempt_to_history_payload(attempt)
+                        for attempt in run_attempts
+                    ],
+                    "trial_records": [
+                        _trial_record_to_history_payload(trial)
+                        for trial in trials
                     ],
                 }
             )
@@ -1216,6 +2536,7 @@ class ModbusModuleRuntime:
             "exported_at": datetime.now(UTC).isoformat(),
             "software_version": __version__,
             "operation_filter": operation or "all",
+            "device_id_filter": device_id,
             "started_from": started_from.isoformat()
             if started_from is not None
             else None,
@@ -1243,10 +2564,17 @@ class ModbusModuleRuntime:
     def import_calibration_history(
         self,
         path: str | Path,
+        *,
+        target_device_id: str | None = None,
     ) -> ModbusCalibrationHistoryImportResult:
         """Import a portable Modbus calibration-history JSON package."""
 
         import_path = Path(path)
+        normalized_target_device_id = (
+            _validate_modbus_device_id(target_device_id)
+            if target_device_id not in (None, "")
+            else None
+        )
         payload = json.loads(import_path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             raise ValueError("Calibration history import file must contain an object.")
@@ -1263,6 +2591,7 @@ class ModbusModuleRuntime:
         imported_runs = 0
         skipped_runs = 0
         renamed_runs = 0
+        retargeted_runs = 0
         imported_analysis_results = 0
         imported_workflow_steps = 0
         errors: list[str] = []
@@ -1270,21 +2599,148 @@ class ModbusModuleRuntime:
             try:
                 if not isinstance(raw_entry, dict):
                     raise ValueError("entry must be an object")
-                run = _run_session_from_history_payload(raw_entry.get("run"))
+                raw_run = raw_entry.get("run")
+                if raw_run is None:
+                    continue
+                run = _run_session_from_history_payload(raw_run)
                 if run.workflow_name not in _CALIBRATION_HISTORY_WORKFLOWS:
                     raise ValueError(f"unsupported workflow: {run.workflow_name}")
                 status = getattr(run.status, "value", str(run.status))
                 if status not in _CALIBRATION_HISTORY_STATUSES:
+                    run = _normalize_imported_raw_capture_run_status(
+                        run,
+                        raw_entry,
+                    )
+                    status = getattr(run.status, "value", str(run.status))
+                if status not in _CALIBRATION_HISTORY_STATUSES:
+                    if status == RunStatus.RUNNING.value:
+                        skipped_runs += 1
+                        continue
                     raise ValueError(f"unsupported status: {status}")
-                if self._repository.get_run(run.run_id) is not None:
-                    analysis_results = _analysis_results_from_history_payload(
+                original_device_id = run.device_id
+                source_run = run
+                if normalized_target_device_id is not None:
+                    run = _retarget_imported_run(
+                        run,
+                        target_device_id=normalized_target_device_id,
+                    )
+                existing_run = self._repository.get_run(run.run_id)
+                if existing_run is not None:
+                    source_analysis_results = _analysis_results_from_history_payload(
                         raw_entry.get("analysis_results")
                     )
-                    if _history_run_already_imported(
+                    analysis_results = source_analysis_results
+                    artifacts = _artifacts_from_history_payload(
+                        raw_entry.get("artifacts")
+                    )
+                    test_sessions = _test_sessions_from_history_payload(
+                        raw_entry.get("test_sessions")
+                    )
+                    source_operation_attempts = (
+                        _operation_attempts_from_history_payload(
+                            raw_entry.get("operation_attempts")
+                        )
+                    )
+                    source_trial_records = _trial_records_from_history_payload(
+                        raw_entry.get("trial_records")
+                    )
+                    operation_attempts = source_operation_attempts
+                    trial_records = source_trial_records
+                    if normalized_target_device_id is not None:
+                        analysis_results = tuple(
+                            _retarget_imported_analysis_result(
+                                result,
+                                target_device_id=normalized_target_device_id,
+                                original_device_id=original_device_id,
+                            )
+                            for result in analysis_results
+                        )
+                        artifacts = tuple(
+                            _retarget_imported_artifact(
+                                artifact,
+                                target_device_id=normalized_target_device_id,
+                                original_device_id=original_device_id,
+                            )
+                            for artifact in artifacts
+                        )
+                        test_sessions = tuple(
+                            _retarget_imported_test_session(
+                                session,
+                                target_device_id=normalized_target_device_id,
+                                original_device_id=original_device_id,
+                            )
+                            for session in test_sessions
+                        )
+                        operation_attempts = tuple(
+                            _retarget_imported_operation_attempt(
+                                attempt,
+                                target_device_id=normalized_target_device_id,
+                                original_device_id=original_device_id,
+                            )
+                            for attempt in operation_attempts
+                        )
+                        trial_records = tuple(
+                            _retarget_imported_trial_record(
+                                trial,
+                                target_device_id=normalized_target_device_id,
+                                original_device_id=original_device_id,
+                            )
+                            for trial in trial_records
+                        )
+                    already_imported = _history_run_already_imported(
                         self._repository,
                         run,
                         analysis_results,
+                    )
+                    if (
+                        not already_imported
+                        and normalized_target_device_id is not None
                     ):
+                        already_imported = _history_run_already_imported(
+                            self._repository,
+                            source_run,
+                            source_analysis_results,
+                        )
+                    if already_imported:
+                        if normalized_target_device_id is not None:
+                            device = _device_record_from_history_payload(
+                                raw_entry.get("device")
+                            )
+                            if device is None:
+                                device = DeviceRecord(
+                                    device_id=run.device_id,
+                                    device_type=DeviceType.MODBUS_RTU.value,
+                                )
+                            device = _retarget_imported_device_record(
+                                device,
+                                target_device_id=normalized_target_device_id,
+                                original_device_id=original_device_id,
+                            )
+                            if self._repository.get_device(device.device_id) is None:
+                                self._repository.save_device(device)
+                            if existing_run.device_id != normalized_target_device_id:
+                                self._repository.save_run(run)
+                                for result in analysis_results:
+                                    self._repository.save_analysis_result(result)
+                                imported_analysis_results += len(analysis_results)
+                            for artifact in artifacts:
+                                self._repository.save_artifact(artifact)
+                            test_sessions = _ensure_import_test_sessions(
+                                test_sessions,
+                                operation_attempts,
+                                trial_records,
+                                run,
+                            )
+                            for session in test_sessions:
+                                self._repository.save_modbus_test_session(session)
+                            for attempt in operation_attempts:
+                                self._repository.save_modbus_operation_attempt(
+                                    attempt
+                                )
+                            for trial in trial_records:
+                                self._repository.save_modbus_trial_record(trial)
+                            retargeted_runs += 1
+                            continue
                         skipped_runs += 1
                         continue
                     original_run_id = run.run_id
@@ -1299,8 +2755,63 @@ class ModbusModuleRuntime:
                     steps = _workflow_steps_from_history_payload(
                         raw_entry.get("workflow_steps")
                     )
+                    test_sessions = _test_sessions_from_history_payload(
+                        raw_entry.get("test_sessions")
+                    )
+                    operation_attempts = _operation_attempts_from_history_payload(
+                        raw_entry.get("operation_attempts")
+                    )
+                    trial_records = _trial_records_from_history_payload(
+                        raw_entry.get("trial_records")
+                    )
+                    if normalized_target_device_id is not None:
+                        steps = tuple(
+                            _retarget_imported_workflow_step(
+                                step,
+                                target_device_id=normalized_target_device_id,
+                                original_device_id=original_device_id,
+                            )
+                            for step in steps
+                        )
+                        artifacts = tuple(
+                            _retarget_imported_artifact(
+                                artifact,
+                                target_device_id=normalized_target_device_id,
+                                original_device_id=original_device_id,
+                            )
+                            for artifact in artifacts
+                        )
+                        test_sessions = tuple(
+                            _retarget_imported_test_session(
+                                session,
+                                target_device_id=normalized_target_device_id,
+                                original_device_id=original_device_id,
+                            )
+                            for session in test_sessions
+                        )
+                        operation_attempts = tuple(
+                            _retarget_imported_operation_attempt(
+                                attempt,
+                                target_device_id=normalized_target_device_id,
+                                original_device_id=original_device_id,
+                            )
+                            for attempt in operation_attempts
+                        )
+                        trial_records = tuple(
+                            _retarget_imported_trial_record(
+                                trial,
+                                target_device_id=normalized_target_device_id,
+                                original_device_id=original_device_id,
+                            )
+                            for trial in trial_records
+                        )
                     step_id_map = _import_step_id_map(
                         steps,
+                        original_run_id=original_run_id,
+                        new_run_id=new_run_id,
+                    )
+                    artifact_id_map = _import_artifact_id_map(
+                        artifacts,
                         original_run_id=original_run_id,
                         new_run_id=new_run_id,
                     )
@@ -1314,15 +2825,47 @@ class ModbusModuleRuntime:
                         )
                         for step in steps
                     )
+                    artifacts = tuple(
+                        _remap_imported_artifact(
+                            artifact,
+                            original_run_id=original_run_id,
+                            new_run_id=new_run_id,
+                            step_id_map=step_id_map,
+                            artifact_id_map=artifact_id_map,
+                            imported_at=imported_at,
+                        )
+                        for artifact in artifacts
+                    )
                     analysis_results = tuple(
                         _remap_imported_analysis_result(
                             result,
                             original_run_id=original_run_id,
                             new_run_id=new_run_id,
                             step_id_map=step_id_map,
+                            artifact_id_map=artifact_id_map,
                             imported_at=imported_at,
                         )
                         for result in analysis_results
+                    )
+                    operation_attempts = tuple(
+                        _remap_imported_operation_attempt(
+                            attempt,
+                            original_run_id=original_run_id,
+                            new_run_id=new_run_id,
+                            artifact_id_map=artifact_id_map,
+                            imported_at=imported_at,
+                        )
+                        for attempt in operation_attempts
+                    )
+                    trial_records = tuple(
+                        _remap_imported_trial_record(
+                            trial,
+                            original_run_id=original_run_id,
+                            new_run_id=new_run_id,
+                            artifact_id_map=artifact_id_map,
+                            imported_at=imported_at,
+                        )
+                        for trial in trial_records
                     )
                     renamed_runs += 1
                 else:
@@ -1332,12 +2875,79 @@ class ModbusModuleRuntime:
                     analysis_results = _analysis_results_from_history_payload(
                         raw_entry.get("analysis_results")
                     )
+                    artifacts = _artifacts_from_history_payload(
+                        raw_entry.get("artifacts")
+                    )
+                    test_sessions = _test_sessions_from_history_payload(
+                        raw_entry.get("test_sessions")
+                    )
+                    operation_attempts = _operation_attempts_from_history_payload(
+                        raw_entry.get("operation_attempts")
+                    )
+                    trial_records = _trial_records_from_history_payload(
+                        raw_entry.get("trial_records")
+                    )
+                    if normalized_target_device_id is not None:
+                        steps = tuple(
+                            _retarget_imported_workflow_step(
+                                step,
+                                target_device_id=normalized_target_device_id,
+                                original_device_id=original_device_id,
+                            )
+                            for step in steps
+                        )
+                        analysis_results = tuple(
+                            _retarget_imported_analysis_result(
+                                result,
+                                target_device_id=normalized_target_device_id,
+                                original_device_id=original_device_id,
+                            )
+                            for result in analysis_results
+                        )
+                        artifacts = tuple(
+                            _retarget_imported_artifact(
+                                artifact,
+                                target_device_id=normalized_target_device_id,
+                                original_device_id=original_device_id,
+                            )
+                            for artifact in artifacts
+                        )
+                        test_sessions = tuple(
+                            _retarget_imported_test_session(
+                                session,
+                                target_device_id=normalized_target_device_id,
+                                original_device_id=original_device_id,
+                            )
+                            for session in test_sessions
+                        )
+                        operation_attempts = tuple(
+                            _retarget_imported_operation_attempt(
+                                attempt,
+                                target_device_id=normalized_target_device_id,
+                                original_device_id=original_device_id,
+                            )
+                            for attempt in operation_attempts
+                        )
+                        trial_records = tuple(
+                            _retarget_imported_trial_record(
+                                trial,
+                                target_device_id=normalized_target_device_id,
+                                original_device_id=original_device_id,
+                            )
+                            for trial in trial_records
+                        )
 
                 device = _device_record_from_history_payload(raw_entry.get("device"))
                 if device is None:
                     device = DeviceRecord(
                         device_id=run.device_id,
                         device_type=DeviceType.MODBUS_RTU.value,
+                    )
+                if normalized_target_device_id is not None:
+                    device = _retarget_imported_device_record(
+                        device,
+                        target_device_id=normalized_target_device_id,
+                        original_device_id=original_device_id,
                     )
                 if self._repository.get_device(device.device_id) is None:
                     self._repository.save_device(device)
@@ -1347,9 +2957,27 @@ class ModbusModuleRuntime:
                     self._repository.save_step(step)
                 imported_workflow_steps += len(steps)
 
+                for artifact in artifacts:
+                    self._repository.save_artifact(artifact)
+
                 for result in analysis_results:
                     self._repository.save_analysis_result(result)
                 imported_analysis_results += len(analysis_results)
+
+                test_sessions = _ensure_import_test_sessions(
+                    test_sessions,
+                    operation_attempts,
+                    trial_records,
+                    run,
+                )
+                for session in test_sessions:
+                    self._repository.save_modbus_test_session(session)
+
+                for attempt in operation_attempts:
+                    self._repository.save_modbus_operation_attempt(attempt)
+
+                for trial in trial_records:
+                    self._repository.save_modbus_trial_record(trial)
                 imported_runs += 1
             except Exception as exc:
                 errors.append(f"entry {index}: {exc}")
@@ -1361,6 +2989,7 @@ class ModbusModuleRuntime:
             renamed_runs=renamed_runs,
             imported_analysis_results=imported_analysis_results,
             imported_workflow_steps=imported_workflow_steps,
+            retargeted_runs=retargeted_runs,
             errors=tuple(errors),
         )
 
@@ -1406,6 +3035,9 @@ class ModbusModuleRuntime:
                 result_type="k_factor_calibration",
                 algorithm_name="simple_flow_segment_k_factor",
                 algorithm_version="0.2",
+                input_artifact_ids=(result.raw_artifact_id,)
+                if result.raw_artifact_id is not None
+                else (),
                 configuration_snapshot={
                     **metadata,
                     "formula": "K1 = K0 / (m2 - m1) * standard_mass",
@@ -1415,6 +3047,21 @@ class ModbusModuleRuntime:
                 pass_fail_decision="passed" if status is RunStatus.PASSED else "failed",
                 created_at=datetime.now(UTC),
             )
+        )
+        self._save_modbus_operation_attempt(
+            attempt_id=(
+                f"{result.run_id}-KFACTOR-APPLY"
+                if result.write_requested
+                else f"{result.run_id}-KFACTOR-CALCULATE"
+            ),
+            operation_type="k_factor_calibration",
+            status=status.value,
+            run_id=result.run_id,
+            started_at=result.flow_started_at,
+            ended_at=result.flow_ended_at,
+            raw_artifact_id=result.raw_artifact_id,
+            summary=metrics,
+            metadata=operation_metadata,
         )
 
     def _save_repeatability_simple_history(
@@ -1426,10 +3073,14 @@ class ModbusModuleRuntime:
     ) -> None:
         identity = self._require_identity()
         metadata = self._operation_metadata_snapshot(operation_metadata)
-        metrics = _repeatability_simple_metrics(result)
+        calculated_at = datetime.now(UTC)
+        metrics = _repeatability_simple_metrics(
+            result,
+            calculated_at=calculated_at,
+        )
         metrics.update(metadata)
-        started_at = result.started_at
-        ended_at = result.ended_at
+        source_started_at = result.started_at
+        source_ended_at = result.ended_at
         self._repository.save_run(
             RunSession(
                 run_id=result.run_id,
@@ -1439,8 +3090,8 @@ class ModbusModuleRuntime:
                 device_id=identity.device_id,
                 operator=self._operator,
                 status=status,
-                started_at=started_at,
-                ended_at=ended_at,
+                started_at=calculated_at,
+                ended_at=calculated_at,
                 configuration_snapshot={
                     **metadata,
                     "mode": result.mode,
@@ -1454,6 +3105,7 @@ class ModbusModuleRuntime:
                     "pre_snapshot_variable_count": len(result.pre_snapshot),
                 },
                 software_version=__version__,
+                notes=result.notes or None,
             )
         )
         step = WorkflowStep(
@@ -1464,14 +3116,16 @@ class ModbusModuleRuntime:
             status=WorkflowStepStatus.PASSED
             if status is RunStatus.PASSED
             else WorkflowStepStatus.FAILED,
-            started_at=started_at,
-            ended_at=ended_at,
+            started_at=calculated_at,
+            ended_at=calculated_at,
             input_configuration={
                 **metadata,
                 "mode": result.mode,
                 "flow_rate_parameter": result.flow_rate_parameter,
                 "flow_acc_parameter": result.flow_acc_parameter,
                 "poll_interval_s": result.poll_interval_s,
+                "source_trial_started_at": source_started_at.isoformat(),
+                "source_trial_ended_at": source_ended_at.isoformat(),
             },
             output_summary={
                 "flow_point_count": result.analysis.summary_metrics.get(
@@ -1495,6 +3149,11 @@ class ModbusModuleRuntime:
                 result_type="manual_error_repeatability",
                 algorithm_name="modbus_simple_mass_total_repeatability",
                 algorithm_version="0.2",
+                input_artifact_ids=tuple(
+                    trial.raw_artifact_id
+                    for trial in result.trials
+                    if trial.raw_artifact_id is not None
+                ),
                 configuration_snapshot={
                     **metadata,
                     "formula": "e = (delta_m - standard_mass) / standard_mass * 100%",
@@ -1511,6 +3170,190 @@ class ModbusModuleRuntime:
                 created_at=datetime.now(UTC),
             )
         )
+        if len(result.analysis.flow_points) == 1:
+            summary_attempt_id = (
+                f"{result.run_id}-REPEATABILITY-"
+                f"{_flow_point_metric_label(result.analysis.flow_points[0].flow_point).upper()}"
+            )
+        else:
+            summary_attempt_id = f"{result.run_id}-REPEATABILITY-SUMMARY"
+        self._save_modbus_operation_attempt(
+            attempt_id=summary_attempt_id,
+            operation_type="manual_error_repeatability",
+            status=status.value,
+            run_id=result.run_id,
+            started_at=calculated_at,
+            ended_at=calculated_at,
+            raw_artifact_id=None,
+            summary=metrics,
+            metadata=operation_metadata,
+            notes=result.notes or None,
+        )
+
+    def _save_repeatability_final_k_history(
+        self,
+        *,
+        run_id: str,
+        started_at: datetime,
+        ended_at: datetime,
+        metrics: dict[str, object],
+        input_artifact_ids: tuple[str, ...],
+        operation_metadata: ModbusOperationMetadata | None = None,
+        status: RunStatus = RunStatus.PASSED,
+        attempt_status: str = "calculated",
+        device_id: str | None = None,
+        report_text: str | None = None,
+        notes: str | None = None,
+    ) -> str | None:
+        resolved_device_id = device_id or self._device_id
+        if not resolved_device_id and self._identity is not None:
+            resolved_device_id = self._identity.device_id
+        if not resolved_device_id:
+            raise ValueError("Device ID is required to save final K history.")
+        if self._repository.get_device(resolved_device_id) is None:
+            self._repository.save_device(
+                DeviceRecord(
+                    device_id=resolved_device_id,
+                    device_type=DeviceType.MODBUS_RTU.value,
+                )
+            )
+        metadata = self._operation_metadata_snapshot(operation_metadata)
+        report_artifact_id = None
+        effective_input_artifact_ids = input_artifact_ids
+        self._repository.save_run(
+            RunSession(
+                run_id=run_id,
+                run_type=RunType.ERROR_ANALYSIS,
+                workflow_name="manual_error_repeatability_final_k",
+                workflow_version="0.3-final-k",
+                device_id=resolved_device_id,
+                operator=self._operator,
+                status=status,
+                started_at=started_at,
+                ended_at=ended_at,
+                configuration_snapshot={
+                    **metadata,
+                    "flow_rate_parameter": metrics.get("flow_rate_parameter"),
+                    "flow_acc_parameter": metrics.get("flow_acc_parameter"),
+                    "k_factor_parameter": metrics.get("k_factor_parameter"),
+                    "original_k_factor": metrics.get("original_k_factor"),
+                    "selected_flow_point_count": metrics.get(
+                        "selected_flow_point_count"
+                    ),
+                    "selected_trial_count": metrics.get("selected_trial_count"),
+                    "write_requested": metrics.get("write_requested"),
+                    "write_status": metrics.get("write_status"),
+                    "write_verified": metrics.get("write_verified"),
+                    "test_session_id": self._test_session_id,
+                },
+                software_version=__version__,
+                notes=notes,
+            )
+        )
+        if report_text is not None:
+            report_artifact_id = self._save_text_report_artifact(
+                run_id=run_id,
+                operation_type="manual_error_repeatability_final_k",
+                report_text=report_text,
+                created_at=ended_at,
+            )
+            if report_artifact_id is not None:
+                effective_input_artifact_ids = (
+                    *effective_input_artifact_ids,
+                    report_artifact_id,
+                )
+                metrics = {
+                    **metrics,
+                    "report_artifact_id": report_artifact_id,
+                }
+        step = WorkflowStep(
+            step_id=f"{run_id}-FINAL-K-STEP",
+            run_id=run_id,
+            name="Calculate final K from selected repeatability trials",
+            step_type=WorkflowStepType.ANALYSIS,
+            status=WorkflowStepStatus.PASSED
+            if status is RunStatus.PASSED
+            else WorkflowStepStatus.FAILED,
+            started_at=started_at,
+            ended_at=ended_at,
+            input_configuration={
+                **metadata,
+                "formula_average_error": "(max(measurement_errors) + min(measurement_errors)) / 2",
+                "formula_adjusted_error": "measurement_error - average_error",
+                "formula_intermediate_k": "original_k / (1 + adjusted_error_percent / 100)",
+                "formula_new_k": "(max(intermediate_k) + min(intermediate_k)) / 2",
+            },
+            output_summary={
+                "average_error": metrics.get("average_error"),
+                "new_k_factor": metrics.get("new_k_factor"),
+                "delta_k_factor": metrics.get("delta_k_factor"),
+                "selected_trial_count": metrics.get("selected_trial_count"),
+                "write_status": metrics.get("write_status"),
+                "write_verified": metrics.get("write_verified"),
+                "readback_k_factor": metrics.get("readback_k_factor"),
+            },
+        )
+        self._repository.save_step(step)
+        self._repository.save_analysis_result(
+            AnalysisResultRecord(
+                result_id=f"{run_id}-FINAL-K",
+                run_id=run_id,
+                step_id=step.step_id,
+                result_type="manual_error_repeatability_final_k",
+                algorithm_name="modbus_repeatability_final_k",
+                algorithm_version="0.3",
+                input_artifact_ids=effective_input_artifact_ids,
+                configuration_snapshot=step.input_configuration,
+                summary_metrics=metrics,
+                pass_fail_decision=(
+                    "calculated"
+                    if not metrics.get("write_requested")
+                    else (
+                        "write_verified"
+                        if metrics.get("write_verified")
+                        else "write_failed"
+                    )
+                ),
+                created_at=datetime.now(UTC),
+            )
+        )
+        if self._identity is not None and self._identity.device_id == resolved_device_id:
+            self._save_modbus_operation_attempt(
+                attempt_id=f"{run_id}-FINAL-K",
+                operation_type="manual_error_repeatability_final_k",
+                status=attempt_status,
+                run_id=run_id,
+                started_at=started_at,
+                ended_at=ended_at,
+                raw_artifact_id=None,
+                summary=metrics,
+                metadata=operation_metadata,
+                notes=notes,
+            )
+        else:
+            device_metadata = {
+                "device_id": resolved_device_id,
+                "device_type": DeviceType.MODBUS_RTU.value,
+                **metadata,
+            }
+            self._repository.save_modbus_operation_attempt(
+                ModbusOperationAttemptRecord(
+                    attempt_id=f"{run_id}-FINAL-K",
+                    session_id=None,
+                    run_id=run_id,
+                    device_id=resolved_device_id,
+                    operation_type="manual_error_repeatability_final_k",
+                    status=attempt_status,
+                    started_at=started_at,
+                    ended_at=ended_at,
+                    operator=self._operator,
+                    device_metadata=device_metadata,
+                    raw_artifact_id=None,
+                    summary={**metrics, **device_metadata},
+                    notes=notes,
+                )
+            )
+        return report_artifact_id
 
     def _require_device(self) -> FlowmeterDevice:
         if self._device is None:
@@ -1521,6 +3364,358 @@ class ModbusModuleRuntime:
         if self._identity is None:
             raise ConnectionError("Connect the Modbus module first.")
         return self._identity
+
+    def _ensure_modbus_device_profile(
+        self,
+        settings: ModbusConnectionSettings,
+    ) -> None:
+        identity = self._require_identity()
+        metadata = self._operation_metadata_snapshot()
+        existing = self._repository.get_modbus_device_profile(identity.device_id)
+        if existing is None:
+            raise RuntimeError(
+                f"Modbus device profile no longer exists: {identity.device_id}"
+            )
+        self._profile_id = existing.profile_id
+        self._repository.save_modbus_device_profile(
+            ModbusDeviceProfileRecord(
+                profile_id=self._profile_id,
+                device_id=identity.device_id,
+                display_name=existing.display_name or identity.device_id,
+                device_model=metadata.get("device_model") or None,
+                tube_model=metadata.get("tube_model") or None,
+                transmitter_model=metadata.get("transmitter_model") or None,
+                connection_settings=_connection_settings_to_payload(settings),
+                register_map=_register_map_payload(self._register_map),
+                notes=existing.notes if existing is not None else None,
+                created_at=existing.created_at if existing is not None else None,
+            )
+        )
+
+    def _start_modbus_test_session(self) -> str:
+        identity = self._require_identity()
+        if self._test_session_id is None:
+            session_id = f"MODBUS-SESSION-{datetime.now(UTC):%Y%m%d%H%M%S}-{uuid4().hex[:8]}"
+            self._test_session_id = session_id
+            self._repository.save_modbus_test_session(
+                ModbusTestSessionRecord(
+                    session_id=session_id,
+                    device_id=identity.device_id,
+                    profile_id=self._profile_id,
+                    operator=self._operator,
+                    status="running",
+                    started_at=datetime.now(UTC),
+                    device_metadata=self._device_metadata_snapshot(),
+                    register_map_snapshot=self._register_map_snapshot(),
+                )
+            )
+        return self._test_session_id
+
+    def _finish_modbus_test_session(self, *, status: str) -> None:
+        if self._test_session_id is None or self._device_id is None:
+            return
+        sessions = self._repository.list_modbus_test_sessions(
+            device_id=self._device_id,
+        )
+        session = next(
+            (
+                item
+                for item in sessions
+                if item.session_id == self._test_session_id
+            ),
+            None,
+        )
+        if session is None:
+            return
+        self._repository.save_modbus_test_session(
+            replace(session, status=status, ended_at=datetime.now(UTC))
+        )
+
+    def _device_metadata_snapshot(
+        self,
+        metadata: ModbusOperationMetadata | None = None,
+    ) -> dict[str, str]:
+        identity = self._require_identity()
+        snapshot = self._operation_metadata_snapshot(metadata)
+        return {
+            "device_id": identity.device_id,
+            "device_type": identity.device_type.value,
+            "protocol_address": identity.protocol_address or "",
+            **snapshot,
+        }
+
+    def _register_map_snapshot(self) -> dict[str, object]:
+        return {
+            "name": self._register_map.name,
+            "version": self._register_map.version,
+            "registers": [
+                {
+                    "name": register.name,
+                    "kind": register.kind.value,
+                    "address": register.address,
+                    "word_count": register.word_count,
+                    "data_type": register.data_type.value,
+                    "scale": register.scale,
+                    "unit": register.unit,
+                    "writable": register.writable,
+                    "minimum": register.minimum,
+                    "maximum": register.maximum,
+                    "byte_order": register.byte_order.value,
+                    "word_order": register.word_order.value,
+                }
+                for register in self._register_map.registers
+            ],
+        }
+
+    def _save_modbus_operation_attempt(
+        self,
+        *,
+        attempt_id: str,
+        operation_type: str,
+        status: str,
+        run_id: str | None,
+        started_at: datetime | None,
+        ended_at: datetime | None,
+        raw_artifact_id: str | None,
+        summary: dict[str, Any],
+        metadata: ModbusOperationMetadata | None = None,
+        notes: str | None = None,
+    ) -> None:
+        identity = self._require_identity()
+        session_id = self._start_modbus_test_session()
+        self._repository.save_modbus_operation_attempt(
+            ModbusOperationAttemptRecord(
+                attempt_id=attempt_id,
+                session_id=session_id,
+                run_id=run_id,
+                device_id=identity.device_id,
+                operation_type=operation_type,
+                status=status,
+                started_at=started_at,
+                ended_at=ended_at,
+                operator=self._operator,
+                device_metadata=self._device_metadata_snapshot(metadata),
+                register_map_snapshot=self._register_map_snapshot(),
+                raw_artifact_id=raw_artifact_id,
+                summary=summary,
+                notes=notes,
+            )
+        )
+        self._complete_raw_capture_run(
+            run_id=run_id,
+            status=status,
+            ended_at=ended_at,
+            summary=summary,
+        )
+
+    def _save_modbus_trial_record(
+        self,
+        trial: ModbusRepeatabilitySimpleTrialResult,
+    ) -> None:
+        identity = self._require_identity()
+        calculated_at = datetime.now(UTC)
+        attempt_id = (
+            f"{trial.run_id}-TRIAL-{trial.trial_index:03d}"
+            f"-{uuid4().hex[:6]}"
+        )
+        self._save_modbus_operation_attempt(
+            attempt_id=attempt_id,
+            operation_type="manual_error_repeatability_trial",
+            status=trial.trial_status,
+            run_id=trial.run_id,
+            started_at=calculated_at,
+            ended_at=calculated_at,
+            raw_artifact_id=trial.raw_artifact_id,
+            summary={
+                "flow_point": trial.flow_point,
+                "trial_index": trial.trial_index,
+                "k_factor_parameter": trial.k_factor_parameter,
+                "original_k_factor": trial.original_k_factor,
+                "mass_acc_before": trial.mass_acc_before,
+                "mass_acc_after": trial.mass_acc_after,
+                "measured_mass_delta": trial.measured_mass_delta,
+                "standard_mass": trial.standard_mass,
+                "percent_error": trial.percent_error,
+                "mean_flow": trial.mean_flow,
+                "instant_flow": trial.instant_flow,
+                "duration_s": trial.duration_s,
+                "flow_started_at": trial.flow_started_at.isoformat(),
+                "flow_instant_at": trial.flow_instant_at.isoformat(),
+                "flow_ended_at": trial.flow_ended_at.isoformat(),
+                "started_at": calculated_at.isoformat(),
+                "ended_at": calculated_at.isoformat(),
+                "poll_interval_s": trial.poll_interval_s,
+                "trial_status": trial.trial_status,
+                "raw_artifact_id": trial.raw_artifact_id,
+                "test_session_id": trial.test_session_id,
+                "notes": trial.notes,
+                "pre_snapshot": trial.pre_snapshot,
+                "pre_snapshot_captured_at": (
+                    trial.pre_snapshot_captured_at.isoformat()
+                    if trial.pre_snapshot_captured_at is not None
+                    else None
+                ),
+            },
+            notes=trial.notes,
+        )
+        self._repository.save_modbus_trial_record(
+            ModbusTrialRecord(
+                trial_id=(
+                    f"{trial.run_id}-FLOW-{_flow_point_metric_label(trial.flow_point)}"
+                    f"-TRIAL-{trial.trial_index:03d}-{uuid4().hex[:6]}"
+                ),
+                session_id=trial.test_session_id or self._test_session_id,
+                attempt_id=attempt_id,
+                run_id=trial.run_id,
+                device_id=identity.device_id,
+                flow_point=trial.flow_point,
+                trial_index=trial.trial_index,
+                trial_status=trial.trial_status,
+                k_factor_parameter=trial.k_factor_parameter,
+                original_k_factor=trial.original_k_factor,
+                mass_acc_before=trial.mass_acc_before,
+                mass_acc_after=trial.mass_acc_after,
+                measured_mass_delta=trial.measured_mass_delta,
+                standard_mass=trial.standard_mass,
+                percent_error=trial.percent_error,
+                mean_flow=trial.mean_flow,
+                instant_flow=trial.instant_flow,
+                flow_started_at=trial.flow_started_at,
+                flow_instant_at=trial.flow_instant_at,
+                flow_ended_at=trial.flow_ended_at,
+                raw_artifact_id=trial.raw_artifact_id,
+                device_metadata=self._device_metadata_snapshot(),
+                notes=trial.notes,
+            )
+        )
+
+    def _save_raw_curve_artifact(
+        self,
+        *,
+        run_id: str,
+        operation_type: str,
+        points: tuple[dict[str, object], ...],
+        created_at: datetime | None = None,
+    ) -> str | None:
+        if not points:
+            return None
+        self._ensure_raw_artifact_run(run_id, operation_type, created_at)
+        artifact_id = f"{run_id}-{operation_type.upper()}-RAW-{uuid4().hex[:8]}"
+        created = created_at or datetime.now(UTC)
+        artifact = self._artifact_store.write_artifact(
+            run_id=run_id,
+            artifact_id=artifact_id,
+            artifact_type=ArtifactType.RAW,
+            file_name=f"{operation_type}_raw_curve.csv",
+            content=_raw_curve_csv(points),
+            created_at=created,
+            file_format="csv",
+        )
+        artifact = replace(
+            artifact,
+            metadata={
+                "source": "modbus_module",
+                "operation_type": operation_type,
+                "curve_type": "modbus_polling",
+                "point_count": len(points),
+            },
+        )
+        self._repository.save_artifact(artifact)
+        return artifact.artifact_id
+
+    def _save_text_report_artifact(
+        self,
+        *,
+        run_id: str,
+        operation_type: str,
+        report_text: str,
+        created_at: datetime | None = None,
+    ) -> str | None:
+        if not report_text:
+            return None
+        created = created_at or datetime.now(UTC)
+        artifact_id = f"{run_id}-{operation_type.upper()}-REPORT-{uuid4().hex[:8]}"
+        artifact = self._artifact_store.write_artifact(
+            run_id=run_id,
+            artifact_id=artifact_id,
+            artifact_type=ArtifactType.REPORT,
+            file_name=f"{operation_type}_report.txt",
+            content=report_text.encode("utf-8"),
+            created_at=created,
+            file_format="txt",
+        )
+        artifact = replace(
+            artifact,
+            metadata={
+                "source": "modbus_module",
+                "operation_type": operation_type,
+                "report_type": "device_analysis_repeatability_final_k",
+            },
+        )
+        self._repository.save_artifact(artifact)
+        return artifact.artifact_id
+
+    def _ensure_raw_artifact_run(
+        self,
+        run_id: str,
+        operation_type: str,
+        started_at: datetime | None,
+    ) -> None:
+        if self._repository.get_run(run_id) is not None:
+            return
+        identity = self._require_identity()
+        run_type = (
+            RunType.ERROR_ANALYSIS
+            if operation_type.startswith("manual_error_repeatability")
+            else RunType.CALIBRATION
+        )
+        self._repository.save_run(
+            RunSession(
+                run_id=run_id,
+                run_type=run_type,
+                workflow_name=operation_type,
+                workflow_version="0.2-raw-capture",
+                device_id=identity.device_id,
+                operator=self._operator,
+                status=RunStatus.RUNNING,
+                started_at=started_at or datetime.now(UTC),
+                configuration_snapshot={
+                    **self._device_metadata_snapshot(),
+                    "test_session_id": self._test_session_id,
+                    "register_map": self._register_map_snapshot(),
+                    "raw_capture_only": True,
+                },
+                software_version=__version__,
+            )
+        )
+
+    def _complete_raw_capture_run(
+        self,
+        *,
+        run_id: str | None,
+        status: str,
+        ended_at: datetime | None,
+        summary: dict[str, Any],
+    ) -> None:
+        if run_id is None:
+            return
+        run = self._repository.get_run(run_id)
+        if run is None or not run.configuration_snapshot.get("raw_capture_only"):
+            return
+        run_status = _raw_capture_run_status_from_attempt_status(status)
+        configuration = dict(run.configuration_snapshot)
+        configuration["raw_capture_completed"] = True
+        configuration["raw_capture_attempt_status"] = status
+        if "raw_artifact_id" in summary:
+            configuration["raw_artifact_id"] = summary["raw_artifact_id"]
+        self._repository.save_run(
+            replace(
+                run,
+                status=run_status,
+                ended_at=ended_at or run.ended_at or datetime.now(UTC),
+                configuration_snapshot=configuration,
+            )
+        )
 
     def _next_run_id(self) -> str:
         self._sequence += 1
@@ -1626,6 +3821,103 @@ class _SelectedParameterDevice(FlowmeterDevice):
 
     def communication_diagnostics(self) -> CommunicationDiagnostic:
         return self._device.communication_diagnostics()
+
+
+class _RawCurveRecordingDevice(FlowmeterDevice):
+    """Records Modbus logical-variable reads made during one operation."""
+
+    def __init__(
+        self,
+        device: FlowmeterDevice,
+        *,
+        register_map: ModbusRegisterMap,
+        default_phase: str,
+    ) -> None:
+        self._device = device
+        self._register_map = register_map
+        self._phase = default_phase
+        self.points: list[dict[str, object]] = []
+
+    def set_phase(self, phase: str) -> None:
+        self._phase = phase
+
+    def connect(self) -> None:
+        self._device.connect()
+
+    def disconnect(self) -> None:
+        self._device.disconnect()
+
+    def read_identity(self) -> DeviceIdentity:
+        return self._device.read_identity()
+
+    def read_health(self) -> DeviceHealth:
+        return self._device.read_health()
+
+    def read_measurement(self) -> Measurement:
+        return self._device.read_measurement()
+
+    def read_configuration(self) -> tuple[ConfigurationParameter, ...]:
+        parameters = self._device.read_configuration()
+        self._record_parameters(parameters)
+        return parameters
+
+    def read_configuration_parameters(
+        self,
+        names: tuple[str, ...],
+        *,
+        merge_adjacent: bool = False,
+    ) -> tuple[ConfigurationParameter, ...]:
+        reader = getattr(self._device, "read_configuration_parameters", None)
+        if callable(reader):
+            try:
+                parameters = reader(names, merge_adjacent=merge_adjacent)
+            except TypeError:
+                parameters = reader(names)
+        else:
+            allowed = set(names)
+            parameters = tuple(
+                parameter
+                for parameter in self._device.read_configuration()
+                if parameter.name in allowed
+            )
+        self._record_parameters(parameters)
+        return parameters
+
+    def write_configuration(
+        self,
+        request: ParameterWriteRequest,
+    ) -> ParameterWriteResult:
+        return self._device.write_configuration(request)
+
+    def communication_diagnostics(self) -> CommunicationDiagnostic:
+        return self._device.communication_diagnostics()
+
+    def _record_parameters(
+        self,
+        parameters: tuple[ConfigurationParameter, ...],
+    ) -> None:
+        captured_at = datetime.now(UTC).isoformat()
+        for parameter in parameters:
+            try:
+                register = self._register_map.by_name(parameter.name)
+                register_metadata: dict[str, object] = {
+                    "register_kind": register.kind.value,
+                    "address": register.address,
+                    "word_count": register.word_count,
+                    "data_type": register.data_type.value,
+                }
+            except KeyError:
+                register_metadata = dict(parameter.metadata)
+            self.points.append(
+                {
+                    "captured_at": captured_at,
+                    "phase": self._phase,
+                    "variable_name": parameter.name,
+                    "value": _json_metric_value(parameter.value),
+                    "unit": parameter.unit or "",
+                    **register_metadata,
+                }
+            )
 
 
 class _NoPreReadWriteDevice(FlowmeterDevice):
@@ -1874,6 +4166,10 @@ def _k_factor_simple_metrics(result: ModbusKFactorSimpleResult) -> dict[str, obj
         "write_verified": result.write_verified,
         "history_saved": result.history_saved,
     }
+    if result.raw_artifact_id is not None:
+        metrics["raw_artifact_id"] = result.raw_artifact_id
+    if result.test_session_id is not None:
+        metrics["test_session_id"] = result.test_session_id
     if result.readback_k_factor is not None:
         metrics["readback_k_factor"] = result.readback_k_factor
     if result.audit_id:
@@ -1887,7 +4183,10 @@ def _k_factor_simple_metrics(result: ModbusKFactorSimpleResult) -> dict[str, obj
 
 def _repeatability_simple_metrics(
     result: ModbusRepeatabilitySimpleResult,
+    *,
+    calculated_at: datetime | None = None,
 ) -> dict[str, object]:
+    record_started_at = calculated_at or datetime.now(UTC)
     metrics: dict[str, object] = {
         "mode": result.mode,
         "flow_rate_parameter": result.flow_rate_parameter,
@@ -1895,13 +4194,17 @@ def _repeatability_simple_metrics(
         "poll_interval_s": result.poll_interval_s,
         "expected_trials_per_point": result.expected_trials_per_point,
         "history_saved": result.history_saved,
-        "started_at": result.started_at.isoformat(),
-        "ended_at": result.ended_at.isoformat(),
+        "started_at": record_started_at.isoformat(),
+        "ended_at": record_started_at.isoformat(),
+        "source_trial_started_at": result.started_at.isoformat(),
+        "source_trial_ended_at": result.ended_at.isoformat(),
         **result.analysis.summary_metrics,
         "trials": [
             {
                 "flow_point": trial.flow_point,
                 "trial_index": trial.trial_index,
+                "k_factor_parameter": trial.k_factor_parameter,
+                "original_k_factor": trial.original_k_factor,
                 "mass_acc_before": trial.mass_acc_before,
                 "mass_acc_after": trial.mass_acc_after,
                 "measured_mass_delta": trial.measured_mass_delta,
@@ -1910,10 +4213,14 @@ def _repeatability_simple_metrics(
                 "mean_flow": trial.mean_flow,
                 "instant_flow": trial.instant_flow,
                 "flow_rate_source": trial.flow_rate_source,
+                "trial_status": trial.trial_status,
+                "raw_artifact_id": trial.raw_artifact_id,
+                "test_session_id": trial.test_session_id,
                 "duration_s": trial.duration_s,
                 "flow_started_at": trial.flow_started_at.isoformat(),
                 "flow_instant_at": trial.flow_instant_at.isoformat(),
                 "flow_ended_at": trial.flow_ended_at.isoformat(),
+                "notes": trial.notes,
             }
             for trial in result.trials
         ],
@@ -1952,6 +4259,39 @@ def _flow_point_metric_label(flow_point: float) -> str:
     return "flow_point_" + raw.replace(".", "_")
 
 
+def _datetime_from_metric(value: object) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str) and value:
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=UTC)
+        return parsed
+    return datetime.now(UTC)
+
+
+def _final_k_artifact_ids(metrics: dict[str, object]) -> tuple[str, ...]:
+    values: list[str] = []
+    trials = metrics.get("trials")
+    if isinstance(trials, list):
+        for trial in trials:
+            if not isinstance(trial, dict):
+                continue
+            artifact_id = trial.get("raw_artifact_id")
+            if artifact_id:
+                values.append(str(artifact_id))
+    if not values:
+        flow_points = metrics.get("flow_points")
+        if isinstance(flow_points, list):
+            for flow_point in flow_points:
+                if not isinstance(flow_point, dict):
+                    continue
+                artifact_ids = flow_point.get("raw_artifact_ids")
+                if isinstance(artifact_ids, list):
+                    values.extend(str(value) for value in artifact_ids if value)
+    return tuple(dict.fromkeys(values))
+
+
 def _sample_stddev(values: tuple[float, ...]) -> float:
     if len(values) < 2:
         return 0.0
@@ -1960,10 +4300,388 @@ def _sample_stddev(values: tuple[float, ...]) -> float:
     return sqrt(variance)
 
 
+def _flow_summary_from_trial_records(
+    flow_point: float,
+    trials: tuple[ModbusTrialRecord, ...],
+) -> ModbusRepeatabilityFlowSummary:
+    errors = tuple(
+        float(trial.percent_error)
+        for trial in trials
+        if trial.percent_error is not None
+    )
+    if not errors:
+        return ModbusRepeatabilityFlowSummary(
+            flow_point=flow_point,
+            trial_count=len(trials),
+            mean_percent_error=0.0,
+            max_abs_percent_error=0.0,
+            repeatability_stddev_percent=0.0,
+            trial_errors=(),
+        )
+    return ModbusRepeatabilityFlowSummary(
+        flow_point=flow_point,
+        trial_count=len(errors),
+        mean_percent_error=sum(errors) / len(errors),
+        max_abs_percent_error=max(abs(error) for error in errors),
+        repeatability_stddev_percent=_sample_stddev(errors),
+        trial_errors=errors,
+    )
+
+
+def _latest_record_metrics(
+    records: tuple[ModbusCalibrationHistoryEntry, ...],
+    operation: str,
+) -> dict[str, object] | None:
+    matches = [record for record in records if record.operation == operation]
+    if not matches:
+        return None
+    latest = max(
+        matches,
+        key=lambda record: (
+            record.started_at or datetime.min.replace(tzinfo=UTC),
+            record.run_id,
+        ),
+    )
+    return {
+        "run_id": latest.run_id,
+        "operation": latest.operation,
+        "status": latest.status,
+        "started_at": latest.started_at.isoformat()
+        if latest.started_at is not None
+        else None,
+        **latest.metrics,
+    }
+
+
+def _device_analysis_notes(
+    *,
+    records: tuple[ModbusCalibrationHistoryEntry, ...],
+    trials: tuple[ModbusTrialRecord, ...],
+    accepted_trials: tuple[ModbusTrialRecord, ...],
+    flow_summaries: tuple[ModbusRepeatabilityFlowSummary, ...],
+) -> tuple[str, ...]:
+    notes: list[str] = []
+    if not records:
+        notes.append("No test records found for this device ID.")
+    if trials and not accepted_trials:
+        notes.append("Trials exist, but none are currently marked accepted.")
+    if accepted_trials and len(flow_summaries) < 3:
+        notes.append(
+            "Accepted repeatability data covers fewer than three flow points."
+        )
+    for summary in flow_summaries:
+        if summary.trial_count < 3:
+            notes.append(
+                f"Flow {summary.flow_point:g} has fewer than three accepted trials."
+            )
+    if not any(
+        record.operation == "manual_error_repeatability_final_k"
+        for record in records
+    ):
+        notes.append("No final K preview record found for this device yet.")
+    return tuple(notes)
+
+
+def _history_summary_pre_snapshot(summary: dict[str, Any]) -> dict[str, object]:
+    value = summary.get("pre_snapshot")
+    if isinstance(value, dict):
+        return dict(value)
+    return {}
+
+
+def _history_trial_original_k_factor(
+    record: ModbusTrialRecord,
+    summary: dict[str, Any],
+) -> float:
+    if record.original_k_factor is not None:
+        return float(record.original_k_factor)
+    value = summary.get("original_k_factor")
+    if value is not None:
+        return float(value)
+    pre_snapshot = _history_summary_pre_snapshot(summary)
+    value = pre_snapshot.get("original_k_factor")
+    if value is not None:
+        return float(value)
+    value = pre_snapshot.get("k_factor")
+    if value is not None:
+        return float(value)
+    return 0.0
+
+
+def _ensure_selected_history_trials_have_consistent_snapshot(
+    history_trials: tuple[ModbusRepeatabilityHistoryTrial, ...],
+    *,
+    variable_names: tuple[str, ...],
+) -> None:
+    if not history_trials:
+        raise ValueError("No trials selected.")
+    expected_k = history_trials[0].trial.original_k_factor
+    mismatches: list[str] = []
+    for trial in history_trials:
+        if trial.trial.original_k_factor != expected_k:
+            mismatches.append(
+                "old K mismatch: "
+                f"trial {trial.trial.flow_point:g}/#{trial.trial.trial_index} "
+                f"has {_format_history_value(trial.trial.original_k_factor)}, "
+                f"expected {_format_history_value(expected_k)}"
+            )
+    for variable_name in variable_names:
+        expected_missing = variable_name not in history_trials[0].pre_snapshot
+        expected = history_trials[0].pre_snapshot.get(variable_name)
+        for trial in history_trials:
+            if variable_name not in trial.pre_snapshot:
+                mismatches.append(
+                    f"{variable_name} missing: "
+                    f"trial {trial.trial.flow_point:g}/#{trial.trial.trial_index}"
+                )
+                continue
+            value = trial.pre_snapshot.get(variable_name)
+            if expected_missing:
+                mismatches.append(
+                    f"{variable_name} mismatch: "
+                    f"trial {trial.trial.flow_point:g}/#{trial.trial.trial_index} "
+                    f"has {_format_history_value(value)}, "
+                    "expected a captured value on all selected trials"
+                )
+            elif value != expected:
+                mismatches.append(
+                    f"{variable_name} mismatch: "
+                    f"trial {trial.trial.flow_point:g}/#{trial.trial.trial_index} "
+                    f"has {_format_history_value(value)}, "
+                    f"expected {_format_history_value(expected)}"
+                )
+    if mismatches:
+        raise ValueError(
+            "Selected trials do not share the same pre-calibration values:\n"
+            + "\n".join(mismatches)
+        )
+
+
+def _device_analysis_repeatability_report_text(
+    *,
+    metrics: dict[str, object],
+    selected_trials_by_flow: dict[
+        float,
+        tuple[ModbusRepeatabilityHistoryTrial, ...],
+    ],
+    comparison_variable_names: tuple[str, ...],
+) -> str:
+    history_trials = tuple(
+        history_trial
+        for trials in selected_trials_by_flow.values()
+        for history_trial in trials
+    )
+    snapshot = history_trials[0].pre_snapshot if history_trials else {}
+    lines = [
+        "Selected Trial Final K Report",
+        "",
+        "Pre-Calibration Consistency Values:",
+        f"old_k: {_format_k_value(metrics.get('original_k_factor'))}",
+    ]
+    for variable_name in comparison_variable_names:
+        lines.append(
+            f"{variable_name}: {_format_history_value(snapshot.get(variable_name))}"
+        )
+    lines.extend(
+        [
+            "",
+            "Selected Trials:",
+            "flow_point\ttrial\tstarted_at\terror_percent\tstandard_mass\tmeasured_delta\tv1\tv_mean\told_k\tcompare_values",
+        ]
+    )
+    for flow_point in sorted(selected_trials_by_flow):
+        trials = selected_trials_by_flow[flow_point]
+        for history_trial in trials:
+            trial = history_trial.trial
+            compare_values = "; ".join(
+                f"{variable_name}={_format_history_value(history_trial.pre_snapshot.get(variable_name))}"
+                for variable_name in comparison_variable_names
+            )
+            lines.append(
+                "\t".join(
+                    (
+                        _format_history_value(flow_point),
+                        str(trial.trial_index),
+                        trial.flow_started_at.isoformat(),
+                        _format_history_value(trial.percent_error),
+                        _format_history_value(trial.standard_mass),
+                        _format_history_value(trial.measured_mass_delta),
+                        _format_history_value(trial.instant_flow),
+                        _format_history_value(trial.mean_flow),
+                        _format_k_value(trial.original_k_factor),
+                        compare_values,
+                    )
+                )
+            )
+    flow_rows = metrics.get("flow_points")
+    if isinstance(flow_rows, list):
+        lines.append("")
+        lines.append("Per-Flow Calculations:")
+        lines.append(
+            "flow_point\ttrial_indexes\tmeasurement_error_percent\trepeatability_stddev_percent\tadjusted_error_percent\tintermediate_k"
+        )
+        for row in flow_rows:
+            if not isinstance(row, dict):
+                continue
+            trial_indexes = row.get("trial_indexes")
+            if isinstance(trial_indexes, list):
+                trial_indexes_text = ",".join(str(value) for value in trial_indexes)
+            else:
+                trial_indexes_text = _format_history_value(trial_indexes)
+            lines.append(
+                "\t".join(
+                    (
+                        _format_history_value(row.get("flow_point")),
+                        trial_indexes_text,
+                        _format_history_value(row.get("measurement_error_percent")),
+                        _format_history_value(row.get("repeatability_stddev_percent")),
+                        _format_history_value(row.get("adjusted_error_percent")),
+                        _format_k_value(row.get("intermediate_k_factor")),
+                    )
+                )
+            )
+    lines.extend(
+        [
+            "",
+            "Final K Calculation:",
+            f"average_error_percent: {_format_history_value(metrics.get('average_error'))}",
+            f"old_k_factor: {_format_k_value(metrics.get('original_k_factor'))}",
+            f"new_k_factor: {_format_k_value(metrics.get('new_k_factor'))}",
+            f"delta_k_factor: {_format_k_value(metrics.get('delta_k_factor'))}",
+            f"selected_flow_point_count: {_format_history_value(metrics.get('selected_flow_point_count'))}",
+            f"selected_trial_count: {_format_history_value(metrics.get('selected_trial_count'))}",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _format_history_value(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float):
+        return f"{value:.12g}"
+    return str(value)
+
+
+def _format_k_value(value: object) -> str:
+    if value is None:
+        return ""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    text = f"{number:.12f}"
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _emit_status(
+    status_callback: Callable[[str], None] | None,
+    message: str,
+) -> None:
+    if status_callback is None:
+        return
+    try:
+        status_callback(message)
+    except Exception:
+        return
+
+
 def _json_metric_value(value: object) -> object:
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
     return str(value)
+
+
+def _raw_curve_csv(points: tuple[dict[str, object], ...]) -> bytes:
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(
+        [
+            "captured_at",
+            "phase",
+            "variable_name",
+            "value",
+            "unit",
+            "register_kind",
+            "address",
+            "word_count",
+            "data_type",
+        ]
+    )
+    for point in points:
+        writer.writerow(
+            [
+                point.get("captured_at", ""),
+                point.get("phase", ""),
+                point.get("variable_name", ""),
+                point.get("value", ""),
+                point.get("unit", ""),
+                point.get("register_kind", ""),
+                point.get("address", ""),
+                point.get("word_count", ""),
+                point.get("data_type", ""),
+            ]
+        )
+    return buffer.getvalue().encode("utf-8")
+
+
+def _zero_calibration_raw_points(
+    record: ZeroCalibrationRecord,
+    pre_snapshot: dict[str, object],
+) -> tuple[dict[str, object], ...]:
+    points: list[dict[str, object]] = []
+    for variable_name, value in pre_snapshot.items():
+        points.append(
+            {
+                "captured_at": record.before.captured_at.isoformat(),
+                "phase": "pre_snapshot",
+                "variable_name": variable_name,
+                "value": value,
+                "unit": "",
+            }
+        )
+    points.extend(
+        [
+            {
+                "captured_at": record.before.captured_at.isoformat(),
+                "phase": "before_zero",
+                "variable_name": "zero_offset",
+                "value": record.before.zero_offset,
+                "unit": "",
+            },
+            {
+                "captured_at": record.before.captured_at.isoformat(),
+                "phase": "before_zero",
+                "variable_name": "delta_t",
+                "value": record.before.delta_t,
+                "unit": "",
+            },
+            {
+                "captured_at": record.after.captured_at.isoformat(),
+                "phase": "after_zero",
+                "variable_name": "zero_offset",
+                "value": record.after.zero_offset,
+                "unit": "",
+            },
+            {
+                "captured_at": record.after.captured_at.isoformat(),
+                "phase": "after_zero",
+                "variable_name": "delta_t",
+                "value": record.after.delta_t,
+                "unit": "",
+            },
+            {
+                "captured_at": record.after.captured_at.isoformat(),
+                "phase": "completion",
+                "variable_name": record.control_parameter,
+                "value": record.completed,
+                "unit": "",
+            },
+        ]
+    )
+    return tuple(points)
 
 
 def _operation_metadata_from_configuration(
@@ -1978,6 +4696,81 @@ def _operation_metadata_from_configuration(
         )
         if (value := configuration.get(key)) not in (None, "")
     }
+
+
+def _metadata_filter_matches(
+    metadata: dict[str, object],
+    *,
+    device_model: str | None = None,
+    tube_model: str | None = None,
+    transmitter_model: str | None = None,
+) -> bool:
+    expected = {
+        "device_model": device_model,
+        "tube_model": tube_model,
+        "transmitter_model": transmitter_model,
+    }
+    for key, value in expected.items():
+        if value not in (None, "") and str(metadata.get(key, "")) != value:
+            return False
+    return True
+
+
+def _validate_modbus_device_id(device_id: str) -> str:
+    value = device_id.strip()
+    if not value:
+        raise ValueError("Device ID is required.")
+    if value.isdigit():
+        raise ValueError("Device ID must be a stable asset ID, not a numeric Modbus unit ID.")
+    if value.lower().startswith("modbus:"):
+        raise ValueError("Device ID must not be derived from port and Modbus unit ID.")
+    return value
+
+
+def _connection_settings_to_payload(
+    settings: ModbusConnectionSettings,
+) -> dict[str, object]:
+    return {
+        "port": settings.port,
+        "unit_id": settings.unit_id,
+        "baudrate": settings.baudrate,
+        "parity": settings.parity,
+        "stop_bits": settings.stop_bits,
+        "order": settings.order,
+        "read_timeout_s": settings.read_timeout_s,
+        "write_timeout_s": settings.write_timeout_s,
+        "retry_count": settings.retry_count,
+    }
+
+
+def _register_map_payload(register_map: ModbusRegisterMap) -> dict[str, object]:
+    return json.loads(register_map_to_json(register_map))
+
+
+def _register_map_from_payload(
+    payload: dict[str, Any],
+) -> ModbusRegisterMap | None:
+    if not payload:
+        return None
+    try:
+        return register_map_from_json(json.dumps(payload))
+    except Exception:
+        return None
+
+
+def _profile_from_record(record: ModbusDeviceProfileRecord) -> ModbusDeviceProfile:
+    return ModbusDeviceProfile(
+        device_id=record.device_id,
+        display_name=record.display_name or "",
+        device_model=record.device_model or "",
+        tube_model=record.tube_model or "",
+        transmitter_model=record.transmitter_model or "",
+        connection_settings=dict(record.connection_settings),
+        register_map=_register_map_from_payload(record.register_map),
+        notes=record.notes or "",
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+    )
 
 
 def _device_record_to_history_payload(record: DeviceRecord) -> dict[str, object]:
@@ -2110,6 +4903,215 @@ def _analysis_result_to_history_payload(
     }
 
 
+def _artifact_to_history_payload(artifact: Artifact) -> dict[str, object]:
+    return {
+        "artifact_id": artifact.artifact_id,
+        "run_id": artifact.run_id,
+        "step_id": artifact.step_id,
+        "artifact_type": artifact.artifact_type.value,
+        "file_path": str(artifact.file_path),
+        "file_format": artifact.file_format,
+        "size_bytes": artifact.size_bytes,
+        "checksum": artifact.checksum,
+        "created_at": _datetime_to_history_payload(artifact.created_at),
+        "metadata": artifact.metadata,
+    }
+
+
+def _artifacts_from_history_payload(value: object) -> tuple[Artifact, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ValueError("artifacts must be a list")
+    return tuple(_artifact_from_history_payload(item) for item in value)
+
+
+def _artifact_from_history_payload(value: object) -> Artifact:
+    if not isinstance(value, dict):
+        raise ValueError("artifact must be an object")
+    return Artifact(
+        artifact_id=_required_history_str(value, "artifact_id"),
+        run_id=_required_history_str(value, "run_id"),
+        step_id=_history_str(value, "step_id"),
+        artifact_type=ArtifactType(_required_history_str(value, "artifact_type")),
+        file_path=Path(_required_history_str(value, "file_path")),
+        file_format=_required_history_str(value, "file_format"),
+        size_bytes=_history_optional_int(value.get("size_bytes")),
+        checksum=_history_str(value, "checksum"),
+        created_at=_history_datetime(value.get("created_at")),
+        metadata=_history_dict(value, "metadata"),
+    )
+
+
+def _test_session_to_history_payload(
+    session: ModbusTestSessionRecord,
+) -> dict[str, object]:
+    return {
+        "session_id": session.session_id,
+        "device_id": session.device_id,
+        "profile_id": session.profile_id,
+        "operator": session.operator,
+        "status": session.status,
+        "started_at": _datetime_to_history_payload(session.started_at),
+        "ended_at": _datetime_to_history_payload(session.ended_at),
+        "device_metadata": session.device_metadata,
+        "register_map_snapshot": session.register_map_snapshot,
+        "notes": session.notes,
+    }
+
+
+def _test_sessions_from_history_payload(
+    value: object,
+) -> tuple[ModbusTestSessionRecord, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ValueError("test_sessions must be a list")
+    return tuple(_test_session_from_history_payload(item) for item in value)
+
+
+def _test_session_from_history_payload(value: object) -> ModbusTestSessionRecord:
+    if not isinstance(value, dict):
+        raise ValueError("test session must be an object")
+    started_at = _history_datetime(value.get("started_at"))
+    if started_at is None:
+        raise ValueError("missing started_at")
+    return ModbusTestSessionRecord(
+        session_id=_required_history_str(value, "session_id"),
+        device_id=_required_history_str(value, "device_id"),
+        profile_id=None,
+        operator=_required_history_str(value, "operator"),
+        status=_required_history_str(value, "status"),
+        started_at=started_at,
+        ended_at=_history_datetime(value.get("ended_at")),
+        device_metadata=_history_dict(value, "device_metadata"),
+        register_map_snapshot=_history_dict(value, "register_map_snapshot"),
+        notes=_history_str(value, "notes"),
+    )
+
+
+def _operation_attempt_to_history_payload(
+    attempt: ModbusOperationAttemptRecord,
+) -> dict[str, object]:
+    return {
+        "attempt_id": attempt.attempt_id,
+        "session_id": attempt.session_id,
+        "run_id": attempt.run_id,
+        "device_id": attempt.device_id,
+        "operation_type": attempt.operation_type,
+        "status": attempt.status,
+        "started_at": _datetime_to_history_payload(attempt.started_at),
+        "ended_at": _datetime_to_history_payload(attempt.ended_at),
+        "operator": attempt.operator,
+        "device_metadata": attempt.device_metadata,
+        "register_map_snapshot": attempt.register_map_snapshot,
+        "raw_artifact_id": attempt.raw_artifact_id,
+        "summary": attempt.summary,
+        "notes": attempt.notes,
+    }
+
+
+def _trial_record_to_history_payload(trial: ModbusTrialRecord) -> dict[str, object]:
+    return {
+        "trial_id": trial.trial_id,
+        "session_id": trial.session_id,
+        "attempt_id": trial.attempt_id,
+        "run_id": trial.run_id,
+        "device_id": trial.device_id,
+        "flow_point": trial.flow_point,
+        "trial_index": trial.trial_index,
+        "trial_status": trial.trial_status,
+        "k_factor_parameter": trial.k_factor_parameter,
+        "original_k_factor": trial.original_k_factor,
+        "mass_acc_before": trial.mass_acc_before,
+        "mass_acc_after": trial.mass_acc_after,
+        "measured_mass_delta": trial.measured_mass_delta,
+        "standard_mass": trial.standard_mass,
+        "percent_error": trial.percent_error,
+        "mean_flow": trial.mean_flow,
+        "instant_flow": trial.instant_flow,
+        "flow_started_at": _datetime_to_history_payload(trial.flow_started_at),
+        "flow_instant_at": _datetime_to_history_payload(trial.flow_instant_at),
+        "flow_ended_at": _datetime_to_history_payload(trial.flow_ended_at),
+        "raw_artifact_id": trial.raw_artifact_id,
+        "device_metadata": trial.device_metadata,
+        "notes": trial.notes,
+    }
+
+
+def _operation_attempts_from_history_payload(
+    value: object,
+) -> tuple[ModbusOperationAttemptRecord, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ValueError("operation_attempts must be a list")
+    return tuple(_operation_attempt_from_history_payload(item) for item in value)
+
+
+def _operation_attempt_from_history_payload(
+    value: object,
+) -> ModbusOperationAttemptRecord:
+    if not isinstance(value, dict):
+        raise ValueError("operation attempt must be an object")
+    return ModbusOperationAttemptRecord(
+        attempt_id=_required_history_str(value, "attempt_id"),
+        session_id=_history_str(value, "session_id"),
+        run_id=_history_str(value, "run_id"),
+        device_id=_required_history_str(value, "device_id"),
+        operation_type=_required_history_str(value, "operation_type"),
+        status=_required_history_str(value, "status"),
+        started_at=_history_datetime(value.get("started_at")),
+        ended_at=_history_datetime(value.get("ended_at")),
+        operator=_required_history_str(value, "operator"),
+        device_metadata=_history_dict(value, "device_metadata"),
+        register_map_snapshot=_history_dict(value, "register_map_snapshot"),
+        raw_artifact_id=_history_str(value, "raw_artifact_id"),
+        summary=_history_dict(value, "summary"),
+        notes=_history_str(value, "notes"),
+    )
+
+
+def _trial_records_from_history_payload(
+    value: object,
+) -> tuple[ModbusTrialRecord, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise ValueError("trial_records must be a list")
+    return tuple(_trial_record_from_history_payload(item) for item in value)
+
+
+def _trial_record_from_history_payload(value: object) -> ModbusTrialRecord:
+    if not isinstance(value, dict):
+        raise ValueError("trial record must be an object")
+    return ModbusTrialRecord(
+        trial_id=_required_history_str(value, "trial_id"),
+        session_id=_history_str(value, "session_id"),
+        attempt_id=_history_str(value, "attempt_id"),
+        run_id=_history_str(value, "run_id"),
+        device_id=_required_history_str(value, "device_id"),
+        flow_point=_required_history_float(value, "flow_point"),
+        trial_index=_required_history_int(value, "trial_index"),
+        trial_status=_required_history_str(value, "trial_status"),
+        k_factor_parameter=_history_str(value, "k_factor_parameter"),
+        original_k_factor=_history_optional_float(value.get("original_k_factor")),
+        mass_acc_before=_history_optional_float(value.get("mass_acc_before")),
+        mass_acc_after=_history_optional_float(value.get("mass_acc_after")),
+        measured_mass_delta=_history_optional_float(value.get("measured_mass_delta")),
+        standard_mass=_history_optional_float(value.get("standard_mass")),
+        percent_error=_history_optional_float(value.get("percent_error")),
+        mean_flow=_history_optional_float(value.get("mean_flow")),
+        instant_flow=_history_optional_float(value.get("instant_flow")),
+        flow_started_at=_history_datetime(value.get("flow_started_at")),
+        flow_instant_at=_history_datetime(value.get("flow_instant_at")),
+        flow_ended_at=_history_datetime(value.get("flow_ended_at")),
+        raw_artifact_id=_history_str(value, "raw_artifact_id"),
+        device_metadata=_history_dict(value, "device_metadata"),
+        notes=_history_str(value, "notes"),
+    )
+
+
 def _analysis_results_from_history_payload(
     value: object,
 ) -> tuple[AnalysisResultRecord, ...]:
@@ -2158,6 +5160,258 @@ def _history_run_already_imported(
         and [result.summary_metrics for result in existing_results]
         == [result.summary_metrics for result in analysis_results]
     )
+
+
+def _normalize_imported_raw_capture_run_status(
+    run: RunSession,
+    raw_entry: dict[str, object],
+) -> RunSession:
+    if getattr(run.status, "value", str(run.status)) != RunStatus.RUNNING.value:
+        return run
+    if not run.configuration_snapshot.get("raw_capture_only"):
+        return run
+    attempts = _operation_attempts_from_history_payload(
+        raw_entry.get("operation_attempts")
+    )
+    relevant_attempts = tuple(
+        attempt for attempt in attempts if attempt.run_id == run.run_id
+    )
+    if not relevant_attempts:
+        return run
+    latest_attempt = sorted(
+        relevant_attempts,
+        key=lambda attempt: (
+            attempt.ended_at
+            or attempt.started_at
+            or datetime.min.replace(tzinfo=UTC),
+            attempt.attempt_id,
+        ),
+    )[-1]
+    run_status = _raw_capture_run_status_from_attempt_status(latest_attempt.status)
+    configuration = dict(run.configuration_snapshot)
+    configuration["raw_capture_completed"] = True
+    configuration["raw_capture_attempt_status"] = latest_attempt.status
+    if latest_attempt.raw_artifact_id is not None:
+        configuration["raw_artifact_id"] = latest_attempt.raw_artifact_id
+    return replace(
+        run,
+        status=run_status,
+        ended_at=latest_attempt.ended_at or run.ended_at or latest_attempt.started_at,
+        configuration_snapshot=configuration,
+    )
+
+
+def _raw_capture_run_status_from_attempt_status(status: str) -> RunStatus:
+    return _RAW_CAPTURE_IMPORT_STATUS_FALLBACKS.get(str(status), RunStatus.ERROR)
+
+
+def _ensure_import_test_sessions(
+    test_sessions: tuple[ModbusTestSessionRecord, ...],
+    operation_attempts: tuple[ModbusOperationAttemptRecord, ...],
+    trial_records: tuple[ModbusTrialRecord, ...],
+    run: RunSession,
+) -> tuple[ModbusTestSessionRecord, ...]:
+    """Backfill sessions for older history exports that predate session payloads."""
+
+    sessions_by_id = {session.session_id: session for session in test_sessions}
+    referenced_session_ids: set[str] = set()
+    referenced_session_ids.update(
+        attempt.session_id
+        for attempt in operation_attempts
+        if attempt.session_id is not None
+    )
+    referenced_session_ids.update(
+        trial.session_id for trial in trial_records if trial.session_id is not None
+    )
+    metadata = dict(run.configuration_snapshot)
+    if "device_id" not in metadata:
+        metadata["device_id"] = run.device_id
+    for session_id in referenced_session_ids:
+        if session_id in sessions_by_id:
+            continue
+        sessions_by_id[session_id] = ModbusTestSessionRecord(
+            session_id=session_id,
+            device_id=run.device_id,
+            profile_id=None,
+            operator=run.operator,
+            status=getattr(run.status, "value", str(run.status)),
+            started_at=run.started_at or datetime.now(UTC),
+            ended_at=run.ended_at,
+            device_metadata=metadata,
+            notes=f"Backfilled during history import for run {run.run_id}.",
+        )
+    return tuple(sessions_by_id.values())
+
+
+def _retarget_imported_device_record(
+    device: DeviceRecord,
+    *,
+    target_device_id: str,
+    original_device_id: str,
+) -> DeviceRecord:
+    metadata = dict(device.connection_metadata)
+    if original_device_id != target_device_id:
+        metadata.setdefault("imported_from_device_id", original_device_id)
+    return replace(
+        device,
+        device_id=target_device_id,
+        connection_metadata=metadata,
+    )
+
+
+def _retarget_imported_run(
+    run: RunSession,
+    *,
+    target_device_id: str,
+) -> RunSession:
+    original_device_id = run.device_id
+    configuration = _retarget_device_metadata_dict(
+        run.configuration_snapshot,
+        target_device_id=target_device_id,
+        original_device_id=original_device_id,
+    )
+    notes = run.notes or ""
+    if original_device_id != target_device_id:
+        import_note = f"Imported for {target_device_id} from {original_device_id}"
+        notes = f"{notes}\n{import_note}" if notes else import_note
+    return replace(
+        run,
+        device_id=target_device_id,
+        configuration_snapshot=configuration,
+        notes=notes,
+    )
+
+
+def _retarget_imported_workflow_step(
+    step: WorkflowStep,
+    *,
+    target_device_id: str,
+    original_device_id: str,
+) -> WorkflowStep:
+    return replace(
+        step,
+        input_configuration=_retarget_device_metadata_dict(
+            step.input_configuration,
+            target_device_id=target_device_id,
+            original_device_id=original_device_id,
+        ),
+        output_summary=_retarget_device_metadata_dict(
+            step.output_summary,
+            target_device_id=target_device_id,
+            original_device_id=original_device_id,
+        ),
+    )
+
+
+def _retarget_imported_analysis_result(
+    result: AnalysisResultRecord,
+    *,
+    target_device_id: str,
+    original_device_id: str,
+) -> AnalysisResultRecord:
+    return replace(
+        result,
+        configuration_snapshot=_retarget_device_metadata_dict(
+            result.configuration_snapshot,
+            target_device_id=target_device_id,
+            original_device_id=original_device_id,
+        ),
+        summary_metrics=_retarget_device_metadata_dict(
+            result.summary_metrics,
+            target_device_id=target_device_id,
+            original_device_id=original_device_id,
+        ),
+    )
+
+
+def _retarget_imported_artifact(
+    artifact: Artifact,
+    *,
+    target_device_id: str,
+    original_device_id: str,
+) -> Artifact:
+    return replace(
+        artifact,
+        metadata=_retarget_device_metadata_dict(
+            artifact.metadata,
+            target_device_id=target_device_id,
+            original_device_id=original_device_id,
+        ),
+    )
+
+
+def _retarget_imported_test_session(
+    session: ModbusTestSessionRecord,
+    *,
+    target_device_id: str,
+    original_device_id: str,
+) -> ModbusTestSessionRecord:
+    return replace(
+        session,
+        device_id=target_device_id,
+        profile_id=None,
+        device_metadata=_retarget_device_metadata_dict(
+            session.device_metadata,
+            target_device_id=target_device_id,
+            original_device_id=original_device_id,
+        ),
+    )
+
+
+def _retarget_imported_operation_attempt(
+    attempt: ModbusOperationAttemptRecord,
+    *,
+    target_device_id: str,
+    original_device_id: str,
+) -> ModbusOperationAttemptRecord:
+    device_metadata = _retarget_device_metadata_dict(
+        attempt.device_metadata,
+        target_device_id=target_device_id,
+        original_device_id=original_device_id,
+    )
+    summary = _retarget_device_metadata_dict(
+        attempt.summary,
+        target_device_id=target_device_id,
+        original_device_id=original_device_id,
+    )
+    summary.update(device_metadata)
+    return replace(
+        attempt,
+        device_id=target_device_id,
+        device_metadata=device_metadata,
+        summary=summary,
+    )
+
+
+def _retarget_imported_trial_record(
+    trial: ModbusTrialRecord,
+    *,
+    target_device_id: str,
+    original_device_id: str,
+) -> ModbusTrialRecord:
+    return replace(
+        trial,
+        device_id=target_device_id,
+        device_metadata=_retarget_device_metadata_dict(
+            trial.device_metadata,
+            target_device_id=target_device_id,
+            original_device_id=original_device_id,
+        ),
+    )
+
+
+def _retarget_device_metadata_dict(
+    values: dict[str, Any],
+    *,
+    target_device_id: str,
+    original_device_id: str,
+) -> dict[str, Any]:
+    updated = dict(values)
+    if original_device_id != target_device_id:
+        updated.setdefault("imported_from_device_id", original_device_id)
+    if "device_id" in updated or original_device_id != target_device_id:
+        updated["device_id"] = target_device_id
+    return updated
 
 
 def _history_entry_in_time_range(
@@ -2212,6 +5466,22 @@ def _import_step_id_map(
     return mapping
 
 
+def _import_artifact_id_map(
+    artifacts: tuple[Artifact, ...],
+    *,
+    original_run_id: str,
+    new_run_id: str,
+) -> dict[str, str]:
+    return {
+        artifact.artifact_id: _remap_imported_record_id(
+            artifact.artifact_id,
+            original_run_id=original_run_id,
+            new_run_id=new_run_id,
+        )
+        for artifact in artifacts
+    }
+
+
 def _remap_imported_workflow_step(
     step: WorkflowStep,
     *,
@@ -2231,12 +5501,44 @@ def _remap_imported_workflow_step(
     )
 
 
+def _remap_imported_artifact(
+    artifact: Artifact,
+    *,
+    original_run_id: str,
+    new_run_id: str,
+    step_id_map: dict[str, str],
+    artifact_id_map: dict[str, str],
+    imported_at: str,
+) -> Artifact:
+    metadata = dict(artifact.metadata)
+    metadata["imported_from_run_id"] = original_run_id
+    metadata["imported_at"] = imported_at
+    metadata["imported_from_artifact_id"] = artifact.artifact_id
+    return replace(
+        artifact,
+        artifact_id=artifact_id_map.get(
+            artifact.artifact_id,
+            _remap_imported_record_id(
+                artifact.artifact_id,
+                original_run_id=original_run_id,
+                new_run_id=new_run_id,
+            ),
+        ),
+        run_id=new_run_id if artifact.run_id == original_run_id else artifact.run_id,
+        step_id=step_id_map.get(artifact.step_id)
+        if artifact.step_id is not None
+        else None,
+        metadata=metadata,
+    )
+
+
 def _remap_imported_analysis_result(
     result: AnalysisResultRecord,
     *,
     original_run_id: str,
     new_run_id: str,
     step_id_map: dict[str, str],
+    artifact_id_map: dict[str, str],
     imported_at: str,
 ) -> AnalysisResultRecord:
     configuration = dict(result.configuration_snapshot)
@@ -2253,8 +5555,79 @@ def _remap_imported_analysis_result(
         ),
         run_id=new_run_id,
         step_id=step_id_map.get(result.step_id) if result.step_id is not None else None,
+        input_artifact_ids=tuple(
+            artifact_id_map.get(artifact_id, artifact_id)
+            for artifact_id in result.input_artifact_ids
+        ),
         configuration_snapshot=configuration,
         summary_metrics=metrics,
+    )
+
+
+def _remap_imported_operation_attempt(
+    attempt: ModbusOperationAttemptRecord,
+    *,
+    original_run_id: str,
+    new_run_id: str,
+    artifact_id_map: dict[str, str],
+    imported_at: str,
+) -> ModbusOperationAttemptRecord:
+    summary = dict(attempt.summary)
+    summary["imported_from_run_id"] = original_run_id
+    summary["imported_at"] = imported_at
+    raw_artifact_id = (
+        artifact_id_map.get(attempt.raw_artifact_id, attempt.raw_artifact_id)
+        if attempt.raw_artifact_id is not None
+        else None
+    )
+    if attempt.raw_artifact_id is not None:
+        summary["raw_artifact_id"] = raw_artifact_id
+    return replace(
+        attempt,
+        attempt_id=_remap_imported_record_id(
+            attempt.attempt_id,
+            original_run_id=original_run_id,
+            new_run_id=new_run_id,
+        ),
+        run_id=new_run_id if attempt.run_id == original_run_id else attempt.run_id,
+        raw_artifact_id=raw_artifact_id,
+        summary=summary,
+    )
+
+
+def _remap_imported_trial_record(
+    trial: ModbusTrialRecord,
+    *,
+    original_run_id: str,
+    new_run_id: str,
+    artifact_id_map: dict[str, str],
+    imported_at: str,
+) -> ModbusTrialRecord:
+    metadata = dict(trial.device_metadata)
+    metadata["imported_from_run_id"] = original_run_id
+    metadata["imported_at"] = imported_at
+    raw_artifact_id = (
+        artifact_id_map.get(trial.raw_artifact_id, trial.raw_artifact_id)
+        if trial.raw_artifact_id is not None
+        else None
+    )
+    return replace(
+        trial,
+        trial_id=_remap_imported_record_id(
+            trial.trial_id,
+            original_run_id=original_run_id,
+            new_run_id=new_run_id,
+        ),
+        attempt_id=_remap_imported_record_id(
+            trial.attempt_id,
+            original_run_id=original_run_id,
+            new_run_id=new_run_id,
+        )
+        if trial.attempt_id is not None
+        else None,
+        run_id=new_run_id if trial.run_id == original_run_id else trial.run_id,
+        raw_artifact_id=raw_artifact_id,
+        device_metadata=metadata,
     )
 
 
@@ -2267,6 +5640,17 @@ def _remap_imported_result_id(
     if result_id.startswith(original_run_id):
         return result_id.replace(original_run_id, new_run_id, 1)
     return f"{new_run_id}-{result_id}"
+
+
+def _remap_imported_record_id(
+    value: str,
+    *,
+    original_run_id: str,
+    new_run_id: str,
+) -> str:
+    if value.startswith(original_run_id):
+        return value.replace(original_run_id, new_run_id, 1)
+    return f"{new_run_id}-{value}"
 
 
 def _datetime_to_history_payload(value: datetime | None) -> str | None:
@@ -2299,6 +5683,36 @@ def _required_history_str(payload: dict[str, object], key: str) -> str:
     if not value:
         raise ValueError(f"missing {key}")
     return value
+
+
+def _required_history_float(payload: dict[str, object], key: str) -> float:
+    if key not in payload:
+        raise ValueError(f"missing {key}")
+    value = _history_optional_float(payload.get(key))
+    if value is None:
+        raise ValueError(f"missing {key}")
+    return value
+
+
+def _history_optional_float(value: object) -> float | None:
+    if value in (None, ""):
+        return None
+    return float(value)
+
+
+def _history_optional_int(value: object) -> int | None:
+    if value in (None, ""):
+        return None
+    return int(value)
+
+
+def _required_history_int(payload: dict[str, object], key: str) -> int:
+    if key not in payload:
+        raise ValueError(f"missing {key}")
+    value = payload.get(key)
+    if value in (None, ""):
+        raise ValueError(f"missing {key}")
+    return int(value)
 
 
 def _history_dict(payload: dict[str, object], key: str) -> dict[str, Any]:

@@ -121,3 +121,85 @@ class VariableSampleRecord:
     unit: str | None = None
     source_channel: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class ModbusDeviceProfileRecord:
+    """Operator-maintained Modbus device profile."""
+
+    profile_id: str
+    device_id: str
+    display_name: str | None = None
+    device_model: str | None = None
+    tube_model: str | None = None
+    transmitter_model: str | None = None
+    connection_settings: dict[str, Any] = field(default_factory=dict)
+    register_map: dict[str, Any] = field(default_factory=dict)
+    notes: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ModbusTestSessionRecord:
+    """One flexible Modbus test session for a device profile."""
+
+    session_id: str
+    device_id: str
+    operator: str
+    status: str
+    started_at: datetime
+    profile_id: str | None = None
+    ended_at: datetime | None = None
+    device_metadata: dict[str, Any] = field(default_factory=dict)
+    register_map_snapshot: dict[str, Any] = field(default_factory=dict)
+    notes: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ModbusOperationAttemptRecord:
+    """One Modbus operation attempt saved for traceability."""
+
+    attempt_id: str
+    device_id: str
+    operation_type: str
+    status: str
+    operator: str
+    session_id: str | None = None
+    run_id: str | None = None
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    device_metadata: dict[str, Any] = field(default_factory=dict)
+    register_map_snapshot: dict[str, Any] = field(default_factory=dict)
+    raw_artifact_id: str | None = None
+    summary: dict[str, Any] = field(default_factory=dict)
+    notes: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ModbusTrialRecord:
+    """One saved Modbus error/repeatability trial."""
+
+    trial_id: str
+    device_id: str
+    flow_point: float
+    trial_index: int
+    trial_status: str
+    k_factor_parameter: str | None = None
+    original_k_factor: float | None = None
+    session_id: str | None = None
+    attempt_id: str | None = None
+    run_id: str | None = None
+    mass_acc_before: float | None = None
+    mass_acc_after: float | None = None
+    measured_mass_delta: float | None = None
+    standard_mass: float | None = None
+    percent_error: float | None = None
+    mean_flow: float | None = None
+    instant_flow: float | None = None
+    flow_started_at: datetime | None = None
+    flow_instant_at: datetime | None = None
+    flow_ended_at: datetime | None = None
+    raw_artifact_id: str | None = None
+    device_metadata: dict[str, Any] = field(default_factory=dict)
+    notes: str | None = None

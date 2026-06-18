@@ -15,6 +15,10 @@ from coreflow.storage.models import (
     ArtifactType,
     AuditLogRecord,
     DeviceRecord,
+    ModbusDeviceProfileRecord,
+    ModbusOperationAttemptRecord,
+    ModbusTestSessionRecord,
+    ModbusTrialRecord,
     RunSummary,
     VariableSampleRecord,
 )
@@ -83,6 +87,338 @@ class StorageRepository:
             connection_metadata=_from_json(row["connection_metadata_json"], {}),
             created_at=_parse_dt(row["created_at"]),
             updated_at=_parse_dt(row["updated_at"]),
+        )
+
+    def save_modbus_device_profile(
+        self,
+        record: ModbusDeviceProfileRecord,
+    ) -> None:
+        now = _utc_now()
+        created_at = record.created_at or now
+        updated_at = record.updated_at or now
+        with self._database.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO modbus_device_profiles (
+                    profile_id, device_id, display_name, device_model, tube_model,
+                    transmitter_model, connection_settings_json, register_map_json,
+                    notes, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(profile_id) DO UPDATE SET
+                    device_id=excluded.device_id,
+                    display_name=excluded.display_name,
+                    device_model=excluded.device_model,
+                    tube_model=excluded.tube_model,
+                    transmitter_model=excluded.transmitter_model,
+                    connection_settings_json=excluded.connection_settings_json,
+                    register_map_json=excluded.register_map_json,
+                    notes=excluded.notes,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    record.profile_id,
+                    record.device_id,
+                    record.display_name,
+                    record.device_model,
+                    record.tube_model,
+                    record.transmitter_model,
+                    _to_json(record.connection_settings),
+                    _to_json(record.register_map),
+                    record.notes,
+                    _dt(created_at),
+                    _dt(updated_at),
+                ),
+            )
+
+    def get_modbus_device_profile(
+        self,
+        device_id: str,
+    ) -> ModbusDeviceProfileRecord | None:
+        with self._database.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM modbus_device_profiles
+                WHERE device_id = ?
+                """,
+                (device_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return _modbus_device_profile_from_row(row)
+
+    def list_modbus_device_profiles(self) -> tuple[ModbusDeviceProfileRecord, ...]:
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM modbus_device_profiles
+                ORDER BY device_id
+                """
+            ).fetchall()
+        return tuple(_modbus_device_profile_from_row(row) for row in rows)
+
+    def delete_modbus_device_profile(self, device_id: str) -> bool:
+        with self._database.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT profile_id
+                FROM modbus_device_profiles
+                WHERE device_id = ?
+                """,
+                (device_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            profile_id = row["profile_id"]
+            connection.execute(
+                """
+                UPDATE modbus_test_sessions
+                SET profile_id = NULL
+                WHERE profile_id = ?
+                """,
+                (profile_id,),
+            )
+            cursor = connection.execute(
+                """
+                DELETE FROM modbus_device_profiles
+                WHERE device_id = ?
+                """,
+                (device_id,),
+            )
+        return cursor.rowcount > 0
+
+    def delete_legacy_modbus_device_profiles(self) -> int:
+        """Remove old port-derived profiles while keeping device-linked records."""
+
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT profile_id
+                FROM modbus_device_profiles
+                WHERE lower(device_id) LIKE 'modbus:%'
+                """
+            ).fetchall()
+            for row in rows:
+                connection.execute(
+                    """
+                    UPDATE modbus_test_sessions
+                    SET profile_id = NULL
+                    WHERE profile_id = ?
+                    """,
+                    (row["profile_id"],),
+                )
+            cursor = connection.execute(
+                """
+                DELETE FROM modbus_device_profiles
+                WHERE lower(device_id) LIKE 'modbus:%'
+                """
+            )
+        return cursor.rowcount
+
+    def save_modbus_test_session(self, record: ModbusTestSessionRecord) -> None:
+        with self._database.connect() as connection:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO modbus_test_sessions (
+                    session_id, device_id, profile_id, operator, status,
+                    started_at, ended_at, device_metadata_json,
+                    register_map_snapshot_json, notes
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.session_id,
+                    record.device_id,
+                    record.profile_id,
+                    record.operator,
+                    record.status,
+                    _dt(record.started_at),
+                    _dt(record.ended_at),
+                    _to_json(record.device_metadata),
+                    _to_json(record.register_map_snapshot),
+                    record.notes,
+                ),
+            )
+
+    def list_modbus_test_sessions(
+        self,
+        *,
+        device_id: str | None = None,
+    ) -> tuple[ModbusTestSessionRecord, ...]:
+        query = "SELECT * FROM modbus_test_sessions"
+        parameters: tuple[Any, ...] = ()
+        if device_id is not None:
+            query += " WHERE device_id = ?"
+            parameters = (device_id,)
+        query += " ORDER BY started_at DESC, session_id DESC"
+        with self._database.connect() as connection:
+            rows = connection.execute(query, parameters).fetchall()
+        return tuple(_modbus_test_session_from_row(row) for row in rows)
+
+    def save_modbus_operation_attempt(
+        self,
+        record: ModbusOperationAttemptRecord,
+    ) -> None:
+        with self._database.connect() as connection:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO modbus_operation_attempts (
+                    attempt_id, session_id, run_id, device_id, operation_type,
+                    status, started_at, ended_at, operator, device_metadata_json,
+                    register_map_snapshot_json, raw_artifact_id, summary_json,
+                    notes
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.attempt_id,
+                    record.session_id,
+                    record.run_id,
+                    record.device_id,
+                    record.operation_type,
+                    record.status,
+                    _dt(record.started_at),
+                    _dt(record.ended_at),
+                    record.operator,
+                    _to_json(record.device_metadata),
+                    _to_json(record.register_map_snapshot),
+                    record.raw_artifact_id,
+                    _to_json(record.summary),
+                    record.notes,
+                ),
+            )
+
+    def list_modbus_operation_attempts(
+        self,
+        *,
+        device_id: str | None = None,
+        session_id: str | None = None,
+        operation_type: str | None = None,
+        status: str | None = None,
+        started_from: datetime | None = None,
+        started_to: datetime | None = None,
+        device_model: str | None = None,
+        tube_model: str | None = None,
+        transmitter_model: str | None = None,
+    ) -> tuple[ModbusOperationAttemptRecord, ...]:
+        clauses: list[str] = []
+        parameters: list[Any] = []
+        if device_id is not None:
+            clauses.append("device_id = ?")
+            parameters.append(device_id)
+        if session_id is not None:
+            clauses.append("session_id = ?")
+            parameters.append(session_id)
+        if operation_type is not None and operation_type not in ("", "all"):
+            clauses.append("operation_type = ?")
+            parameters.append(operation_type)
+        if status is not None and status not in ("", "all"):
+            clauses.append("status = ?")
+            parameters.append(status)
+        if started_from is not None:
+            clauses.append("started_at >= ?")
+            parameters.append(_dt(started_from))
+        if started_to is not None:
+            clauses.append("started_at <= ?")
+            parameters.append(_dt(started_to))
+        query = "SELECT * FROM modbus_operation_attempts"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY COALESCE(started_at, '') DESC, attempt_id DESC"
+        with self._database.connect() as connection:
+            rows = connection.execute(query, tuple(parameters)).fetchall()
+        records = tuple(_modbus_operation_attempt_from_row(row) for row in rows)
+        return tuple(
+            record
+            for record in records
+            if _metadata_filter_matches(
+                record.device_metadata,
+                device_model=device_model,
+                tube_model=tube_model,
+                transmitter_model=transmitter_model,
+            )
+        )
+
+    def save_modbus_trial_record(self, record: ModbusTrialRecord) -> None:
+        with self._database.connect() as connection:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO modbus_trial_records (
+                    trial_id, session_id, attempt_id, run_id, device_id,
+                    flow_point, trial_index, trial_status, k_factor_parameter,
+                    original_k_factor, mass_acc_before, mass_acc_after,
+                    measured_mass_delta, standard_mass, percent_error,
+                    mean_flow, instant_flow, flow_started_at, flow_instant_at,
+                    flow_ended_at, raw_artifact_id, device_metadata_json, notes
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.trial_id,
+                    record.session_id,
+                    record.attempt_id,
+                    record.run_id,
+                    record.device_id,
+                    record.flow_point,
+                    record.trial_index,
+                    record.trial_status,
+                    record.k_factor_parameter,
+                    record.original_k_factor,
+                    record.mass_acc_before,
+                    record.mass_acc_after,
+                    record.measured_mass_delta,
+                    record.standard_mass,
+                    record.percent_error,
+                    record.mean_flow,
+                    record.instant_flow,
+                    _dt(record.flow_started_at),
+                    _dt(record.flow_instant_at),
+                    _dt(record.flow_ended_at),
+                    record.raw_artifact_id,
+                    _to_json(record.device_metadata),
+                    record.notes,
+                ),
+            )
+
+    def list_modbus_trial_records(
+        self,
+        *,
+        device_id: str | None = None,
+        session_id: str | None = None,
+        trial_status: str | None = None,
+        device_model: str | None = None,
+        tube_model: str | None = None,
+        transmitter_model: str | None = None,
+    ) -> tuple[ModbusTrialRecord, ...]:
+        clauses: list[str] = []
+        parameters: list[Any] = []
+        if device_id is not None:
+            clauses.append("device_id = ?")
+            parameters.append(device_id)
+        if session_id is not None:
+            clauses.append("session_id = ?")
+            parameters.append(session_id)
+        if trial_status is not None and trial_status not in ("", "all"):
+            clauses.append("trial_status = ?")
+            parameters.append(trial_status)
+        query = "SELECT * FROM modbus_trial_records"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY flow_point, trial_index, trial_id"
+        with self._database.connect() as connection:
+            rows = connection.execute(query, tuple(parameters)).fetchall()
+        records = tuple(_modbus_trial_from_row(row) for row in rows)
+        return tuple(
+            record
+            for record in records
+            if _metadata_filter_matches(
+                record.device_metadata,
+                device_model=device_model,
+                tube_model=tube_model,
+                transmitter_model=transmitter_model,
+            )
         )
 
     def save_run(self, run: RunSession) -> None:
@@ -372,6 +708,10 @@ class StorageRepository:
             "audit_logs",
             "schema_migrations",
             "variable_samples",
+            "modbus_device_profiles",
+            "modbus_test_sessions",
+            "modbus_operation_attempts",
+            "modbus_trial_records",
         }:
             raise ValueError(f"Unsupported table: {table_name}")
         with self._database.connect() as connection:
@@ -392,6 +732,106 @@ def _artifact_from_row(row: sqlite3.Row) -> Artifact:
         created_at=_parse_dt(row["created_at"]),
         metadata=_from_json(row["metadata_json"], {}),
     )
+
+
+def _modbus_device_profile_from_row(
+    row: sqlite3.Row,
+) -> ModbusDeviceProfileRecord:
+    return ModbusDeviceProfileRecord(
+        profile_id=row["profile_id"],
+        device_id=row["device_id"],
+        display_name=row["display_name"],
+        device_model=row["device_model"],
+        tube_model=row["tube_model"],
+        transmitter_model=row["transmitter_model"],
+        connection_settings=_from_json(row["connection_settings_json"], {}),
+        register_map=_from_json(row["register_map_json"], {}),
+        notes=row["notes"],
+        created_at=_parse_dt(row["created_at"]),
+        updated_at=_parse_dt(row["updated_at"]),
+    )
+
+
+def _modbus_test_session_from_row(row: sqlite3.Row) -> ModbusTestSessionRecord:
+    return ModbusTestSessionRecord(
+        session_id=row["session_id"],
+        device_id=row["device_id"],
+        profile_id=row["profile_id"],
+        operator=row["operator"],
+        status=row["status"],
+        started_at=_parse_dt(row["started_at"]) or _utc_now(),
+        ended_at=_parse_dt(row["ended_at"]),
+        device_metadata=_from_json(row["device_metadata_json"], {}),
+        register_map_snapshot=_from_json(row["register_map_snapshot_json"], {}),
+        notes=row["notes"],
+    )
+
+
+def _modbus_operation_attempt_from_row(
+    row: sqlite3.Row,
+) -> ModbusOperationAttemptRecord:
+    return ModbusOperationAttemptRecord(
+        attempt_id=row["attempt_id"],
+        session_id=row["session_id"],
+        run_id=row["run_id"],
+        device_id=row["device_id"],
+        operation_type=row["operation_type"],
+        status=row["status"],
+        started_at=_parse_dt(row["started_at"]),
+        ended_at=_parse_dt(row["ended_at"]),
+        operator=row["operator"],
+        device_metadata=_from_json(row["device_metadata_json"], {}),
+        register_map_snapshot=_from_json(row["register_map_snapshot_json"], {}),
+        raw_artifact_id=row["raw_artifact_id"],
+        summary=_from_json(row["summary_json"], {}),
+        notes=row["notes"],
+    )
+
+
+def _modbus_trial_from_row(row: sqlite3.Row) -> ModbusTrialRecord:
+    return ModbusTrialRecord(
+        trial_id=row["trial_id"],
+        session_id=row["session_id"],
+        attempt_id=row["attempt_id"],
+        run_id=row["run_id"],
+        device_id=row["device_id"],
+        flow_point=float(row["flow_point"]),
+        trial_index=int(row["trial_index"]),
+        trial_status=row["trial_status"],
+        k_factor_parameter=row["k_factor_parameter"],
+        original_k_factor=row["original_k_factor"],
+        mass_acc_before=row["mass_acc_before"],
+        mass_acc_after=row["mass_acc_after"],
+        measured_mass_delta=row["measured_mass_delta"],
+        standard_mass=row["standard_mass"],
+        percent_error=row["percent_error"],
+        mean_flow=row["mean_flow"],
+        instant_flow=row["instant_flow"],
+        flow_started_at=_parse_dt(row["flow_started_at"]),
+        flow_instant_at=_parse_dt(row["flow_instant_at"]),
+        flow_ended_at=_parse_dt(row["flow_ended_at"]),
+        raw_artifact_id=row["raw_artifact_id"],
+        device_metadata=_from_json(row["device_metadata_json"], {}),
+        notes=row["notes"],
+    )
+
+
+def _metadata_filter_matches(
+    metadata: dict[str, Any],
+    *,
+    device_model: str | None = None,
+    tube_model: str | None = None,
+    transmitter_model: str | None = None,
+) -> bool:
+    expected = {
+        "device_model": device_model,
+        "tube_model": tube_model,
+        "transmitter_model": transmitter_model,
+    }
+    for key, value in expected.items():
+        if value not in (None, "") and str(metadata.get(key, "")) != value:
+            return False
+    return True
 
 
 def _analysis_result_from_row(row: sqlite3.Row) -> AnalysisResultRecord:

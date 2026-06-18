@@ -189,12 +189,38 @@ def test_main_window_opens_independent_modbus_window(qtbot, tmp_path) -> None:
     assert modbus_window.variableMapTable.columnCount() == 12
     assert not modbus_window.variableMapTable.verticalHeader().isVisible()
     assert modbus_window.variableMapTable.horizontalHeader().sectionsMovable()
+    for column in range(1, 8):
+        assert modbus_window.variableMapTable.isColumnHidden(column)
     assert modbus_window.variableMapTable.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOn
     assert modbus_window.addVariableButton.text() == "Add Variable"
     assert modbus_window.deleteVariableButton.text() == "Delete Variable"
+    assert not modbus_window.addVariableButton.isVisible()
+    assert not modbus_window.deleteVariableButton.isVisible()
     assert not hasattr(modbus_window, "moveVariableUpButton")
     assert not hasattr(modbus_window, "moveVariableDownButton")
     assert modbus_window.pollingButton.text() == "Start Polling"
+    assert modbus_window.createDeviceProfileButton.text() == "New Profile"
+    assert modbus_window.editDeviceProfileButton.text() == "Edit Profile"
+    assert modbus_window.deleteDeviceProfileButton.text() == "Delete"
+    assert modbus_window.allHistoryAction.text() == "All Test Records"
+    assert not hasattr(modbus_window, "allTestRecordsButton")
+    _click(qtbot, modbus_window.openConnectionButton)
+    assert modbus_window.connectionDialog is None
+    assert "create or select a device profile first" in modbus_window.logTextEdit.toPlainText()
+    _click(qtbot, modbus_window.createDeviceProfileButton)
+    qtbot.waitUntil(
+        lambda: modbus_window.deviceProfileDialog is not None
+        and modbus_window.deviceProfileDialog.isVisible(),
+        timeout=5000,
+    )
+    profile_dialog = modbus_window.deviceProfileDialog
+    assert profile_dialog is not None
+    profile_dialog.deviceIdLineEdit.setText("CFM-MAIN-001")
+    _click(qtbot, profile_dialog.saveButton)
+    qtbot.waitUntil(
+        lambda: modbus_window.deviceProfileCombo.findData("CFM-MAIN-001") >= 0,
+        timeout=5000,
+    )
     _click(qtbot, modbus_window.openConnectionButton)
     qtbot.waitUntil(lambda: modbus_window.connectionDialog is not None, timeout=5000)
     connection_dialog = modbus_window.connectionDialog
@@ -213,6 +239,8 @@ def test_main_window_opens_independent_modbus_window(qtbot, tmp_path) -> None:
     assert window.modbusWindow is not None
     assert window.modbusWindow.isVisible()
     assert window.modbusWindow.isWindow()
+    assert window.modbusWindow.deviceProfileCombo.currentData() == "CFM-MAIN-001"
+    assert window.modbusWindow.deviceIdLineEdit.text() == "CFM-MAIN-001"
 
 
 def test_asio_iis_window_fake_connection_does_not_change_device_channels(qtbot, tmp_path) -> None:

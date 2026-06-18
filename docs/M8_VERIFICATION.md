@@ -11,7 +11,7 @@ M8 implements the first usable Qt desktop UI for simulator-backed operation. It 
 - Live mass-flow time-series chart using pyqtgraph.
 - Background worker boundary for calibration preview, factory test, and experiment launch.
 - Independent Modbus module window entry point from the toolbar and Modules menu.
-- Modbus module window with its own connection state, connection dialog, order selector, larger editable and persistable variable map, row-level variable read/write controls, one-second selected-variable polling, Operations menu, TX/RX frame display, variable sampling, zero calibration dialog, calibration-history dialog, K factor calibration, and manual mass-total repeatability controls.
+- Modbus module window with its own connection state, connection dialog, order selector, larger editable and persistable variable map, row-level variable read/write controls, one-second selected-variable polling, Operations menu, TX/RX frame display, zero calibration dialog, Test Records dialog, K factor calibration, and manual mass-total repeatability controls.
 - Workflow status log and cancel-request button.
 - Run history table backed by SQLite run-session records.
 - Result inspection table showing run summary, step statuses, analysis results, metrics, and artifact links.
@@ -35,6 +35,12 @@ conda run -n coreflow-studio python -m pytest -q
 - Variable Map supports visible scroll bars, column reordering, default `mass_rate` and `temperature` rows, disabled write controls for non-writable rows, and `Save Map` persistence under the user data directory. The standalone Modbus window uses a vertical splitter so the map remains scrollable when the window is compressed.
 - The old operation button strip and sampled-variable result table have been removed; operations are exposed through the Modbus module menu, and raw TX/RX data codes are shown in the frame table.
 - Zero calibration opens a dedicated dialog. The `Start` action reads before values, writes `zero_calibration_start` through the write guard, waits before checking completion, displays before/after `zero_offset` and `delta_t`, and refreshes the Variable Map values including the final coil state.
-- Calibration History opens as a separate dialog, supports operation filtering, shows timestamped historical calibration rows from SQLite run/analysis records, and allows editable operator notes.
+- Test Records opens as a separate dialog, supports operation filtering, shows
+  timestamped Modbus operation attempts from SQLite, keeps compatibility with
+  older run/analysis records, and allows editable operator notes for run-backed
+  records.
+- Modbus test records now include automatically created device profiles, test
+  sessions, operation attempts, accepted repeatability trial records, and raw
+  Modbus polling artifact references.
 - The cancel button records a cancel request at the UI boundary. Step-level workflow cancellation remains a future workflow-runner feature.
 - UI tests use Qt offscreen mode and deterministic simulator data.

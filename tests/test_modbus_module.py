@@ -1,12 +1,25 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import inspect
 import json
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from time import sleep
+from types import SimpleNamespace
 
+import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QAbstractItemView, QTableWidgetSelectionRange
+from PySide6.QtWidgets import (
+    QApplication,
+    QAbstractItemView,
+    QAbstractSpinBox,
+    QDialog,
+    QFileDialog,
+    QLabel,
+    QMessageBox,
+    QSizePolicy,
+    QTableWidgetSelectionRange,
+)
 
 from coreflow.analysis.calibration import RepeatabilityTrial
 from coreflow.app.modbus_runtime import (
@@ -14,6 +27,9 @@ from coreflow.app.modbus_runtime import (
     ModbusConnectionSettings,
     ModbusModuleRuntime,
     ModbusOperationMetadata,
+    ModbusRepeatabilityHistoryTrial,
+    ModbusRepeatabilitySimpleCapture,
+    ModbusRepeatabilitySimpleTrialResult,
 )
 from coreflow.hardware import SerialPortInfo, SerialPortScanner
 from coreflow.protocols.modbus import (
@@ -23,13 +39,24 @@ from coreflow.protocols.modbus import (
     encode_registers,
 )
 from coreflow.storage import Database, StorageRepository
-from coreflow.storage.models import DeviceRecord
+from coreflow.storage.models import (
+    DeviceRecord,
+    ModbusDeviceProfileRecord,
+    ModbusOperationAttemptRecord,
+    ModbusTestSessionRecord,
+    ModbusTrialRecord,
+)
+import coreflow.ui.modbus_window as modbus_window_module
 from coreflow.ui.modbus_window import (
     CalibrationHistoryDialog,
     CalibrationHistoryExportDialog,
+    DeviceAnalysisComparisonVariablesDialog,
+    DeviceAnalysisDialog,
+    DeviceAnalysisTrialSelectionDialog,
     ModbusModuleWindow,
+    RepeatabilitySelectionDialog,
 )
-from coreflow.workflows import RunSession, RunStatus, RunType
+from coreflow.workflows import FlowSegmentCaptureResult, RunSession, RunStatus, RunType
 from tests.modbus_fakes import placeholder_fake_transport, placeholder_transport_factory
 
 
@@ -41,6 +68,42 @@ def _repository(tmp_path) -> StorageRepository:
 
 def _click(qtbot, button) -> None:
     qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
+
+
+def _capture_and_calculate_repeatability_trial(
+    qtbot,
+    window: ModbusModuleWindow,
+    dialog,
+    *,
+    standard_mass: float,
+    expected_count: int,
+) -> None:
+    _click(qtbot, dialog.startButton)
+    qtbot.waitUntil(
+        lambda: dialog.captureProgressDialog is not None
+        and dialog.captureProgressDialog.isVisible(),
+        timeout=5000,
+    )
+    assert "Acquiring" in dialog.captureProgressDialog.messageLabel.text()
+    qtbot.waitUntil(
+        lambda count=expected_count: window.logTextEdit.toPlainText().count(
+            "Repeatability captured"
+        )
+        >= count,
+        timeout=5000,
+    )
+    qtbot.waitUntil(lambda: dialog.current_capture() is not None, timeout=5000)
+    assert dialog.captureProgressDialog is not None
+    assert dialog.captureProgressDialog.messageLabel.text() == "Data acquisition completed."
+    assert dialog.calculateTrialErrorButton.isEnabled()
+    assert dialog.standardMassSpinBox.isEnabled()
+    dialog.standardMassSpinBox.setValue(standard_mass)
+    _click(qtbot, dialog.calculateTrialErrorButton)
+    qtbot.waitUntil(
+        lambda count=expected_count: len(dialog.trial_results()) == count,
+        timeout=5000,
+    )
+    assert dialog.current_capture() is None
 
 
 def _table_text(table, row: int, column: int) -> str:
@@ -104,13 +167,124 @@ def _history_entry(
         status="passed",
         started_at=started_at,
         ended_at=started_at,
-        device_id="modbus:COM9:1",
+        device_id="CFM-TEST-001",
         operator="pytest",
         metrics={},
     )
 
 
+def _repeatability_trial(
+    *,
+    run_id: str = "RUN-FINAL-K-CALC",
+    flow_point: float,
+    trial_index: int,
+    percent_error: float,
+    original_k_factor: float = 500.0,
+) -> ModbusRepeatabilitySimpleTrialResult:
+    captured_at = datetime(2026, 6, 15, 8, trial_index, tzinfo=UTC)
+    standard_mass = 100.0
+    measured_mass_delta = standard_mass * (1.0 + percent_error / 100.0)
+    return ModbusRepeatabilitySimpleTrialResult(
+        run_id=run_id,
+        flow_point=flow_point,
+        trial_index=trial_index,
+        flow_rate_parameter="mass_rate",
+        flow_acc_parameter="mass_acc",
+        k_factor_parameter="k_factor",
+        original_k_factor=original_k_factor,
+        pre_snapshot={},
+        pre_snapshot_captured_at=captured_at,
+        mass_acc_before=0.0,
+        mass_acc_after=measured_mass_delta,
+        measured_mass_delta=measured_mass_delta,
+        standard_mass=standard_mass,
+        percent_error=percent_error,
+        mean_flow=10.0,
+        instant_flow=10.0,
+        flow_started_at=captured_at,
+        flow_instant_at=captured_at,
+        flow_ended_at=captured_at + timedelta(seconds=10),
+        poll_interval_s=0.05,
+    )
+
+
+def _select_runtime_profile(
+    runtime: ModbusModuleRuntime,
+    *,
+    device_id: str = "CFM-TEST-001",
+    settings: ModbusConnectionSettings | None = None,
+) -> None:
+    runtime.save_device_profile(
+        device_id=device_id,
+        metadata=runtime.operation_metadata,
+        register_map=runtime.register_map,
+        connection_settings=settings,
+        select=True,
+    )
+
+
+def _open_profile_dialog(qtbot, window: ModbusModuleWindow):
+    _click(qtbot, window.createDeviceProfileButton)
+    qtbot.waitUntil(
+        lambda: window.deviceProfileDialog is not None
+        and window.deviceProfileDialog.isVisible(),
+        timeout=5000,
+    )
+    dialog = window.deviceProfileDialog
+    assert dialog is not None
+    return dialog
+
+
+def _open_edit_profile_dialog(qtbot, window: ModbusModuleWindow):
+    _click(qtbot, window.editDeviceProfileButton)
+    qtbot.waitUntil(
+        lambda: window.deviceProfileDialog is not None
+        and window.deviceProfileDialog.isVisible(),
+        timeout=5000,
+    )
+    dialog = window.deviceProfileDialog
+    assert dialog is not None
+    return dialog
+
+
+def _save_profile_from_dialog(
+    qtbot,
+    window: ModbusModuleWindow,
+    *,
+    device_id: str,
+    device_model: str | None = None,
+    tube_model: str | None = None,
+    transmitter_model: str | None = None,
+):
+    dialog = _open_profile_dialog(qtbot, window)
+    dialog.deviceIdLineEdit.setText(device_id)
+    if device_model is not None:
+        dialog.deviceModelLineEdit.setText(device_model)
+    if tube_model is not None:
+        dialog.tubeModelLineEdit.setText(tube_model)
+    if transmitter_model is not None:
+        dialog.transmitterModelLineEdit.setText(transmitter_model)
+    _click(qtbot, dialog.saveButton)
+    qtbot.waitUntil(
+        lambda: window.deviceProfileCombo.findData(device_id) >= 0,
+        timeout=5000,
+    )
+    return dialog
+
+
+def _ensure_window_profile(
+    qtbot,
+    window: ModbusModuleWindow,
+    *,
+    device_id: str = "CFM-UI-001",
+) -> None:
+    if window.deviceProfileCombo.currentData():
+        return
+    _save_profile_from_dialog(qtbot, window, device_id=device_id)
+
+
 def _open_connection_dialog(qtbot, window: ModbusModuleWindow):
+    _ensure_window_profile(qtbot, window)
     _click(qtbot, window.openConnectionButton)
     qtbot.waitUntil(lambda: window.connectionDialog is not None, timeout=5000)
     dialog = window.connectionDialog
@@ -144,6 +318,7 @@ def test_modbus_module_runtime_runs_without_simulator(tmp_path) -> None:
         )
     )
 
+    _select_runtime_profile(runtime, device_id="CFM-TEST-001")
     status = runtime.connect(ModbusConnectionSettings(port="COM9", unit_id=7))
     sample_result = runtime.sample_variables()
     zero_result = runtime.run_zero_calibration()
@@ -168,7 +343,7 @@ def test_modbus_module_runtime_runs_without_simulator(tmp_path) -> None:
     )
 
     assert status.connected is True
-    assert status.device_id == "modbus:COM9:7"
+    assert status.device_id == "CFM-TEST-001"
     assert {sample.variable_name for sample in sample_result.samples} >= {
         "mass_acc",
         "k_factor",
@@ -199,6 +374,69 @@ def test_modbus_module_runtime_runs_without_simulator(tmp_path) -> None:
     assert zero_run.configuration_snapshot["device_model"] == "CFM-100"
 
 
+def test_modbus_module_runtime_requires_stable_device_profile_id(tmp_path) -> None:
+    repository = _repository(tmp_path)
+    runtime = ModbusModuleRuntime(
+        repository,
+        transport_factory=placeholder_transport_factory([]),
+        zero_calibration_wait_s=0.0,
+    )
+
+    try:
+        runtime.connect(ModbusConnectionSettings(port="COM9", unit_id=1))
+    except RuntimeError as exc:
+        assert "device profile" in str(exc)
+    else:
+        raise AssertionError("connect without a device profile should fail")
+
+    for invalid in ("", "01", "modbus:COM9:1"):
+        try:
+            runtime.save_device_profile(device_id=invalid)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"invalid device ID accepted: {invalid!r}")
+
+
+def test_modbus_module_runtime_deletes_legacy_port_profile(tmp_path) -> None:
+    repository = _repository(tmp_path)
+    repository.save_device(
+        DeviceRecord(
+            device_id="modbus:COM9:1",
+            device_type="modbus_rtu",
+        )
+    )
+    repository.save_modbus_device_profile(
+        ModbusDeviceProfileRecord(
+            profile_id="profile:modbus:COM9:1",
+            device_id="modbus:COM9:1",
+            display_name="Legacy COM9 Unit 1",
+        )
+    )
+    repository.save_modbus_test_session(
+        ModbusTestSessionRecord(
+            session_id="SESSION-LEGACY-COM9",
+            device_id="modbus:COM9:1",
+            profile_id="profile:modbus:COM9:1",
+            operator="pytest",
+            status="closed",
+            started_at=datetime(2026, 6, 13, 8, 0, tzinfo=UTC),
+        )
+    )
+    runtime = ModbusModuleRuntime(
+        repository,
+        transport_factory=placeholder_transport_factory([]),
+        zero_calibration_wait_s=0.0,
+    )
+
+    assert runtime.delete_device_profile("modbus:COM9:1") is True
+
+    assert runtime.get_device_profile("modbus:COM9:1") is None
+    assert repository.get_device("modbus:COM9:1") is not None
+    sessions = repository.list_modbus_test_sessions(device_id="modbus:COM9:1")
+    assert sessions[0].profile_id is None
+
+
 def test_modbus_module_runtime_captures_simple_repeatability_history(tmp_path) -> None:
     repository = _repository(tmp_path)
     transports = []
@@ -215,6 +453,271 @@ def test_modbus_module_runtime_captures_simple_repeatability_history(tmp_path) -
             transmitter_model="TX-R",
         )
     )
+    _select_runtime_profile(runtime, device_id="CFM-REPEAT-001")
+    runtime.connect(ModbusConnectionSettings(port="COM9", unit_id=1))
+    transport = transports[0]
+    register_map = runtime.register_map
+    mass_rate = register_map.by_name("mass_rate")
+    mass_acc = register_map.by_name("mass_acc")
+    transport.read_sequences[mass_rate.address] = [
+        *[
+            encoded
+            for _trial in range(10)
+            for encoded in (
+                encode_registers(mass_rate, 0.0),
+                encode_registers(mass_rate, 5.0),
+                encode_registers(mass_rate, 5.5),
+                encode_registers(mass_rate, 0.0),
+            )
+        ],
+    ]
+    measured_deltas = (
+        100.0,
+        101.0,
+        99.0,
+        50.0,
+        51.0,
+        49.0,
+        20.0,
+        20.2,
+        19.8,
+        52.0,
+    )
+    cumulative = 0.0
+    mass_acc_reads = []
+    for delta in measured_deltas:
+        mass_acc_reads.append(encode_registers(mass_acc, cumulative))
+        cumulative += delta
+        mass_acc_reads.append(encode_registers(mass_acc, cumulative))
+    transport.read_sequences[mass_acc.address] = mass_acc_reads
+
+    standards = (100.0, 100.0, 100.0, 50.0, 50.0, 50.0, 20.0, 20.0, 20.0)
+    flow_points = (600.0, 600.0, 600.0, 300.0, 300.0, 300.0, 100.0, 100.0, 100.0)
+    trials = []
+    run_id = None
+    for index, (flow_point, standard_mass) in enumerate(zip(flow_points, standards)):
+        capture = runtime.capture_repeatability_simple_trial(
+            run_id=run_id,
+            flow_point=flow_point,
+            trial_index=index % 3 + 1,
+            snapshot_variable_names=("temperature",),
+            flow_rate_parameter="mass_rate",
+            flow_acc_parameter="mass_acc",
+            poll_interval_s=0.05,
+            capture_snapshot=run_id is None,
+        )
+        run_id = capture.run_id
+        trials.append(
+            runtime.calculate_repeatability_simple_trial(
+                capture,
+                standard_mass=standard_mass,
+                notes="same operation note",
+            )
+        )
+
+    result = runtime.calculate_repeatability_simple_result(tuple(trials))
+
+    assert repository.get_run_status(result.run_id) == "passed"
+    assert result.analysis.summary_metrics["trial_count"] == 9.0
+    assert result.analysis.summary_metrics["max_repeatability_stddev_percent"] == 2.0
+    assert result.trials[1].percent_error == 1.0
+    history = runtime.list_calibration_history(operation="manual_error_repeatability")
+    assert len(history) == 1
+    assert history[0].metrics["max_abs_percent_error"] == 2.0
+    assert history[0].metrics["flow_point_300_repeatability_stddev_percent"] == 2.0
+    assert history[0].metrics["device_model"] == "CFM-R"
+    assert history[0].metrics["tube_model"] == "T-R"
+    assert history[0].metrics["transmitter_model"] == "TX-R"
+    assert history[0].notes == "same operation note"
+    assert len(history[0].metrics["trials"]) == 9
+    assert {
+        trial["notes"]
+        for trial in history[0].metrics["trials"]
+    } == {"same operation note"}
+    test_records = runtime.list_test_records(operation="manual_error_repeatability")
+    assert any(
+        record.operation == "manual_error_repeatability_trial"
+        for record in test_records
+    )
+    trials = repository.list_modbus_trial_records(device_id="CFM-REPEAT-001")
+    assert len(trials) == 9
+    assert {trial.trial_status for trial in trials} == {"accepted"}
+    assert {trial.notes for trial in trials} == {"same operation note"}
+    trial_record = next(
+        record
+        for record in test_records
+        if record.operation == "manual_error_repeatability_trial"
+    )
+    assert trial_record.notes == "same operation note"
+    summary_record = next(
+        record
+        for record in test_records
+        if record.operation == "manual_error_repeatability"
+    )
+    assert summary_record.notes == "same operation note"
+    raw_artifacts = [
+        artifact
+        for artifact in repository.list_artifacts()
+        if artifact.metadata.get("curve_type") == "modbus_polling"
+    ]
+    assert len(raw_artifacts) >= 9
+    analysis = runtime.analyze_device_history("CFM-REPEAT-001")
+    assert analysis.device_id == "CFM-REPEAT-001"
+    assert analysis.record_count >= 10
+    assert analysis.trial_count == 9
+    assert analysis.accepted_trial_count == 9
+    assert analysis.diagnostic_trial_count == 0
+    assert analysis.rejected_trial_count == 0
+    assert analysis.overall_mean_error_percent == 0.0
+    assert analysis.overall_max_abs_error_percent == 2.0
+    assert len(analysis.flow_summaries) == 3
+    assert analysis.operation_counts["manual_error_repeatability_trial"] == 9
+    assert analysis.latest_final_k is None
+    assert "No final K preview" in "\n".join(analysis.notes)
+
+
+def test_modbus_module_runtime_saves_repeatability_flow_summary_notes(
+    tmp_path,
+) -> None:
+    repository = _repository(tmp_path)
+    runtime = ModbusModuleRuntime(
+        repository,
+        transport_factory=placeholder_transport_factory([]),
+        zero_calibration_wait_s=0.0,
+    )
+    _select_runtime_profile(runtime, device_id="CFM-REP-SUMMARY")
+    runtime.connect(ModbusConnectionSettings(port="COM9", unit_id=1))
+    trials = tuple(
+        _repeatability_trial(
+            run_id="RUN-REP-SUMMARY",
+            flow_point=250.0,
+            trial_index=index,
+            percent_error=error,
+        )
+        for index, error in enumerate((0.0, 1.0, -1.0), start=1)
+    )
+
+    result = runtime.save_repeatability_flow_summary_history(
+        trials,
+        flow_point=250.0,
+        mode="single_point",
+        notes="summary note",
+    )
+
+    records = [
+        record
+        for record in runtime.list_test_records(operation="manual_error_repeatability")
+        if record.operation == "manual_error_repeatability"
+    ]
+    assert result.notes == "summary note"
+    assert len(records) == 1
+    assert records[0].notes == "summary note"
+    assert records[0].metrics["mode"] == "single_point"
+    assert records[0].metrics["flow_point_count"] == 1.0
+    assert records[0].metrics["trial_count"] == 3.0
+
+
+def test_modbus_module_runtime_uses_calculation_time_for_repeatability_records(
+    tmp_path,
+) -> None:
+    repository = _repository(tmp_path)
+    runtime = ModbusModuleRuntime(
+        repository,
+        transport_factory=placeholder_transport_factory([]),
+        zero_calibration_wait_s=0.0,
+    )
+    _select_runtime_profile(runtime, device_id="CFM-REP-TIME")
+    runtime.connect(ModbusConnectionSettings(port="COM9", unit_id=1))
+    source_started_at = datetime(2026, 6, 15, 8, 1, tzinfo=UTC)
+    source_ended_at = source_started_at + timedelta(seconds=10)
+    capture = ModbusRepeatabilitySimpleCapture(
+        run_id="RUN-REP-TIME",
+        flow_point=250.0,
+        trial_index=1,
+        flow_rate_parameter="mass_rate",
+        flow_acc_parameter="mass_acc",
+        k_factor_parameter="k_factor",
+        original_k_factor=500.0,
+        pre_snapshot={},
+        pre_snapshot_captured_at=source_started_at,
+        mass_acc_before=0.0,
+        mass_acc_after=100.0,
+        segment=FlowSegmentCaptureResult(
+            flow_rate_parameter="mass_rate",
+            started_at=source_started_at,
+            instant_flow_at=source_started_at,
+            ended_at=source_ended_at,
+            start_flow=10.0,
+            instant_flow=10.0,
+            stop_flow=0.0,
+            poll_count=3,
+        ),
+        poll_interval_s=0.05,
+    )
+
+    before_trial_calculation = datetime.now(UTC)
+    trial = runtime.calculate_repeatability_simple_trial(
+        capture,
+        standard_mass=100.0,
+    )
+    after_trial_calculation = datetime.now(UTC)
+    trial_record = next(
+        record
+        for record in runtime.list_test_records(operation="manual_error_repeatability")
+        if record.operation == "manual_error_repeatability_trial"
+    )
+
+    assert trial_record.started_at is not None
+    assert before_trial_calculation <= trial_record.started_at <= after_trial_calculation
+    assert trial_record.started_at != trial.flow_started_at
+    assert trial_record.metrics["started_at"] == trial_record.started_at.isoformat()
+    assert trial_record.metrics["flow_started_at"] == source_started_at.isoformat()
+    assert trial_record.metrics["flow_ended_at"] == trial.flow_ended_at.isoformat()
+
+    before_repeatability_calculation = datetime.now(UTC)
+    runtime.save_repeatability_flow_summary_history(
+        (trial,),
+        flow_point=250.0,
+        mode="single_point",
+    )
+    after_repeatability_calculation = datetime.now(UTC)
+    summary_record = next(
+        record
+        for record in runtime.list_test_records(operation="manual_error_repeatability")
+        if record.operation == "manual_error_repeatability"
+    )
+
+    assert summary_record.started_at is not None
+    assert (
+        before_repeatability_calculation
+        <= summary_record.started_at
+        <= after_repeatability_calculation
+    )
+    assert summary_record.started_at != trial.flow_started_at
+    assert summary_record.metrics["started_at"] == summary_record.started_at.isoformat()
+    assert summary_record.metrics["ended_at"] == summary_record.ended_at.isoformat()
+    assert (
+        summary_record.metrics["source_trial_started_at"]
+        == trial.flow_started_at.isoformat()
+    )
+    assert (
+        summary_record.metrics["source_trial_ended_at"]
+        == trial.flow_ended_at.isoformat()
+    )
+
+
+def test_modbus_module_runtime_calculates_repeatability_final_k(
+    tmp_path,
+) -> None:
+    repository = _repository(tmp_path)
+    transports = []
+    runtime = ModbusModuleRuntime(
+        repository,
+        transport_factory=placeholder_transport_factory(transports),
+        k_factor_post_start_sample_s=0.0,
+        k_factor_post_stop_delay_s=0.0,
+    )
+    _select_runtime_profile(runtime, device_id="CFM-FINAL-K-001")
     runtime.connect(ModbusConnectionSettings(port="COM9", unit_id=1))
     transport = transports[0]
     register_map = runtime.register_map
@@ -250,7 +753,6 @@ def test_modbus_module_runtime_captures_simple_repeatability_history(tmp_path) -
             run_id=run_id,
             flow_point=flow_point,
             trial_index=index % 3 + 1,
-            snapshot_variable_names=("temperature",),
             flow_rate_parameter="mass_rate",
             flow_acc_parameter="mass_acc",
             poll_interval_s=0.05,
@@ -261,23 +763,686 @@ def test_modbus_module_runtime_captures_simple_repeatability_history(tmp_path) -
             runtime.calculate_repeatability_simple_trial(
                 capture,
                 standard_mass=standard_mass,
+                notes="final k note",
             )
         )
 
-    result = runtime.calculate_repeatability_simple_result(tuple(trials))
+    selected = {
+        600.0: tuple(trials[0:3]),
+        300.0: tuple(trials[3:6]),
+        100.0: tuple(trials[6:9]),
+    }
+    before_final_k_calculation = datetime.now(UTC)
+    result = runtime.calculate_repeatability_final_k(
+        selected,
+        run_id=run_id,
+        notes="final k note",
+    )
+    after_final_k_calculation = datetime.now(UTC)
 
-    assert repository.get_run_status(result.run_id) == "passed"
-    assert result.analysis.summary_metrics["trial_count"] == 9.0
-    assert result.analysis.summary_metrics["max_repeatability_stddev_percent"] == 2.0
-    assert result.trials[1].percent_error == 1.0
-    history = runtime.list_calibration_history(operation="manual_error_repeatability")
-    assert len(history) == 1
-    assert history[0].metrics["max_abs_percent_error"] == 2.0
-    assert history[0].metrics["flow_point_300_repeatability_stddev_percent"] == 2.0
-    assert history[0].metrics["device_model"] == "CFM-R"
-    assert history[0].metrics["tube_model"] == "T-R"
-    assert history[0].metrics["transmitter_model"] == "TX-R"
-    assert len(history[0].metrics["trials"]) == 9
+    assert result["selected_trial_count"] == 9
+    assert result["original_k_factor"] == 500.0
+    assert result["average_error"] == 0.0
+    assert result["new_k_factor"] == 500.0
+    assert result["write_status"] == "not_requested"
+    assert repository.get_run_status(run_id) == "passed"
+    history = runtime.list_test_records(operation="manual_error_repeatability")
+    assert any(
+        record.operation == "manual_error_repeatability_final_k"
+        and record.metrics["new_k_factor"] == 500.0
+        and record.notes == "final k note"
+        for record in history
+    )
+    final_k_record = next(
+        record
+        for record in history
+        if record.operation == "manual_error_repeatability_final_k"
+    )
+    assert final_k_record.started_at is not None
+    assert before_final_k_calculation <= final_k_record.started_at <= after_final_k_calculation
+    assert final_k_record.metrics["started_at"] == final_k_record.started_at.isoformat()
+    assert final_k_record.metrics["source_trial_started_at"] == (
+        min(trial.flow_started_at for trial in trials).isoformat()
+    )
+    assert final_k_record.metrics["source_trial_ended_at"] == (
+        max(trial.flow_ended_at for trial in trials).isoformat()
+    )
+    analysis = runtime.analyze_device_history("CFM-FINAL-K-001")
+    assert analysis.latest_final_k is not None
+    assert analysis.latest_final_k["new_k_factor"] == 500.0
+    assert analysis.latest_final_k["original_k_factor"] == 500.0
+    assert len(analysis.flow_summaries) == 3
+    written = runtime.apply_repeatability_final_k_result(result)
+    assert written["write_status"] == "applied"
+    assert written["write_verified"] is True
+    assert written["readback_k_factor"] == 500.0
+    assert written["audit_id"]
+    assert repository.count_rows("audit_logs") == 1
+    assert transports[0].writes[-1][0] == register_map.by_name("k_factor").address
+    final_k_metrics = repository.list_analysis_results(run_id)[-1].summary_metrics
+    assert final_k_metrics["write_requested"] is True
+    assert final_k_metrics["write_verified"] is True
+    assert final_k_metrics["readback_k_factor"] == 500.0
+
+    updated = runtime.calculate_repeatability_final_k(selected, run_id=run_id)
+    final_k_records = [
+        record
+        for record in runtime.list_test_records(operation="manual_error_repeatability")
+        if record.operation == "manual_error_repeatability_final_k"
+    ]
+    assert len(final_k_records) == 1
+    assert updated["new_k_factor"] == 500.0
+    assert final_k_records[0].metrics["new_k_factor"] == 500.0
+    assert final_k_records[0].notes == "final k note"
+
+    mixed_operation_selected = {
+        600.0: tuple(trials[0:3]),
+        300.0: tuple(trials[3:6]),
+        100.0: tuple(
+            replace(trial, run_id="RUN-FROM-OTHER-OPERATION")
+            for trial in trials[6:9]
+        ),
+    }
+    try:
+        runtime.calculate_repeatability_final_k(
+            mixed_operation_selected,
+            run_id=run_id,
+        )
+        raise AssertionError("Expected mixed repeatability operations to fail.")
+    except ValueError as exc:
+        assert "one operation" in str(exc)
+
+
+def test_modbus_module_repeatability_final_k_changes_for_asymmetric_errors(
+    tmp_path,
+) -> None:
+    repository = _repository(tmp_path)
+    runtime = ModbusModuleRuntime(repository)
+    selected = {
+        600.0: tuple(
+            _repeatability_trial(flow_point=600.0, trial_index=index, percent_error=error)
+            for index, error in enumerate((0.10, 0.20, 0.30), start=1)
+        ),
+        300.0: tuple(
+            _repeatability_trial(flow_point=300.0, trial_index=index, percent_error=error)
+            for index, error in enumerate((-0.10, 0.00, 0.10), start=1)
+        ),
+        100.0: tuple(
+            _repeatability_trial(flow_point=100.0, trial_index=index, percent_error=error)
+            for index, error in enumerate((0.60, 0.70, 0.80), start=1)
+        ),
+    }
+
+    result = runtime.calculate_repeatability_final_k(
+        selected,
+        run_id="RUN-FINAL-K-CALC",
+        save_history=False,
+    )
+
+    expected_flow_100_intermediate = 500.0 / (1.0 + 0.35 / 100.0)
+    expected_flow_300_intermediate = 500.0 / (1.0 - 0.35 / 100.0)
+    expected_new_k = (
+        expected_flow_300_intermediate + expected_flow_100_intermediate
+    ) / 2.0
+
+    assert result["original_k_factor"] == 500.0
+    assert result["new_k_factor"] != result["original_k_factor"]
+    assert result["new_k_factor"] == pytest.approx(expected_new_k)
+    assert result["delta_k_factor"] == pytest.approx(expected_new_k - 500.0)
+    assert result["flow_point_100_measurement_error_percent"] == pytest.approx(0.7)
+    assert result["flow_point_100_intermediate_k_factor"] == pytest.approx(
+        expected_flow_100_intermediate
+    )
+
+
+def test_modbus_module_device_analysis_saves_selected_trial_report(
+    tmp_path,
+) -> None:
+    repository = _repository(tmp_path)
+    transports = []
+    runtime = ModbusModuleRuntime(
+        repository,
+        transport_factory=placeholder_transport_factory(transports),
+        k_factor_post_start_sample_s=0.0,
+        k_factor_post_stop_delay_s=0.0,
+    )
+    _select_runtime_profile(runtime, device_id="CFM-ANALYSIS-REPORT")
+    runtime.connect(ModbusConnectionSettings(port="COM9", unit_id=1))
+    transport = transports[0]
+    register_map = runtime.register_map
+    mass_rate = register_map.by_name("mass_rate")
+    mass_acc = register_map.by_name("mass_acc")
+    transport.read_sequences[mass_rate.address] = [
+        encode_registers(mass_rate, 0.0),
+        *[
+            encoded
+            for _trial in range(9)
+            for encoded in (
+                encode_registers(mass_rate, 5.0),
+                encode_registers(mass_rate, 5.5),
+                encode_registers(mass_rate, 0.0),
+            )
+        ],
+    ]
+    cumulative = 0.0
+    mass_acc_reads = []
+    for delta in (100.0, 101.0, 99.0, 50.0, 51.0, 49.0, 20.0, 20.2, 19.8):
+        mass_acc_reads.append(encode_registers(mass_acc, cumulative))
+        cumulative += delta
+        mass_acc_reads.append(encode_registers(mass_acc, cumulative))
+    transport.read_sequences[mass_acc.address] = mass_acc_reads
+
+    trials = []
+    run_id = None
+    standards = (100.0, 100.0, 100.0, 50.0, 50.0, 50.0, 20.0, 20.0, 20.0)
+    flow_points = (600.0, 600.0, 600.0, 300.0, 300.0, 300.0, 100.0, 100.0, 100.0)
+    for index, (flow_point, standard_mass) in enumerate(zip(flow_points, standards)):
+        capture = runtime.capture_repeatability_simple_trial(
+            run_id=run_id,
+            flow_point=flow_point,
+            trial_index=index % 3 + 1,
+            snapshot_variable_names=("zero_offset", "low_threshold"),
+            flow_rate_parameter="mass_rate",
+            flow_acc_parameter="mass_acc",
+            poll_interval_s=0.001,
+            capture_snapshot=True,
+        )
+        run_id = capture.run_id
+        trials.append(
+            runtime.calculate_repeatability_simple_trial(
+                capture,
+                standard_mass=standard_mass,
+            )
+        )
+    runtime.calculate_repeatability_simple_result(tuple(trials))
+    runtime.disconnect()
+
+    history_trials = runtime.list_repeatability_history_trials("CFM-ANALYSIS-REPORT")
+    grouped_history_trials = {
+        flow_point: tuple(
+            item for item in history_trials if item.trial.flow_point == flow_point
+        )
+        for flow_point in (600.0, 300.0, 100.0)
+    }
+    selected = {
+        flow_point: trials[:3]
+        for flow_point, trials in grouped_history_trials.items()
+    }
+    preview = runtime.calculate_device_analysis_repeatability_preview(selected)
+    assert preview["selected_trial_count"] == 9
+    assert preview["run_id"] == "PREVIEW-DEVICE-ANALYSIS"
+    assert preview["new_k_factor"] == 500.0
+    assert not runtime.list_test_records(
+        device_id="CFM-ANALYSIS-REPORT",
+        operation="manual_error_repeatability_final_k",
+    )
+    before_report_save = datetime.now(UTC)
+    result = runtime.calculate_device_analysis_repeatability_report(
+        "CFM-ANALYSIS-REPORT",
+        selected,
+        comparison_variable_names=("zero_offset", "low_threshold"),
+    )
+    after_report_save = datetime.now(UTC)
+
+    assert result.report_artifact_id
+    assert "Selected Trial Final K Report" in result.report_text
+    assert "Selected Trials:" in result.report_text
+    assert "Per-Flow Calculations:" in result.report_text
+    assert "Final K Calculation:" in result.report_text
+    assert "old_k_factor: 500" in result.report_text
+    assert "new_k_factor: 500" in result.report_text
+    assert "delta_k_factor: 0" in result.report_text
+    assert "zero_offset" in result.report_text
+    assert "Device ID:" not in result.report_text
+    assert "Source Repeatability Run IDs:" not in result.report_text
+    assert "Operation:" not in result.report_text
+    assert "Generated At:" not in result.report_text
+    assert result.report_text.count("\t") >= 9
+    records = runtime.list_test_records(
+        device_id="CFM-ANALYSIS-REPORT",
+        operation="manual_error_repeatability",
+    )
+    report_records = [
+        record
+        for record in records
+        if record.operation == "manual_error_repeatability_final_k"
+        and record.metrics.get("analysis_source") == "current_device_analysis"
+    ]
+    assert len(report_records) == 1
+    selected_trial_results = tuple(
+        history_trial.trial
+        for trials in selected.values()
+        for history_trial in trials
+    )
+    source_trial_started_at = min(
+        trial.flow_started_at for trial in selected_trial_results
+    )
+    source_trial_ended_at = max(trial.flow_ended_at for trial in selected_trial_results)
+    assert report_records[0].started_at is not None
+    assert before_report_save <= report_records[0].started_at <= after_report_save
+    assert report_records[0].ended_at is not None
+    assert before_report_save <= report_records[0].ended_at <= after_report_save
+    assert report_records[0].metrics["started_at"] == (
+        report_records[0].started_at.isoformat()
+    )
+    assert report_records[0].metrics["source_trial_started_at"] == (
+        source_trial_started_at.isoformat()
+    )
+    assert report_records[0].metrics["source_trial_ended_at"] == (
+        source_trial_ended_at.isoformat()
+    )
+    assert report_records[0].metrics["new_k_factor"] == result.metrics["new_k_factor"]
+    assert report_records[0].metrics["delta_k_factor"] == result.metrics["delta_k_factor"]
+    assert report_records[0].metrics["report_artifact_id"] == result.report_artifact_id
+
+    cross_operation_selected = {
+        flow_point: tuple(
+            ModbusRepeatabilityHistoryTrial(
+                trial=replace(
+                    history_trial.trial,
+                    run_id=(
+                        "RUN-ANALYSIS-HISTORY-A"
+                        if history_trial.trial.flow_point != 100.0
+                        else "RUN-ANALYSIS-HISTORY-B"
+                    ),
+                ),
+                attempt_id=history_trial.attempt_id,
+                pre_snapshot=history_trial.pre_snapshot,
+                device_metadata=history_trial.device_metadata,
+            )
+            for history_trial in trials
+        )
+        for flow_point, trials in selected.items()
+    }
+    cross_operation_result = runtime.calculate_device_analysis_repeatability_report(
+        "CFM-ANALYSIS-REPORT",
+        cross_operation_selected,
+        comparison_variable_names=("zero_offset", "low_threshold"),
+        save_history=False,
+    )
+
+    assert cross_operation_result.metrics["new_k_factor"] == result.metrics["new_k_factor"]
+    assert cross_operation_result.metrics["source_repeatability_run_ids"] == [
+        "RUN-ANALYSIS-HISTORY-A",
+        "RUN-ANALYSIS-HISTORY-B",
+    ]
+
+    first_flow = sorted(selected)[0]
+    mismatched_first = selected[first_flow][0]
+    mismatched_selected = dict(selected)
+    mismatched_selected[first_flow] = (
+        ModbusRepeatabilityHistoryTrial(
+            trial=mismatched_first.trial,
+            attempt_id=mismatched_first.attempt_id,
+            pre_snapshot={
+                **mismatched_first.pre_snapshot,
+                "low_threshold": "different",
+            },
+            device_metadata=mismatched_first.device_metadata,
+        ),
+        *selected[first_flow][1:],
+    )
+    try:
+        runtime.validate_repeatability_analysis_snapshot_consistency(
+            mismatched_selected,
+            variable_names=("zero_offset", "low_threshold"),
+        )
+        raise AssertionError("Expected inconsistent snapshot values to fail.")
+    except ValueError as exc:
+        assert "low_threshold" in str(exc)
+
+
+def test_modbus_module_history_trial_uses_attempt_original_k_fallback(tmp_path) -> None:
+    repository = _repository(tmp_path)
+    runtime = ModbusModuleRuntime(repository)
+    captured_at = datetime(2026, 6, 15, 8, 0, tzinfo=UTC)
+    repository.save_device(DeviceRecord(device_id="CFM-K-FALLBACK", device_type="modbus_rtu"))
+    repository.save_modbus_operation_attempt(
+        ModbusOperationAttemptRecord(
+            attempt_id="ATT-K-FALLBACK",
+            device_id="CFM-K-FALLBACK",
+            operation_type="manual_error_repeatability_trial",
+            status="accepted",
+            operator="pytest",
+            run_id="RUN-K-FALLBACK",
+            started_at=captured_at,
+            ended_at=captured_at,
+            summary={
+                "flow_point": 100.0,
+                "trial_index": 1,
+                "k_factor_parameter": "k_factor",
+                "original_k_factor": 500.0,
+                "flow_rate_parameter": "mass_rate",
+                "flow_acc_parameter": "mass_acc",
+                "pre_snapshot": {
+                    "zero_offset": 1.0,
+                    "low_threshold": 2.0,
+                },
+            },
+        )
+    )
+    repository.save_modbus_trial_record(
+        ModbusTrialRecord(
+            trial_id="TRIAL-K-FALLBACK",
+            attempt_id="ATT-K-FALLBACK",
+            run_id="RUN-K-FALLBACK",
+            device_id="CFM-K-FALLBACK",
+            flow_point=100.0,
+            trial_index=1,
+            trial_status="accepted",
+            k_factor_parameter="k_factor",
+            original_k_factor=None,
+            standard_mass=100.0,
+            measured_mass_delta=100.0,
+            percent_error=0.0,
+            mean_flow=10.0,
+            instant_flow=10.0,
+            flow_started_at=captured_at,
+            flow_instant_at=captured_at,
+            flow_ended_at=captured_at,
+        )
+    )
+
+    history_trials = runtime.list_repeatability_history_trials("CFM-K-FALLBACK")
+
+    assert len(history_trials) == 1
+    assert history_trials[0].trial.original_k_factor == 500.0
+
+
+def test_device_analysis_trial_selection_dialog_saves_compare_variables(qtbot) -> None:
+    captured_at = datetime(2026, 6, 15, 8, 0, tzinfo=UTC)
+    history_trials = tuple(
+        ModbusRepeatabilityHistoryTrial(
+            trial=ModbusRepeatabilitySimpleTrialResult(
+                run_id="RUN-ANALYSIS-SELECT",
+                flow_point=flow_point,
+                trial_index=trial_index,
+                flow_rate_parameter="mass_rate",
+                flow_acc_parameter="mass_acc",
+                k_factor_parameter="k_factor",
+                original_k_factor=500.0,
+                pre_snapshot={
+                    "zero_offset": 1.0,
+                    "low_threshold": 2.0,
+                    "temperature": 25.0,
+                },
+                pre_snapshot_captured_at=captured_at,
+                mass_acc_before=0.0,
+                mass_acc_after=standard_mass + error,
+                measured_mass_delta=standard_mass + error,
+                standard_mass=standard_mass,
+                percent_error=error,
+                mean_flow=10.0,
+                instant_flow=10.0,
+                flow_started_at=started_at,
+                flow_instant_at=started_at,
+                flow_ended_at=started_at,
+                poll_interval_s=0.05,
+                trial_status="accepted",
+            ),
+            attempt_id=f"ATT-{flow_point:g}-{trial_index}",
+            pre_snapshot={
+                "zero_offset": 1.0,
+                "low_threshold": 2.0,
+                "temperature": 25.0,
+            },
+            device_metadata={},
+        )
+        for flow_index, (flow_point, standard_mass) in enumerate(
+            ((100.0, 20.0), (300.0, 50.0), (600.0, 100.0))
+        )
+        for trial_index, error in ((1, 0.0), (2, 0.1), (3, -0.1))
+        for started_at in (
+            captured_at + timedelta(minutes=flow_index * 10 + trial_index),
+        )
+    )
+    saved = []
+    dialog = DeviceAnalysisTrialSelectionDialog(
+        history_trials,
+        comparison_variable_names=("zero_offset", "low_threshold"),
+        save_comparison_variable_names=saved.append,
+    )
+    qtbot.addWidget(dialog)
+    dialog.show()
+
+    assert not dialog.okButton.isEnabled()
+    assert len(dialog.selected_trials_by_flow()) == 0
+    assert dialog.selectionTable.rowCount() == 9
+    assert _table_text(dialog.selectionTable, 0, 1) == "600"
+    assert _table_text(dialog.selectionTable, 0, 2) == "3"
+    header = dialog.selectionTable.horizontalHeader()
+    assert header.sectionsMovable()
+    header.moveSection(13, 1)
+    assert header.logicalIndex(1) == 13
+    checked_rows = [
+        row
+        for row in range(dialog.selectionTable.rowCount())
+        if dialog.selectionTable.item(row, 0).checkState() == Qt.CheckState.Checked
+    ]
+    assert checked_rows == []
+    for row in range(dialog.selectionTable.rowCount()):
+        dialog.selectionTable.item(row, 0).setCheckState(Qt.CheckState.Checked)
+    assert dialog.okButton.isEnabled()
+    assert len(dialog.selected_trials_by_flow()) == 3
+    preview_text = dialog.previewTextEdit.toPlainText()
+    assert "Flow 100g/s: adjusted_error=0%" in preview_text
+    assert "Flow 300g/s: adjusted_error=0%" in preview_text
+    assert "Flow 600g/s: adjusted_error=0%" in preview_text
+    assert "repeatability=0.1%" in preview_text
+    assert "K value: old=500, new=500" in preview_text
+    assert "trials 1-3" not in preview_text
+    assert "mean=" not in preview_text
+    assert _table_text(dialog.selectionTable, 0, 4) == "500"
+    assert _table_text(dialog.selectionTable, 0, 9).startswith("ATT-")
+    dialog.save_comparison_variables(
+        ("zero_offset", "low_threshold", "temperature")
+    )
+
+    assert saved == [("zero_offset", "low_threshold", "temperature")]
+    assert dialog.comparisonVariablesLabel.text() == (
+        "zero_offset, low_threshold, temperature"
+    )
+    assert "temperature=25" in dialog.selectionTable.item(0, 13).text()
+
+
+def test_device_analysis_compare_variables_dialog_saves_and_closes(qtbot) -> None:
+    saved = []
+    dialog = DeviceAnalysisComparisonVariablesDialog(
+        ("zero_offset", "low_threshold", "temperature"),
+        selected_names=("zero_offset",),
+        save_selected_names=saved.append,
+    )
+    qtbot.addWidget(dialog)
+    dialog.show()
+
+    assert dialog.selected_names() == ("zero_offset",)
+    row = _find_snapshot_row(dialog.variableTable, "temperature")
+    item = dialog.variableTable.item(row, 0)
+    assert item is not None
+    item.setCheckState(Qt.CheckState.Checked)
+
+    assert dialog.selected_names() == ("zero_offset", "temperature")
+    _click(qtbot, dialog.saveButton)
+
+    assert saved == [("zero_offset", "temperature")]
+    assert not dialog.isVisible()
+
+
+def test_device_analysis_dialog_refreshes_history_after_report_save(qtbot) -> None:
+    class FakeRuntime:
+        def __init__(self) -> None:
+            self.report_calls = 0
+
+        def list_repeatability_history_trials(self, device_id: str) -> tuple:
+            return ()
+
+        def calculate_device_analysis_repeatability_preview(
+            self,
+            selected_trials: dict,
+        ) -> dict:
+            return {"new_k_factor": 500.0}
+
+        def calculate_device_analysis_repeatability_report(
+            self,
+            device_id: str,
+            selected_trials: dict,
+            *,
+            comparison_variable_names: tuple[str, ...],
+        ) -> SimpleNamespace:
+            self.report_calls += 1
+            return SimpleNamespace(run_id="RUN-DEVICE-ANALYSIS-SAVE")
+
+    refreshed = []
+    runtime = FakeRuntime()
+    dialog = DeviceAnalysisDialog(
+        runtime,
+        device_id="CFM-ANALYSIS-CALLBACK",
+        report_saved_callback=lambda: refreshed.append(True),
+    )
+    qtbot.addWidget(dialog)
+    dialog.show()
+    dialog._selected_trials = {100.0: tuple()}
+    dialog._preview_metrics = runtime.calculate_device_analysis_repeatability_preview(
+        dialog._selected_trials,
+    )
+
+    dialog.save_report()
+
+    assert runtime.report_calls == 1
+    assert refreshed == [True]
+    assert (
+        dialog.statusLabel.text()
+        == "Report saved to test history: RUN-DEVICE-ANALYSIS-SAVE"
+    )
+
+
+def test_device_analysis_dialog_select_button_calculates_then_save_records(
+    qtbot,
+    monkeypatch,
+) -> None:
+    selected_trials = {120.0: ("trial-a", "trial-b", "trial-c")}
+
+    class FakeSelectionDialog:
+        def __init__(
+            self,
+            _history_trials,
+            *,
+            comparison_variable_names,
+            save_comparison_variable_names,
+            preview_metrics_factory,
+            parent=None,
+        ) -> None:
+            self._preview_metrics = preview_metrics_factory(selected_trials)
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+        def comparison_variable_names(self):
+            return ("zero_offset", "low_threshold")
+
+        def selected_trials_by_flow(self):
+            return selected_trials
+
+        def preview_metrics(self):
+            return self._preview_metrics
+
+    class FakeRuntime:
+        def __init__(self) -> None:
+            self.preview_calls = 0
+            self.report_calls = 0
+
+        def list_repeatability_history_trials(self, device_id: str) -> tuple:
+            return tuple(range(9))
+
+        def calculate_device_analysis_repeatability_preview(
+            self,
+            selected_trials: dict,
+        ) -> dict:
+            self.preview_calls += 1
+            return {
+                "original_k_factor": 500.0,
+                "new_k_factor": 499.5,
+                "flow_points": [
+                    {
+                        "flow_point": 120.0,
+                        "adjusted_error_percent": -0.1,
+                        "repeatability_stddev_percent": 0.02,
+                    }
+                ],
+            }
+
+        def calculate_device_analysis_repeatability_report(
+            self,
+            device_id: str,
+            selected_trials: dict,
+            *,
+            comparison_variable_names: tuple[str, ...],
+        ) -> SimpleNamespace:
+            self.report_calls += 1
+            return SimpleNamespace(run_id="RUN-DEVICE-ANALYSIS-SAVE")
+
+    monkeypatch.setattr(
+        modbus_window_module,
+        "DeviceAnalysisTrialSelectionDialog",
+        FakeSelectionDialog,
+    )
+    refreshed = []
+    runtime = FakeRuntime()
+    dialog = DeviceAnalysisDialog(
+        runtime,
+        device_id="CFM-ANALYSIS-CALC-SAVE",
+        report_saved_callback=lambda: refreshed.append(True),
+    )
+    qtbot.addWidget(dialog)
+    dialog.show()
+
+    dialog.select_trials()
+
+    assert runtime.preview_calls == 1
+    assert runtime.report_calls == 0
+    assert dialog.saveReportButton.isEnabled()
+    assert dialog.statusLabel.text() == "Calculated from selected trials: 3"
+
+    dialog.save_report()
+
+    assert runtime.report_calls == 1
+    assert refreshed == [True]
+
+
+def test_repeatability_selection_dialog_lists_consecutive_trial_windows(qtbot) -> None:
+    captured_at = datetime(2026, 6, 15, 8, 0, tzinfo=UTC)
+    trials = tuple(
+        ModbusRepeatabilitySimpleTrialResult(
+            run_id="RUN-SELECT",
+            flow_point=250.0,
+            trial_index=index,
+            flow_rate_parameter="mass_rate",
+            flow_acc_parameter="mass_acc",
+            k_factor_parameter="k_factor",
+            original_k_factor=500.0,
+            pre_snapshot={},
+            pre_snapshot_captured_at=None,
+            mass_acc_before=0.0,
+            mass_acc_after=100.0 + error,
+            measured_mass_delta=100.0 + error,
+            standard_mass=100.0,
+            percent_error=error,
+            mean_flow=10.0,
+            instant_flow=10.0,
+            flow_started_at=captured_at,
+            flow_instant_at=captured_at,
+            flow_ended_at=captured_at,
+            poll_interval_s=0.05,
+        )
+        for index, error in ((1, 0.0), (2, 1.0), (3, -1.0), (5, 2.0))
+    )
+    dialog = RepeatabilitySelectionDialog(trials)
+    qtbot.addWidget(dialog)
+    dialog.show()
+
+    assert dialog.windowCombo.count() == 1
+    assert tuple(trial.trial_index for trial in dialog.selected_trials()) == (1, 2, 3)
+    assert "Repeatability stddev" in dialog.previewTextEdit.toPlainText()
 
 
 def test_modbus_module_runtime_saves_single_point_repeatability_summary(
@@ -291,17 +1456,18 @@ def test_modbus_module_runtime_saves_single_point_repeatability_summary(
         k_factor_post_start_sample_s=0.0,
         k_factor_post_stop_delay_s=0.0,
     )
+    _select_runtime_profile(runtime, device_id="CFM-SINGLE-001")
     runtime.connect(ModbusConnectionSettings(port="COM9", unit_id=1))
     transport = transports[0]
     register_map = runtime.register_map
     mass_rate = register_map.by_name("mass_rate")
     mass_acc = register_map.by_name("mass_acc")
     transport.read_sequences[mass_rate.address] = [
-        encode_registers(mass_rate, 0.0),
         *[
             encoded
             for _trial in range(4)
             for encoded in (
+                encode_registers(mass_rate, 0.0),
                 encode_registers(mass_rate, 4.0),
                 encode_registers(mass_rate, 4.2),
                 encode_registers(mass_rate, 0.0),
@@ -368,6 +1534,7 @@ def test_modbus_module_manual_zero_start_write_sends_fc05_first(tmp_path) -> Non
         zero_calibration_wait_s=0.0,
     )
     runtime.set_frame_logger(lambda direction, operation, data: frames.append((direction, operation, data)))
+    _select_runtime_profile(runtime, device_id="CFM-WRITE-001")
     runtime.connect(ModbusConnectionSettings(port="COM9", unit_id=1, retry_count=0))
 
     result = runtime.write_variable("zero_calibration_start", "1")
@@ -410,6 +1577,7 @@ def test_modbus_module_runtime_captures_simple_k_factor_and_verifies_write(
         k_factor_post_start_sample_s=0.0,
         k_factor_post_stop_delay_s=0.0,
     )
+    _select_runtime_profile(runtime, device_id="CFM-KFACTOR-001")
     runtime.connect(ModbusConnectionSettings(port="COM9", unit_id=1))
 
     capture = runtime.capture_k_factor_simple_trial(
@@ -470,6 +1638,7 @@ def test_modbus_module_runtime_exports_and_imports_calibration_history(
         k_factor_post_start_sample_s=0.0,
         k_factor_post_stop_delay_s=0.0,
     )
+    _select_runtime_profile(source_runtime, device_id="CFM-EXPORT-001")
     source_runtime.connect(ModbusConnectionSettings(port="COM9", unit_id=1))
     zero_result = source_runtime.run_zero_calibration()
     capture = source_runtime.capture_k_factor_simple_trial(
@@ -488,10 +1657,16 @@ def test_modbus_module_runtime_exports_and_imports_calibration_history(
 
     export_path = tmp_path / "exports" / "history.json"
     export_result = source_runtime.export_calibration_history(export_path)
+    filtered_export_path = tmp_path / "filtered.json"
+    filtered_result = source_runtime.export_calibration_history(
+        filtered_export_path,
+        device_id="OTHER-DEVICE",
+    )
 
     assert export_result.path == export_path
-    assert export_result.run_count == 2
-    assert export_result.analysis_result_count == 2
+    assert export_result.run_count >= 2
+    assert export_result.analysis_result_count >= 2
+    assert filtered_result.run_count == 0
     payload = json.loads(export_path.read_text(encoding="utf-8"))
     assert payload["format"] == "coreflow.modbus.calibration_history"
     assert payload["format_version"] == 1
@@ -544,6 +1719,65 @@ def test_modbus_module_runtime_exports_and_imports_calibration_history(
 
     assert repeated.imported_runs == 0
     assert repeated.skipped_runs == 2
+    repeated_records = target_runtime.list_test_records()
+    assert {entry.run_id for entry in repeated_records} == {
+        zero_result.run_id,
+        k_result.run_id,
+    }
+    assert target_runtime.list_test_records(device_id="OTHER-DEVICE") == ()
+
+    rebound_repository = _repository(tmp_path / "rebound")
+    rebound_runtime = ModbusModuleRuntime(
+        rebound_repository,
+        transport_factory=placeholder_transport_factory([]),
+        zero_calibration_wait_s=0.0,
+    )
+    rebound_runtime.save_device_profile(
+        device_id="CFM-IMPORT-001",
+        metadata=ModbusOperationMetadata(
+            device_model="CFM-I",
+            tube_model="T-I",
+            transmitter_model="TX-I",
+        ),
+        register_map=rebound_runtime.register_map,
+        select=True,
+    )
+
+    rebound_import = rebound_runtime.import_calibration_history(
+        export_path,
+        target_device_id="CFM-IMPORT-001",
+    )
+
+    assert rebound_import.imported_runs == 2
+    rebound_records = rebound_runtime.list_test_records(device_id="CFM-IMPORT-001")
+    assert {entry.run_id for entry in rebound_records} == {
+        zero_result.run_id,
+        k_result.run_id,
+    }
+    assert rebound_runtime.list_test_records(device_id="CFM-EXPORT-001") == ()
+    rebound_run = rebound_repository.get_run(zero_result.run_id)
+    assert rebound_run is not None
+    assert rebound_run.device_id == "CFM-IMPORT-001"
+    assert rebound_run.configuration_snapshot["device_id"] == "CFM-IMPORT-001"
+    assert (
+        rebound_run.configuration_snapshot["imported_from_device_id"]
+        == "CFM-EXPORT-001"
+    )
+
+    retarget_import = target_runtime.import_calibration_history(
+        export_path,
+        target_device_id="CFM-IMPORT-002",
+    )
+
+    assert retarget_import.imported_runs == 0
+    assert retarget_import.skipped_runs == 0
+    assert retarget_import.retargeted_runs == 2
+    retargeted_records = target_runtime.list_test_records(device_id="CFM-IMPORT-002")
+    assert {entry.run_id for entry in retargeted_records} == {
+        zero_result.run_id,
+        k_result.run_id,
+    }
+    assert target_runtime.list_test_records(device_id="CFM-EXPORT-001") == ()
 
     zero_entry = next(
         entry
@@ -584,6 +1818,188 @@ def test_modbus_module_runtime_exports_and_imports_calibration_history(
     renamed_run = target_repository.get_run(renamed_ids[0])
     assert renamed_run is not None
     assert renamed_run.configuration_snapshot["imported_from_run_id"] == zero_result.run_id
+
+
+def test_modbus_module_import_retargets_attempts_and_trials_for_current_device(
+    tmp_path,
+) -> None:
+    source_repository = _repository(tmp_path / "source-repeatability")
+    source_transport = placeholder_fake_transport()
+    source_runtime = ModbusModuleRuntime(
+        source_repository,
+        transport_factory=lambda _config: source_transport,
+        k_factor_post_start_sample_s=0.0,
+        k_factor_post_stop_delay_s=0.0,
+    )
+    _select_runtime_profile(source_runtime, device_id="CFM-SOURCE-TRIALS")
+    source_runtime.connect(ModbusConnectionSettings(port="COM9", unit_id=1))
+
+    register_map = source_runtime.register_map
+    mass_rate = register_map.by_name("mass_rate")
+    mass_acc = register_map.by_name("mass_acc")
+    source_transport.read_sequences[mass_rate.address] = [
+        encode_registers(mass_rate, 0.0),
+        encode_registers(mass_rate, 5.0),
+        encode_registers(mass_rate, 5.5),
+        encode_registers(mass_rate, 0.0),
+    ]
+    source_transport.read_sequences[mass_acc.address] = [
+        encode_registers(mass_acc, 100.0),
+        encode_registers(mass_acc, 112.0),
+    ]
+    capture = source_runtime.capture_repeatability_simple_trial(
+        flow_point=300.0,
+        trial_index=1,
+        flow_rate_parameter="mass_rate",
+        flow_acc_parameter="mass_acc",
+        poll_interval_s=0.001,
+    )
+    trial = source_runtime.calculate_repeatability_simple_trial(
+        capture,
+        standard_mass=12.0,
+    )
+    result = source_runtime.calculate_repeatability_simple_result(
+        (trial,),
+        mode="single_point",
+        expected_flow_point_count=1,
+        expected_trials_per_point=1,
+        require_complete=False,
+    )
+
+    export_path = tmp_path / "repeatability_history.json"
+    source_runtime.export_calibration_history(export_path)
+    payload = json.loads(export_path.read_text(encoding="utf-8"))
+    assert {
+        entry["run"]["status"]
+        for entry in payload["entries"]
+        if entry.get("run") is not None
+    } <= {"passed", "failed", "canceled", "error"}
+
+    target_repository = _repository(tmp_path / "target-repeatability")
+    target_runtime = ModbusModuleRuntime(
+        target_repository,
+        transport_factory=placeholder_transport_factory([]),
+    )
+    target_import = target_runtime.import_calibration_history(
+        export_path,
+        target_device_id="CFM-CURRENT-DEVICE",
+    )
+
+    assert target_import.imported_runs == 1
+    current_records = target_runtime.list_test_records(
+        device_id="CFM-CURRENT-DEVICE",
+        operation="manual_error_repeatability",
+    )
+    assert {record.operation for record in current_records} == {
+        "manual_error_repeatability",
+        "manual_error_repeatability_trial",
+    }
+    assert any(
+        record.operation == "manual_error_repeatability_trial"
+        and record.metrics["device_id"] == "CFM-CURRENT-DEVICE"
+        and record.metrics["imported_from_device_id"] == "CFM-SOURCE-TRIALS"
+        and record.metrics["percent_error"] == 0.0
+        for record in current_records
+    )
+    assert target_runtime.list_test_records(device_id="CFM-SOURCE-TRIALS") == ()
+    trial_records = target_repository.list_modbus_trial_records(
+        device_id="CFM-CURRENT-DEVICE"
+    )
+    assert len(trial_records) == 1
+    assert trial_records[0].run_id == result.run_id
+    assert trial_records[0].device_id == "CFM-CURRENT-DEVICE"
+    assert (
+        trial_records[0].device_metadata["imported_from_device_id"]
+        == "CFM-SOURCE-TRIALS"
+    )
+
+    repeat_import = target_runtime.import_calibration_history(
+        export_path,
+        target_device_id="CFM-CURRENT-DEVICE",
+    )
+
+    assert repeat_import.imported_runs == 0
+    assert repeat_import.retargeted_runs == 1
+    assert len(
+        target_runtime.list_test_records(
+            device_id="CFM-CURRENT-DEVICE",
+            operation="manual_error_repeatability",
+        )
+    ) == 2
+
+
+def test_modbus_module_import_accepts_legacy_running_raw_capture_runs(
+    tmp_path,
+) -> None:
+    source_repository = _repository(tmp_path / "source-legacy-running")
+    source_transport = placeholder_fake_transport()
+    source_runtime = ModbusModuleRuntime(
+        source_repository,
+        transport_factory=lambda _config: source_transport,
+        k_factor_post_start_sample_s=0.0,
+        k_factor_post_stop_delay_s=0.0,
+    )
+    _select_runtime_profile(source_runtime, device_id="CFM-LEGACY-RUNNING")
+    source_runtime.connect(ModbusConnectionSettings(port="COM9", unit_id=1))
+    register_map = source_runtime.register_map
+    mass_rate = register_map.by_name("mass_rate")
+    mass_acc = register_map.by_name("mass_acc")
+    source_transport.read_sequences[mass_rate.address] = [
+        encode_registers(mass_rate, 0.0),
+        encode_registers(mass_rate, 5.0),
+        encode_registers(mass_rate, 5.5),
+        encode_registers(mass_rate, 0.0),
+    ]
+    source_transport.read_sequences[mass_acc.address] = [
+        encode_registers(mass_acc, 100.0),
+        encode_registers(mass_acc, 112.0),
+    ]
+    capture = source_runtime.capture_repeatability_simple_trial(
+        flow_point=300.0,
+        trial_index=1,
+        flow_rate_parameter="mass_rate",
+        flow_acc_parameter="mass_acc",
+        poll_interval_s=0.001,
+    )
+    trial = source_runtime.calculate_repeatability_simple_trial(
+        capture,
+        standard_mass=12.0,
+    )
+    source_runtime.calculate_repeatability_simple_result(
+        (trial,),
+        mode="single_point",
+        expected_flow_point_count=1,
+        expected_trials_per_point=1,
+        require_complete=False,
+    )
+    export_path = tmp_path / "legacy_running_history.json"
+    source_runtime.export_calibration_history(export_path)
+    payload = json.loads(export_path.read_text(encoding="utf-8"))
+    for entry in payload["entries"]:
+        run = entry.get("run")
+        if (
+            isinstance(run, dict)
+            and run.get("workflow_name") == "manual_error_repeatability_trial"
+        ):
+            run["status"] = "running"
+            run.setdefault("configuration_snapshot", {})["raw_capture_only"] = True
+    export_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    target_repository = _repository(tmp_path / "target-legacy-running")
+    target_runtime = ModbusModuleRuntime(
+        target_repository,
+        transport_factory=placeholder_transport_factory([]),
+    )
+    result = target_runtime.import_calibration_history(
+        export_path,
+        target_device_id="CFM-CURRENT-LEGACY",
+    )
+
+    assert result.errors == ()
+    assert target_runtime.list_test_records(
+        device_id="CFM-CURRENT-LEGACY",
+        operation="manual_error_repeatability",
+    )
 
 
 def test_modbus_module_window_uses_own_connection_state(qtbot, tmp_path) -> None:
@@ -628,7 +2044,14 @@ def test_modbus_module_window_uses_own_connection_state(qtbot, tmp_path) -> None
     assert _find_row(window.variableMapTable, "mass_rate") >= 0
     assert _find_row(window.variableMapTable, "temperature") >= 0
     mass_acc_row = _find_row(window.variableMapTable, "mass_acc")
-    _set_table_text(window.variableMapTable, mass_acc_row, 2, "30")
+    edit_dialog = _open_edit_profile_dialog(qtbot, window)
+    mass_acc_dialog_row = _find_row(edit_dialog.mapTable, "mass_acc")
+    _set_table_text(edit_dialog.mapTable, mass_acc_dialog_row, 2, "30")
+    _click(qtbot, edit_dialog.saveButton)
+    qtbot.waitUntil(
+        lambda: _table_text(window.variableMapTable, mass_acc_row, 2) == "30",
+        timeout=5000,
+    )
     transports.clear()
     assert not window.sampleVariablesAction.isEnabled()
     assert not hasattr(window, "sampleVariablesButton")
@@ -639,7 +2062,7 @@ def test_modbus_module_window_uses_own_connection_state(qtbot, tmp_path) -> None
     assert not hasattr(window, "importCalibrationHistoryAction")
     _click(qtbot, dialog.connectButton)
     qtbot.waitUntil(
-        lambda: window.statusValueLabel.text() == "Connected modbus:COM9:7",
+        lambda: window.statusValueLabel.text() == "Connected CFM-UI-001",
         timeout=5000,
     )
     assert window.sampleVariablesAction.isEnabled()
@@ -722,11 +2145,42 @@ def test_modbus_module_window_uses_own_connection_state(qtbot, tmp_path) -> None
     assert window.repeatabilityDialog.modeCombo.currentData() == "three_point"
     assert window.repeatabilityDialog.modeCombo.model().item(1).isEnabled()
     assert not window.repeatabilityDialog.modeCombo.model().item(2).isEnabled()
+    assert window.repeatabilityDialog.minimumWidth() <= 720
+    assert not hasattr(window.repeatabilityDialog, "resultTable")
+    assert window.repeatabilityDialog.configurationButton.isVisible()
+    assert (
+        window.repeatabilityDialog.standardMassSpinBox.buttonSymbols()
+        == QAbstractSpinBox.ButtonSymbols.NoButtons
+    )
+    assert window.repeatabilityDialog.standardMassSpinBox.suffix() == " g"
+    assert window.repeatabilityDialog.calculateTrialErrorButton.text() == (
+        "Calculate Trial Error"
+    )
+    assert not window.repeatabilityDialog.calculateTrialErrorButton.isEnabled()
+    assert (
+        window.repeatabilityDialog.windowFlags()
+        & Qt.WindowType.WindowMaximizeButtonHint
+    )
+    assert window.repeatabilityDialog.selectionSummaryTextEdit.maximumHeight() > 10000
+    assert (
+        window.repeatabilityDialog.trialTable.sizePolicy().verticalPolicy()
+        == QSizePolicy.Policy.Expanding
+    )
+    assert (
+        window.repeatabilityDialog.trialTable.horizontalScrollBarPolicy()
+        == Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+    )
+    header = window.repeatabilityDialog.trialTable.horizontalHeader()
+    assert header.sectionsMovable()
+    header.moveSection(9, 0)
+    assert header.logicalIndex(0) == 9
+    assert not window.repeatabilityDialog.originalKFactorValueLabel.isVisible()
+    assert not window.repeatabilityDialog.saveConfigButton.isVisible()
     assert not hasattr(window.repeatabilityDialog, "pcFlowSimulationCheckBox")
     assert not hasattr(window.repeatabilityDialog, "pcFlowValueSpinBox")
     assert not hasattr(window.repeatabilityDialog, "pcMassDeltaSpinBox")
 
-    assert window.statusValueLabel.text() == "Connected modbus:COM9:7"
+    assert window.statusValueLabel.text() == "Connected CFM-UI-001"
     assert window.frameTable.rowCount() >= 14
     assert _table_text(window.frameTable, 0, 1) in {"TX", "RX"}
     log = window.logTextEdit.toPlainText()
@@ -739,7 +2193,9 @@ def test_modbus_module_window_uses_own_connection_state(qtbot, tmp_path) -> None
         timeout=5000,
     )
     assert window.calibrationHistoryDialog is not None
-    assert window.calibrationHistoryDialog.historyTable.rowCount() == 1
+    assert window.calibrationHistoryDialog.historyTable.rowCount() >= 1
+    table_operations = _column_texts(window.calibrationHistoryDialog.historyTable, 1)
+    assert "Zero Calibration" in table_operations
     assert window.calibrationHistoryDialog.historyTable.columnCount() == 5
     assert window.calibrationHistoryDialog.importButton.text() == "Import..."
     assert window.calibrationHistoryDialog.exportButton.text() == "Export..."
@@ -795,6 +2251,352 @@ def test_modbus_module_window_uses_own_connection_state(qtbot, tmp_path) -> None
     assert _table_text(window.variableMapTable, mass_acc_row, 2) == "31"
 
 
+def test_modbus_module_window_loads_saved_device_profile(
+    qtbot,
+    tmp_path,
+) -> None:
+    repository = _repository(tmp_path)
+    runtime = ModbusModuleRuntime(
+        repository,
+        transport_factory=placeholder_transport_factory([]),
+        zero_calibration_wait_s=0.0,
+    )
+    scanner = SerialPortScanner(provider=lambda: (SerialPortInfo(port="COM9"),))
+    window = ModbusModuleWindow(repository, runtime=runtime, port_scanner=scanner)
+    qtbot.addWidget(window)
+    window.show()
+    dialog = _open_profile_dialog(qtbot, window)
+    dialog.deviceIdLineEdit.setText("CFM-PROFILE-001")
+    dialog.deviceModelLineEdit.setText("CFM-500")
+    dialog.tubeModelLineEdit.setText("T-80")
+    dialog.transmitterModelLineEdit.setText("TX-80")
+    mass_acc_row = _find_row(dialog.mapTable, "mass_acc")
+    _set_table_text(dialog.mapTable, mass_acc_row, 2, "88")
+    _click(qtbot, dialog.saveButton)
+    qtbot.waitUntil(
+        lambda: window.deviceProfileCombo.findData("CFM-PROFILE-001") >= 0,
+        timeout=5000,
+    )
+
+    second_runtime = ModbusModuleRuntime(
+        repository,
+        transport_factory=placeholder_transport_factory([]),
+        zero_calibration_wait_s=0.0,
+    )
+    second = ModbusModuleWindow(
+        repository,
+        runtime=second_runtime,
+        port_scanner=scanner,
+    )
+    qtbot.addWidget(second)
+    second.show()
+    index = second.deviceProfileCombo.findData("CFM-PROFILE-001")
+    assert index >= 0
+    second.deviceProfileCombo.setCurrentIndex(index)
+
+    assert second.deviceIdLineEdit.text() == "CFM-PROFILE-001"
+    assert second.deviceModelLineEdit.text() == "CFM-500"
+    assert second.tubeModelLineEdit.text() == "T-80"
+    assert second.transmitterModelLineEdit.text() == "TX-80"
+    loaded_mass_acc_row = _find_row(second.variableMapTable, "mass_acc")
+    assert _table_text(second.variableMapTable, loaded_mass_acc_row, 2) == "88"
+
+
+def test_modbus_module_window_selects_recent_device_profile(
+    qtbot,
+    tmp_path,
+) -> None:
+    repository = _repository(tmp_path)
+    runtime = ModbusModuleRuntime(
+        repository,
+        transport_factory=placeholder_transport_factory([]),
+        zero_calibration_wait_s=0.0,
+    )
+    scanner = SerialPortScanner(provider=lambda: (SerialPortInfo(port="COM9"),))
+    window = ModbusModuleWindow(
+        repository,
+        runtime=runtime,
+        port_scanner=scanner,
+        data_root=tmp_path,
+    )
+    qtbot.addWidget(window)
+    window.show()
+    _save_profile_from_dialog(
+        qtbot,
+        window,
+        device_id="CFM-RECENT-001",
+        device_model="CFM-RECENT",
+    )
+    preferences_path = tmp_path / "config" / "modbus_module_ui.json"
+    assert json.loads(preferences_path.read_text(encoding="utf-8"))[
+        "last_device_profile_id"
+    ] == "CFM-RECENT-001"
+
+    second_runtime = ModbusModuleRuntime(
+        repository,
+        transport_factory=placeholder_transport_factory([]),
+        zero_calibration_wait_s=0.0,
+    )
+    second = ModbusModuleWindow(
+        repository,
+        runtime=second_runtime,
+        port_scanner=scanner,
+        data_root=tmp_path,
+    )
+    qtbot.addWidget(second)
+    second.show()
+
+    assert second.deviceProfileCombo.currentData() == "CFM-RECENT-001"
+    assert second.deviceIdLineEdit.text() == "CFM-RECENT-001"
+    assert second.deviceModelLineEdit.text() == "CFM-RECENT"
+
+
+def test_modbus_module_repeatability_configuration_requires_device_profile(
+    qtbot,
+    tmp_path,
+) -> None:
+    repository = _repository(tmp_path)
+    runtime = ModbusModuleRuntime(
+        repository,
+        transport_factory=placeholder_transport_factory([]),
+        zero_calibration_wait_s=0.0,
+    )
+    scanner = SerialPortScanner(provider=lambda: (SerialPortInfo(port="COM9"),))
+    window = ModbusModuleWindow(
+        repository,
+        runtime=runtime,
+        port_scanner=scanner,
+        data_root=tmp_path,
+    )
+    qtbot.addWidget(window)
+    window.show()
+
+    dialog = window._ensure_repeatability_dialog()
+    dialog.show()
+    _click(qtbot, dialog.configurationDialog.saveConfigButton)
+
+    assert (
+        "select a device profile"
+        in dialog.configurationDialog.statusLabel.text().lower()
+    )
+    assert (
+        "Save repeatability configuration failed: select a device profile first."
+        in window.logTextEdit.toPlainText()
+    )
+    assert not (
+        tmp_path
+        / "config"
+        / "workflow_templates"
+        / "modbus_repeatability_simple.json"
+    ).exists()
+
+
+def test_modbus_module_repeatability_configuration_is_per_device_profile(
+    qtbot,
+    tmp_path,
+) -> None:
+    repository = _repository(tmp_path)
+    runtime = ModbusModuleRuntime(
+        repository,
+        transport_factory=placeholder_transport_factory([]),
+        zero_calibration_wait_s=0.0,
+    )
+    scanner = SerialPortScanner(provider=lambda: (SerialPortInfo(port="COM9"),))
+    window = ModbusModuleWindow(
+        repository,
+        runtime=runtime,
+        port_scanner=scanner,
+        data_root=tmp_path,
+    )
+    qtbot.addWidget(window)
+    window.show()
+
+    _save_profile_from_dialog(qtbot, window, device_id="CFM-REP-A")
+    a_dialog = window._ensure_repeatability_dialog()
+    a_dialog.show()
+    a_dialog.flowPointSpinBoxes[0].setValue(111.0)
+    a_dialog.pollIntervalSpinBox.setValue(0.25)
+    a_dialog.operationNotesTextEdit.setPlainText("bench A warm-up complete")
+    _click(qtbot, a_dialog.configurationDialog.saveConfigButton)
+    qtbot.waitUntil(
+        lambda: "Repeatability configuration saved"
+        in window.logTextEdit.toPlainText(),
+        timeout=5000,
+    )
+    a_path = (
+        tmp_path
+        / "config"
+        / "workflow_templates"
+        / "devices"
+        / "CFM-REP-A"
+        / "modbus_repeatability_simple.json"
+    )
+    assert a_path.exists()
+    a_saved = json.loads(a_path.read_text(encoding="utf-8"))
+    assert a_saved["flow_points"][0] == 111.0
+    assert a_saved["poll_interval_s"] == 0.25
+    assert a_saved["operation_notes"] == "bench A warm-up complete"
+    assert a_dialog.operationNotesLabel.text() == "bench A warm-up complete"
+
+    _save_profile_from_dialog(qtbot, window, device_id="CFM-REP-B")
+    b_dialog = window._ensure_repeatability_dialog()
+    b_dialog.flowPointSpinBoxes[0].setValue(222.0)
+    b_dialog.pollIntervalSpinBox.setValue(0.75)
+    b_dialog.operationNotesTextEdit.setPlainText("bench B cold start")
+    _click(qtbot, b_dialog.configurationDialog.saveConfigButton)
+    qtbot.waitUntil(
+        lambda: window.logTextEdit.toPlainText().count(
+            "Repeatability configuration saved"
+        )
+        >= 2,
+        timeout=5000,
+    )
+    b_path = (
+        tmp_path
+        / "config"
+        / "workflow_templates"
+        / "devices"
+        / "CFM-REP-B"
+        / "modbus_repeatability_simple.json"
+    )
+    assert b_path.exists()
+    b_saved = json.loads(b_path.read_text(encoding="utf-8"))
+    assert b_saved["flow_points"][0] == 222.0
+    assert b_saved["poll_interval_s"] == 0.75
+    assert b_saved["operation_notes"] == "bench B cold start"
+    assert json.loads(a_path.read_text(encoding="utf-8")) == a_saved
+    assert not (
+        tmp_path
+        / "config"
+        / "workflow_templates"
+        / "modbus_repeatability_simple.json"
+    ).exists()
+
+    index = window.deviceProfileCombo.findData("CFM-REP-A")
+    assert index >= 0
+    window.deviceProfileCombo.setCurrentIndex(index)
+    qtbot.waitUntil(
+        lambda: a_dialog.flowPointSpinBoxes[0].value() == 111.0
+        and a_dialog.pollIntervalSpinBox.value() == 0.25
+        and a_dialog.operationNotesLabel.text() == "bench A warm-up complete",
+        timeout=5000,
+    )
+    index = window.deviceProfileCombo.findData("CFM-REP-B")
+    assert index >= 0
+    window.deviceProfileCombo.setCurrentIndex(index)
+    qtbot.waitUntil(
+        lambda: a_dialog.flowPointSpinBoxes[0].value() == 222.0
+        and a_dialog.pollIntervalSpinBox.value() == 0.75
+        and a_dialog.operationNotesLabel.text() == "bench B cold start",
+        timeout=5000,
+    )
+
+
+def test_modbus_module_window_separates_new_edit_and_delete_profile(
+    qtbot,
+    tmp_path,
+) -> None:
+    repository = _repository(tmp_path)
+    runtime = ModbusModuleRuntime(
+        repository,
+        transport_factory=placeholder_transport_factory([]),
+        zero_calibration_wait_s=0.0,
+    )
+    scanner = SerialPortScanner(provider=lambda: (SerialPortInfo(port="COM9"),))
+    window = ModbusModuleWindow(repository, runtime=runtime, port_scanner=scanner)
+    qtbot.addWidget(window)
+    window.show()
+
+    assert window.createDeviceProfileButton.text() == "New Profile"
+    assert window.editDeviceProfileButton.text() == "Edit Profile"
+    assert window.deleteDeviceProfileButton.text() == "Delete"
+    assert not window.editDeviceProfileButton.isEnabled()
+    assert not window.deleteDeviceProfileButton.isEnabled()
+
+    _save_profile_from_dialog(
+        qtbot,
+        window,
+        device_id="CFM-DELETE-001",
+        device_model="CFM-D",
+    )
+    assert window.editDeviceProfileButton.isEnabled()
+    assert window.deleteDeviceProfileButton.isEnabled()
+
+    edit_dialog = _open_edit_profile_dialog(qtbot, window)
+    assert edit_dialog.deviceIdLineEdit.text() == "CFM-DELETE-001"
+    edit_dialog.tubeModelLineEdit.setText("T-EDITED")
+    _click(qtbot, edit_dialog.saveButton)
+    qtbot.waitUntil(
+        lambda: window.tubeModelLineEdit.text() == "T-EDITED",
+        timeout=5000,
+    )
+
+    new_dialog = _open_profile_dialog(qtbot, window)
+    assert new_dialog.deviceIdLineEdit.text() == ""
+    new_dialog.close()
+
+    _click(qtbot, window.deleteDeviceProfileButton)
+    qtbot.waitUntil(
+        lambda: window.deviceProfileCombo.findData("CFM-DELETE-001") < 0,
+        timeout=5000,
+    )
+    assert runtime.get_device_profile("CFM-DELETE-001") is None
+    assert repository.get_device("CFM-DELETE-001") is not None
+    assert "Test records were kept" in window.logTextEdit.toPlainText()
+
+
+def test_modbus_module_window_live_variables_follow_profile_register_map(
+    qtbot,
+    tmp_path,
+) -> None:
+    repository = _repository(tmp_path)
+    transports = []
+    runtime = ModbusModuleRuntime(
+        repository,
+        transport_factory=placeholder_transport_factory(transports),
+        zero_calibration_wait_s=0.0,
+    )
+    scanner = SerialPortScanner(provider=lambda: (SerialPortInfo(port="COM9"),))
+    window = ModbusModuleWindow(repository, runtime=runtime, port_scanner=scanner)
+    qtbot.addWidget(window)
+    window.show()
+
+    _save_profile_from_dialog(qtbot, window, device_id="CFM-MAP-FOLLOW")
+    edit_dialog = _open_edit_profile_dialog(qtbot, window)
+    mass_acc_dialog_row = _find_row(edit_dialog.mapTable, "mass_acc")
+    _set_table_text(edit_dialog.mapTable, mass_acc_dialog_row, 2, "188")
+    _click(qtbot, edit_dialog.saveButton)
+    qtbot.waitUntil(
+        lambda: _table_text(
+            window.variableMapTable,
+            _find_row(window.variableMapTable, "mass_acc"),
+            2,
+        )
+        == "188",
+        timeout=5000,
+    )
+    assert runtime.register_map.by_name("mass_acc").address == 188
+
+    dialog = _open_connection_dialog(qtbot, window)
+    _wait_for_scanned_ports(qtbot, dialog, 1)
+    _click(qtbot, dialog.connectButton)
+    qtbot.waitUntil(
+        lambda: window.statusValueLabel.text() == "Connected CFM-MAP-FOLLOW",
+        timeout=5000,
+    )
+    mass_acc = runtime.register_map.by_name("mass_acc")
+    transports[0].registers[mass_acc.address] = encode_registers(mass_acc, 321.0)
+    transports[0].reads.clear()
+    mass_acc_row = _find_row(window.variableMapTable, "mass_acc")
+    read_button = window.variableMapTable.cellWidget(mass_acc_row, 11).layout().itemAt(0).widget()
+    _click(qtbot, read_button)
+    qtbot.waitUntil(
+        lambda: _table_text(window.variableMapTable, mass_acc_row, 9) == "321 kg",
+        timeout=5000,
+    )
+    assert any(read[1] == 188 for read in transports[0].reads)
+
+
 def test_modbus_operation_runtime_no_pc_flow_simulation_parameter(tmp_path) -> None:
     repository = _repository(tmp_path)
     runtime = ModbusModuleRuntime(repository)
@@ -828,7 +2630,7 @@ def test_modbus_module_window_k_factor_simple_flow_calculates_and_writes(
     _wait_for_scanned_ports(qtbot, dialog, 1)
     _click(qtbot, dialog.connectButton)
     qtbot.waitUntil(
-        lambda: window.statusValueLabel.text() == "Connected modbus:COM9:1",
+        lambda: window.statusValueLabel.text() == "Connected CFM-UI-001",
         timeout=5000,
     )
     register_map = runtime.register_map
@@ -895,11 +2697,14 @@ def test_modbus_module_window_k_factor_simple_flow_calculates_and_writes(
         == "525"
     )
     assert window.calibrationHistoryDialog is not None
-    assert window.calibrationHistoryDialog.historyTable.rowCount() == 1
-    assert "write=applied" in _table_text(
+    assert window.calibrationHistoryDialog.historyTable.rowCount() >= 1
+    assert "K Factor" in _column_texts(
         window.calibrationHistoryDialog.historyTable,
-        0,
-        3,
+        1,
+    )
+    assert any(
+        "write=applied" in value
+        for value in _column_texts(window.calibrationHistoryDialog.historyTable, 3)
     )
     history = runtime.list_calibration_history(operation="k_factor_calibration")
     assert len(history) == 1
@@ -910,6 +2715,7 @@ def test_modbus_module_window_k_factor_simple_flow_calculates_and_writes(
 def test_modbus_module_window_repeatability_simple_records_nine_trials(
     qtbot,
     tmp_path,
+    monkeypatch,
 ) -> None:
     repository = _repository(tmp_path)
     transports = []
@@ -932,7 +2738,7 @@ def test_modbus_module_window_repeatability_simple_records_nine_trials(
     _wait_for_scanned_ports(qtbot, dialog, 1)
     _click(qtbot, dialog.connectButton)
     qtbot.waitUntil(
-        lambda: window.statusValueLabel.text() == "Connected modbus:COM9:1",
+        lambda: window.statusValueLabel.text() == "Connected CFM-UI-001",
         timeout=5000,
     )
     transport = transports[0]
@@ -940,21 +2746,31 @@ def test_modbus_module_window_repeatability_simple_records_nine_trials(
     mass_rate = register_map.by_name("mass_rate")
     mass_acc = register_map.by_name("mass_acc")
     transport.read_sequences[mass_rate.address] = [
-        encode_registers(mass_rate, 0.0),
-        *[
-            encoded
-            for _trial in range(9)
-            for encoded in (
-                encode_registers(mass_rate, 5.0),
-                encode_registers(mass_rate, 5.5),
-                encode_registers(mass_rate, 0.0),
-            )
-        ],
+        encoded
+        for _trial in range(10)
+        for encoded in (
+            encode_registers(mass_rate, 0.0),
+            encode_registers(mass_rate, 5.0),
+            encode_registers(mass_rate, 5.5),
+            encode_registers(mass_rate, 0.0),
+        )
     ]
-    measured_deltas = (100.0, 101.0, 99.0, 50.0, 51.0, 49.0, 20.0, 20.2, 19.8)
+    measured_deltas = (
+        100.0,
+        101.0,
+        99.0,
+        50.0,
+        51.0,
+        49.0,
+        20.0,
+        20.2,
+        19.8,
+        52.0,
+    )
     cumulative = 0.0
-    mass_acc_reads = [encode_registers(mass_acc, cumulative)]
+    mass_acc_reads = []
     for delta in measured_deltas:
+        mass_acc_reads.append(encode_registers(mass_acc, cumulative))
         mass_acc_reads.append(encode_registers(mass_acc, cumulative))
         cumulative += delta
         mass_acc_reads.append(encode_registers(mass_acc, cumulative))
@@ -968,65 +2784,188 @@ def test_modbus_module_window_repeatability_simple_records_nine_trials(
     )
     assert window.repeatabilityDialog is not None
     rep_dialog = window.repeatabilityDialog
+    assert not hasattr(rep_dialog, "snapshotTable")
+    assert rep_dialog.snapshotButton.text().startswith("Pre-test Snapshot...")
+    assert rep_dialog.configurationButton.isVisible()
+    assert not rep_dialog.saveConfigButton.isVisible()
+    assert "No repeatability selection yet." in (
+        rep_dialog.selectionSummaryTextEdit.toPlainText()
+    )
+    assert rep_dialog.kFactorCombo.currentText() == "k_factor"
     rep_dialog.pollIntervalSpinBox.setValue(0.05)
     for spin, value in zip(rep_dialog.flowPointSpinBoxes, (600.0, 300.0, 100.0)):
         spin.setValue(value)
-    _click(qtbot, rep_dialog.saveConfigButton)
+    _click(qtbot, rep_dialog.configurationButton)
+    assert rep_dialog.configurationDialog.isVisible()
+    config_labels = {
+        widget.text()
+        for widget in rep_dialog.configurationDialog.findChildren(QLabel)
+    }
+    assert "Operation Note" in config_labels
+    assert rep_dialog.configurationDialog.operationNotesTextEdit.isVisible()
+    assert rep_dialog.configurationDialog.operationNotesTextEdit.placeholderText() == (
+        "Enter this operation note"
+    )
+    _click(qtbot, rep_dialog.configurationDialog.saveConfigButton)
     qtbot.waitUntil(
         lambda: "Repeatability configuration saved" in window.logTextEdit.toPlainText(),
         timeout=5000,
     )
+    add_trial_dialog_calls: list[dict[str, object]] = []
+
+    class FakeAddTrialDialog:
+        next_result = QDialog.DialogCode.Rejected
+        next_selection = 300.0
+
+        def __init__(
+            self,
+            flow_points,
+            *,
+            default_flow_point=None,
+            parent=None,
+        ) -> None:
+            self.flow_points = tuple(flow_points)
+            self.default_flow_point = default_flow_point
+            add_trial_dialog_calls.append(
+                {
+                    "flow_points": self.flow_points,
+                    "default_flow_point": self.default_flow_point,
+                }
+            )
+
+        def exec(self):
+            return self.next_result
+
+        def selected_flow_point(self) -> float:
+            return self.next_selection
+
+    monkeypatch.setattr(
+        modbus_window_module,
+        "RepeatabilityAddTrialDialog",
+        FakeAddTrialDialog,
+    )
 
     standards = (100.0, 100.0, 100.0, 50.0, 50.0, 50.0, 20.0, 20.0, 20.0)
     for index, standard_mass in enumerate(standards, start=1):
-        rep_dialog.standardMassSpinBox.setValue(standard_mass)
-        _click(qtbot, rep_dialog.startButton)
-        qtbot.waitUntil(
-            lambda count=index: window.logTextEdit.toPlainText().count(
-                "Repeatability captured"
-            )
-            >= count,
-            timeout=5000,
-        )
-        _click(qtbot, rep_dialog.saveTrialButton)
-        qtbot.waitUntil(
-            lambda count=index: len(rep_dialog.trial_results()) == count,
-            timeout=5000,
+        _capture_and_calculate_repeatability_trial(
+            qtbot,
+            window,
+            rep_dialog,
+            standard_mass=standard_mass,
+            expected_count=index,
         )
         if index == 3:
             qtbot.waitUntil(
-                lambda: _has_metric_row(
-                    rep_dialog.resultTable,
-                    "flow_600_repeatability_stddev_percent",
-                ),
+                lambda: "flow_600_repeatability_stddev_percent: 1"
+                in rep_dialog.selectionSummaryTextEdit.toPlainText(),
                 timeout=5000,
             )
-            assert _table_text(
-                rep_dialog.resultTable,
-                _find_metric_row(
-                    rep_dialog.resultTable,
-                    "flow_600_repeatability_stddev_percent",
-                ),
-                1,
-            ) == "1"
+            assert rep_dialog.addTrialButton.isEnabled()
+            FakeAddTrialDialog.next_result = QDialog.DialogCode.Rejected
+            _click(qtbot, rep_dialog.addTrialButton)
+            assert add_trial_dialog_calls[-1] == {
+                "flow_points": (600.0,),
+                "default_flow_point": 600.0,
+            }
+            assert rep_dialog.trialTable.rowCount() == 9
 
-    qtbot.waitUntil(
-        lambda: "Repeatability completed" in window.logTextEdit.toPlainText(),
-        timeout=5000,
-    )
+    assert "Repeatability completed" not in window.logTextEdit.toPlainText()
 
-    assert _table_text(
-        rep_dialog.resultTable,
-        _find_metric_row(rep_dialog.resultTable, "trial_count"),
-        1,
-    ) == "9"
+    assert "trial_count: 9" in rep_dialog.selectionSummaryTextEdit.toPlainText()
     assert _table_text(rep_dialog.trialTable, 0, 6) == "5.5"
     assert _table_text(rep_dialog.trialTable, 0, 7)
     assert _table_text(rep_dialog.trialTable, 1, 9) == "1"
     assert _table_text(rep_dialog.trialTable, 5, 9) == "-2"
-    history = runtime.list_calibration_history(operation="manual_error_repeatability")
-    assert len(history) == 1
-    assert history[0].metrics["flow_point_300_repeatability_stddev_percent"] == 2.0
+    assert rep_dialog.originalKFactorValueLabel.text() == "500"
+    assert not rep_dialog.configurationButton.isEnabled()
+    saved_trials = rep_dialog.trial_results()
+    for flow_point, selected in (
+        (600.0, tuple(saved_trials[0:3])),
+        (300.0, tuple(saved_trials[3:6])),
+        (100.0, tuple(saved_trials[6:9])),
+    ):
+        summary = runtime.summarize_repeatability_flow_point(
+            selected,
+            flow_point=flow_point,
+        )
+        rep_dialog.update_selected_repeatability(summary, selected)
+    assert "Flow 300" in rep_dialog.selectionSummaryTextEdit.toPlainText()
+    assert rep_dialog.calculateFinalKButton.isEnabled()
+    _click(qtbot, rep_dialog.calculateFinalKButton)
+    qtbot.waitUntil(
+        lambda: "Final K calculated" in window.logTextEdit.toPlainText(),
+        timeout=5000,
+    )
+    final_records = [
+        record
+        for record in runtime.list_test_records(operation="manual_error_repeatability")
+        if record.operation == "manual_error_repeatability_final_k"
+    ]
+    assert len(final_records) == 1
+    assert final_records[0].metrics["selected_trial_count"] == 9
+    assert final_records[0].metrics["original_k_factor"] == 500.0
+    assert final_records[0].metrics["write_status"] == "not_requested"
+    assert rep_dialog.writeFinalKButton.isEnabled()
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes,
+    )
+    _click(qtbot, rep_dialog.writeFinalKButton)
+    qtbot.waitUntil(
+        lambda: "Final K write applied" in window.logTextEdit.toPlainText(),
+        timeout=5000,
+    )
+    assert not rep_dialog.writeFinalKButton.isEnabled()
+    assert "write_verified: true" in rep_dialog.selectionSummaryTextEdit.toPlainText()
+    final_records = [
+        record
+        for record in runtime.list_test_records(operation="manual_error_repeatability")
+        if record.operation == "manual_error_repeatability_final_k"
+    ]
+    assert len(final_records) == 1
+    assert final_records[0].metrics["write_status"] == "applied"
+    assert final_records[0].metrics["write_verified"] is True
+    assert final_records[0].metrics["readback_k_factor"] == 500.0
+    assert repository.count_rows("audit_logs") == 1
+    assert rep_dialog.addTrialButton.text() == "Add Trial"
+    assert rep_dialog.addTrialButton.isEnabled()
+    assert not hasattr(rep_dialog, "newTestButton")
+
+    FakeAddTrialDialog.next_result = QDialog.DialogCode.Accepted
+    FakeAddTrialDialog.next_selection = 300.0
+    _click(qtbot, rep_dialog.addTrialButton)
+    qtbot.waitUntil(
+        lambda: rep_dialog.trialTable.rowCount() == 10,
+        timeout=5000,
+    )
+    assert add_trial_dialog_calls[-1] == {
+        "flow_points": (600.0, 300.0, 100.0),
+        "default_flow_point": 100.0,
+    }
+    assert _table_text(rep_dialog.trialTable, 9, 0) == "300"
+    assert _table_text(rep_dialog.trialTable, 9, 1) == "4"
+    _capture_and_calculate_repeatability_trial(
+        qtbot,
+        window,
+        rep_dialog,
+        standard_mass=50.0,
+        expected_count=10,
+    )
+    qtbot.waitUntil(
+        lambda: "trial_count: 10"
+        in rep_dialog.selectionSummaryTextEdit.toPlainText(),
+        timeout=5000,
+    )
+    assert _table_text(rep_dialog.trialTable, 9, 9) == "4"
+    final_records = [
+        record
+        for record in runtime.list_test_records(operation="manual_error_repeatability")
+        if record.operation == "manual_error_repeatability_final_k"
+    ]
+    assert len(final_records) == 1
+    assert final_records[0].metrics["selected_trial_count"] == 9
+    assert final_records[0].metrics["original_k_factor"] == 500.0
     window.calibrationHistoryAction.trigger()
     qtbot.waitUntil(
         lambda: window.calibrationHistoryDialog is not None
@@ -1034,23 +2973,59 @@ def test_modbus_module_window_repeatability_simple_records_nine_trials(
         timeout=5000,
     )
     assert window.calibrationHistoryDialog is not None
-    assert "max_repeatability=" in _table_text(
+    parameter_summaries = _column_texts(
         window.calibrationHistoryDialog.historyTable,
-        0,
         3,
     )
-    assert (
-        "trial 300/2"
-        in window.calibrationHistoryDialog.detailTextEdit.toPlainText()
+    assert any("new_k=" in value for value in parameter_summaries)
+    assert any("flow=300 trial=2" in value for value in parameter_summaries)
+    assert any("error=2%" in value for value in parameter_summaries)
+    test_records = runtime.list_test_records(operation="manual_error_repeatability")
+    assert any(
+        record.operation == "manual_error_repeatability_trial"
+        and record.metrics["flow_point"] == 300.0
+        and record.metrics["trial_index"] == 2
+        and record.metrics["k_factor_parameter"] == "k_factor"
+        and record.metrics["original_k_factor"] == 500.0
+        and "flow_started_at" in record.metrics
+        and "flow_ended_at" in record.metrics
+        for record in test_records
     )
-    assert "v1=5.5" in window.calibrationHistoryDialog.detailTextEdit.toPlainText()
-    assert "v_mean=" in window.calibrationHistoryDialog.detailTextEdit.toPlainText()
+    assert any(
+        record.metrics.get("instant_flow") == 5.5
+        for record in test_records
+    )
+    assert any(
+        "mean_flow" in record.metrics
+        for record in test_records
+        if record.operation == "manual_error_repeatability_trial"
+    )
     assert (
+        tmp_path
+        / "config"
+        / "workflow_templates"
+        / "devices"
+        / "CFM-UI-001"
+        / "modbus_repeatability_simple.json"
+    ).exists()
+    assert not (
         tmp_path
         / "config"
         / "workflow_templates"
         / "modbus_repeatability_simple.json"
     ).exists()
+    saved = json.loads(
+        (
+            tmp_path
+            / "config"
+            / "workflow_templates"
+            / "devices"
+            / "CFM-UI-001"
+            / "modbus_repeatability_simple.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert saved["k_factor_parameter"] == "k_factor"
+    assert "original_k_factor" not in saved
 
 
 def test_modbus_module_window_repeatability_single_point_appends_trials(
@@ -1078,7 +3053,7 @@ def test_modbus_module_window_repeatability_single_point_appends_trials(
     _wait_for_scanned_ports(qtbot, dialog, 1)
     _click(qtbot, dialog.connectButton)
     qtbot.waitUntil(
-        lambda: window.statusValueLabel.text() == "Connected modbus:COM9:1",
+        lambda: window.statusValueLabel.text() == "Connected CFM-UI-001",
         timeout=5000,
     )
     transport = transports[0]
@@ -1086,21 +3061,20 @@ def test_modbus_module_window_repeatability_single_point_appends_trials(
     mass_rate = register_map.by_name("mass_rate")
     mass_acc = register_map.by_name("mass_acc")
     transport.read_sequences[mass_rate.address] = [
-        encode_registers(mass_rate, 0.0),
-        *[
-            encoded
-            for _trial in range(4)
-            for encoded in (
-                encode_registers(mass_rate, 4.0),
-                encode_registers(mass_rate, 4.2),
-                encode_registers(mass_rate, 0.0),
-            )
-        ],
+        encoded
+        for _trial in range(4)
+        for encoded in (
+            encode_registers(mass_rate, 0.0),
+            encode_registers(mass_rate, 4.0),
+            encode_registers(mass_rate, 4.2),
+            encode_registers(mass_rate, 0.0),
+        )
     ]
     measured_deltas = (100.0, 101.0, 99.0, 102.0)
     cumulative = 0.0
-    mass_acc_reads = [encode_registers(mass_acc, cumulative)]
+    mass_acc_reads = []
     for delta in measured_deltas:
+        mass_acc_reads.append(encode_registers(mass_acc, cumulative))
         mass_acc_reads.append(encode_registers(mass_acc, cumulative))
         cumulative += delta
         mass_acc_reads.append(encode_registers(mass_acc, cumulative))
@@ -1119,58 +3093,124 @@ def test_modbus_module_window_repeatability_single_point_appends_trials(
     )
     rep_dialog.pollIntervalSpinBox.setValue(0.05)
     rep_dialog.flowPointSpinBoxes[0].setValue(250.0)
-    _click(qtbot, rep_dialog.saveConfigButton)
+    _click(qtbot, rep_dialog.configurationDialog.saveConfigButton)
     qtbot.waitUntil(
         lambda: "Repeatability configuration saved" in window.logTextEdit.toPlainText(),
         timeout=5000,
     )
 
     for index in range(1, 5):
-        rep_dialog.standardMassSpinBox.setValue(100.0)
-        _click(qtbot, rep_dialog.startButton)
-        qtbot.waitUntil(
-            lambda count=index: window.logTextEdit.toPlainText().count(
-                "Repeatability captured"
-            )
-            >= count,
-            timeout=5000,
-        )
-        _click(qtbot, rep_dialog.saveTrialButton)
-        qtbot.waitUntil(
-            lambda count=index: len(rep_dialog.trial_results()) == count,
-            timeout=5000,
+        _capture_and_calculate_repeatability_trial(
+            qtbot,
+            window,
+            rep_dialog,
+            standard_mass=100.0,
+            expected_count=index,
         )
 
     assert rep_dialog.trialTable.rowCount() == 5
     assert _table_text(rep_dialog.trialTable, 4, 2) == "Pending"
     assert _table_text(rep_dialog.trialTable, 3, 1) == "4"
     assert _table_text(rep_dialog.trialTable, 3, 9) == "2"
-    assert _table_text(
-        rep_dialog.resultTable,
-        _find_metric_row(rep_dialog.resultTable, "flow_250_trial_count"),
-        1,
-    ) == "4"
-    assert _has_metric_row(
-        rep_dialog.resultTable,
-        "flow_250_repeatability_stddev_percent",
-    )
-    assert rep_dialog.saveResultButton.isEnabled()
-
-    _click(qtbot, rep_dialog.saveResultButton)
-    qtbot.waitUntil(
-        lambda: "Repeatability summary saved" in window.logTextEdit.toPlainText(),
-        timeout=5000,
-    )
-    history = runtime.list_calibration_history(operation="manual_error_repeatability")
-    assert len(history) == 1
-    assert history[0].metrics["mode"] == "single_point"
-    assert history[0].metrics["trial_count"] == 4.0
-    assert history[0].metrics["expected_trials_per_point"] == 4
-    assert len(history[0].metrics["trials"]) == 4
+    summary_text = rep_dialog.selectionSummaryTextEdit.toPlainText()
+    assert "flow_250_trial_count: 4" in summary_text
+    assert "flow_250_repeatability_stddev_percent" in summary_text
+    assert rep_dialog.calculateRepeatabilityButton.isEnabled()
+    assert not rep_dialog.calculateFinalKButton.isEnabled()
+    test_records = runtime.list_test_records(operation="manual_error_repeatability")
+    assert sum(
+        1
+        for record in test_records
+        if record.operation == "manual_error_repeatability_trial"
+    ) == 4
+    summary_records = [
+        record
+        for record in test_records
+        if record.operation == "manual_error_repeatability"
+    ]
+    assert len(summary_records) == 1
+    assert summary_records[0].metrics["mode"] == "single_point"
+    assert summary_records[0].metrics["trial_count"] == 4.0
     assert rep_dialog.startButton.isEnabled()
 
 
-def test_modbus_module_window_repeatability_close_discards_incomplete_capture(
+def test_modbus_module_window_three_flow_repeatability_selection_records_history(
+    qtbot,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    repository = _repository(tmp_path)
+    runtime = ModbusModuleRuntime(
+        repository,
+        transport_factory=placeholder_transport_factory([]),
+        k_factor_post_start_sample_s=0.0,
+        k_factor_post_stop_delay_s=0.0,
+    )
+    scanner = SerialPortScanner(provider=lambda: (SerialPortInfo(port="COM9"),))
+    window = ModbusModuleWindow(
+        repository,
+        runtime=runtime,
+        port_scanner=scanner,
+        data_root=tmp_path,
+    )
+    qtbot.addWidget(window)
+    window.show()
+    dialog = _open_connection_dialog(qtbot, window)
+    _wait_for_scanned_ports(qtbot, dialog, 1)
+    _click(qtbot, dialog.connectButton)
+    qtbot.waitUntil(
+        lambda: window.statusValueLabel.text() == "Connected CFM-UI-001",
+        timeout=5000,
+    )
+    rep_dialog = window._ensure_repeatability_dialog()
+    rep_dialog.show()
+    rep_dialog.operationNotesTextEdit.setPlainText("three-flow summary note")
+    trials = tuple(
+        replace(
+            _repeatability_trial(
+                run_id="RUN-THREE-FLOW-SUMMARY",
+                flow_point=600.0,
+                trial_index=index,
+                percent_error=error,
+            ),
+            notes=rep_dialog.operation_notes(),
+        )
+        for index, error in enumerate((0.0, 1.0, -1.0), start=1)
+    )
+    for trial in trials:
+        rep_dialog.add_trial_result(trial)
+
+    class FakeSelectionDialog:
+        def __init__(self, _trials, *, parent=None):
+            self.parent = parent
+
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+
+        def selected_trials(self):
+            return trials
+
+    monkeypatch.setattr(
+        modbus_window_module,
+        "RepeatabilitySelectionDialog",
+        FakeSelectionDialog,
+    )
+
+    _click(qtbot, rep_dialog.calculateRepeatabilityButton)
+
+    records = [
+        record
+        for record in runtime.list_test_records(operation="manual_error_repeatability")
+        if record.operation == "manual_error_repeatability"
+    ]
+    assert len(records) == 1
+    assert records[0].notes == "three-flow summary note"
+    assert records[0].metrics["mode"] == "three_point"
+    assert records[0].metrics["flow_point_count"] == 1.0
+    assert records[0].metrics["flow_point_600_repeatability_stddev_percent"] == 1.0
+
+
+def test_modbus_module_window_repeatability_close_starts_new_operation(
     qtbot,
     tmp_path,
 ) -> None:
@@ -1195,7 +3235,7 @@ def test_modbus_module_window_repeatability_close_discards_incomplete_capture(
     _wait_for_scanned_ports(qtbot, dialog, 1)
     _click(qtbot, dialog.connectButton)
     qtbot.waitUntil(
-        lambda: window.statusValueLabel.text() == "Connected modbus:COM9:1",
+        lambda: window.statusValueLabel.text() == "Connected CFM-UI-001",
         timeout=5000,
     )
     transport = transports[0]
@@ -1203,6 +3243,7 @@ def test_modbus_module_window_repeatability_close_discards_incomplete_capture(
     mass_rate = register_map.by_name("mass_rate")
     mass_acc = register_map.by_name("mass_acc")
     transport.read_sequences[mass_rate.address] = [
+        encode_registers(mass_rate, 0.0),
         encode_registers(mass_rate, 0.0),
         encode_registers(mass_rate, 5.0),
         encode_registers(mass_rate, 5.5),
@@ -1229,6 +3270,13 @@ def test_modbus_module_window_repeatability_close_discards_incomplete_capture(
         timeout=5000,
     )
     assert len(first_dialog.trial_results()) == 0
+    assert first_dialog.calculateTrialErrorButton.isEnabled()
+    assert first_dialog.standardMassSpinBox.isEnabled()
+    trial_records = runtime.list_test_records(operation="manual_error_repeatability")
+    assert not any(
+        record.operation == "manual_error_repeatability_trial"
+        for record in trial_records
+    )
 
     first_dialog.close()
     qtbot.waitUntil(lambda: window.repeatabilityDialog is None, timeout=5000)
@@ -1246,7 +3294,10 @@ def test_modbus_module_window_repeatability_close_discards_incomplete_capture(
     assert len(reopened.trial_results()) == 0
     assert reopened.statusLabel.text() == "Ready"
     assert _table_text(reopened.trialTable, 0, 2) == "Pending"
-    assert reopened.saveTrialButton.isEnabled() is False
+    assert not hasattr(reopened, "saveTrialButton")
+    assert hasattr(reopened, "calculateTrialErrorButton")
+    assert not reopened.calculateTrialErrorButton.isEnabled()
+    assert not reopened.calculateRepeatabilityButton.isEnabled()
 
 
 def test_modbus_module_window_k_factor_cancel_on_close_recovers_controls(
@@ -1270,7 +3321,7 @@ def test_modbus_module_window_k_factor_cancel_on_close_recovers_controls(
     _wait_for_scanned_ports(qtbot, dialog, 1)
     _click(qtbot, dialog.connectButton)
     qtbot.waitUntil(
-        lambda: window.statusValueLabel.text() == "Connected modbus:COM9:1",
+        lambda: window.statusValueLabel.text() == "Connected CFM-UI-001",
         timeout=5000,
     )
     mass_rate = runtime.register_map.by_name("mass_rate")
@@ -1360,27 +3411,20 @@ def test_modbus_module_window_saves_and_loads_variable_map(qtbot, tmp_path) -> N
     zero_start_row = _find_row(window.variableMapTable, "zero_calibration_start")
     window._move_variable_row(zero_start_row, 0)
     assert _table_text(window.variableMapTable, 0, 0) == "zero_calibration_start"
-    _click(qtbot, window.addVariableButton)
-    custom_row = window.variableMapTable.rowCount() - 1
-    _set_table_text(window.variableMapTable, custom_row, 0, "custom_saved")
-    window._move_variable_row(custom_row, 1)
-    temperature_row = _find_row(window.variableMapTable, "temperature")
-    window.variableMapTable.selectRow(temperature_row)
-    _click(qtbot, window.deleteVariableButton)
-    assert "Deleted variable: temperature" in window.logTextEdit.toPlainText()
-    assert not _has_row(window.variableMapTable, "temperature")
-    assert _column_texts(window.variableMapTable, 0)[:2] == [
-        "zero_calibration_start",
-        "custom_saved",
-    ]
-    zero_start_row = _find_row(window.variableMapTable, "zero_calibration_start")
-    _set_table_text(window.variableMapTable, zero_start_row, 2, "16")
+    dialog = _open_profile_dialog(qtbot, window)
+    dialog.deviceIdLineEdit.setText("CFM-MAP-001")
+    _click(qtbot, dialog.addVariableButton)
+    custom_row = dialog.mapTable.rowCount() - 1
+    _set_table_text(dialog.mapTable, custom_row, 0, "custom_saved")
+    dialog._move_register_row(custom_row, 1)
+    zero_start_dialog_row = _find_row(dialog.mapTable, "zero_calibration_start")
+    _set_table_text(dialog.mapTable, zero_start_dialog_row, 2, "16")
 
-    _click(qtbot, window.saveVariableMapButton)
+    _click(qtbot, dialog.saveButton)
 
     saved_path = tmp_path / "config" / "register_maps" / "modbus_module_map.json"
-    assert saved_path.exists()
-    assert "Variable map saved" in window.logTextEdit.toPlainText()
+    assert not saved_path.exists()
+    assert window.deviceProfileCombo.findData("CFM-MAP-001") >= 0
 
     second_runtime = ModbusModuleRuntime(
         repository,
@@ -1395,12 +3439,15 @@ def test_modbus_module_window_saves_and_loads_variable_map(qtbot, tmp_path) -> N
     )
     qtbot.addWidget(second)
     second.show()
+    index = second.deviceProfileCombo.findData("CFM-MAP-001")
+    assert index >= 0
+    second.deviceProfileCombo.setCurrentIndex(index)
 
     assert _column_texts(second.variableMapTable, 0)[:2] == [
         "zero_calibration_start",
         "custom_saved",
     ]
-    assert not _has_row(second.variableMapTable, "temperature")
+    assert _has_row(second.variableMapTable, "temperature")
     loaded_row = _find_row(second.variableMapTable, "zero_calibration_start")
     assert _table_text(second.variableMapTable, loaded_row, 2) == "16"
     custom_loaded_row = _find_row(second.variableMapTable, "custom_saved")
@@ -1487,7 +3534,7 @@ def test_modbus_module_history_filters_running_runs_and_copies_selection(
     repository = _repository(tmp_path)
     repository.save_device(
         DeviceRecord(
-            device_id="modbus:COM9:1",
+            device_id="CFM-HISTORY-001",
             device_type="modbus_rtu",
             protocol_address="1",
         )
@@ -1498,7 +3545,7 @@ def test_modbus_module_history_filters_running_runs_and_copies_selection(
             run_type=RunType.CALIBRATION,
             workflow_name="zero_calibration",
             workflow_version="0.1",
-            device_id="modbus:COM9:1",
+            device_id="CFM-HISTORY-001",
             operator="pytest",
             status=RunStatus.RUNNING,
             started_at=datetime(2026, 6, 11, 0, 0, tzinfo=UTC),
@@ -1510,6 +3557,7 @@ def test_modbus_module_history_filters_running_runs_and_copies_selection(
         transport_factory=placeholder_transport_factory(transports),
         zero_calibration_wait_s=0.0,
     )
+    _select_runtime_profile(runtime, device_id="CFM-HISTORY-001")
     runtime.connect(ModbusConnectionSettings(port="COM9", unit_id=1))
     runtime.run_zero_calibration()
 
@@ -1566,8 +3614,229 @@ def test_modbus_calibration_history_dialog_requests_import_and_export(
     _click(qtbot, dialog.exportButton)
     _click(qtbot, dialog.importButton)
 
-    assert requested_exports == ["all"]
+    assert requested_exports == [{"operation": "all", "device_id": None}]
     assert import_requests == [True]
+    assert dialog.windowTitle() == "All Test Records"
+    operation_filters = [
+        dialog.operationCombo.itemData(index)
+        for index in range(dialog.operationCombo.count())
+    ]
+    status_filters = [
+        dialog.statusFilterCombo.itemData(index)
+        for index in range(dialog.statusFilterCombo.count())
+    ]
+    assert "manual_error_repeatability_final_k" in operation_filters
+    assert "calculated" in status_filters
+    assert dialog.deviceIdFilterLineEdit.placeholderText() == "Device ID"
+    assert dialog.tubeModelFilterLineEdit.placeholderText() == "Tube Model"
+    assert dialog.transmitterModelFilterLineEdit.placeholderText() == "Transmitter Model"
+
+
+def test_modbus_calibration_history_formats_final_k_with_precision(
+    qtbot,
+    tmp_path,
+) -> None:
+    repository = _repository(tmp_path)
+    runtime = ModbusModuleRuntime(
+        repository,
+        transport_factory=placeholder_transport_factory([]),
+        zero_calibration_wait_s=0.0,
+    )
+    now = datetime(2026, 6, 16, 10, 0, tzinfo=UTC)
+    repository.save_device(
+        DeviceRecord(device_id="CFM-PRECISE-K", device_type="modbus_rtu")
+    )
+    repository.save_modbus_operation_attempt(
+        ModbusOperationAttemptRecord(
+            attempt_id="ATT-PRECISE-K",
+            device_id="CFM-PRECISE-K",
+            operation_type="manual_error_repeatability_final_k",
+            status="calculated",
+            operator="pytest",
+            run_id="RUN-PRECISE-K",
+            started_at=now,
+            ended_at=now,
+            summary={
+                "original_k_factor": 500.0,
+                "new_k_factor": 499.87503124218944,
+                "delta_k_factor": -0.12496875781056072,
+                "average_error": 0.35,
+                "notes": "final k summary note",
+                "flow_points": [
+                    {
+                        "flow_point": 100.0,
+                        "repeatability_stddev_percent": 0.1,
+                        "measurement_error_percent": 0.7,
+                        "adjusted_error_percent": 0.35,
+                        "intermediate_k_factor": 497.51243781094524,
+                    }
+                ],
+            },
+        )
+    )
+    dialog = CalibrationHistoryDialog(runtime, device_id="CFM-PRECISE-K")
+    qtbot.addWidget(dialog)
+    dialog.show()
+
+    assert dialog.historyTable.rowCount() == 1
+    parameter_text = _table_text(dialog.historyTable, 0, 3)
+    assert "new_k=499.875031242189" in parameter_text
+    assert "delta_k=-0.124968757811" in parameter_text
+    assert _table_text(dialog.historyTable, 0, 4) == "final k summary note"
+    assert dialog.historyTable.horizontalHeaderItem(4).text() == "Operation Note"
+    detail_text = dialog.detailTextEdit.toPlainText()
+    assert "Operation Note: final k summary note" in detail_text
+    assert "new_k_factor: 499.875031242189" in detail_text
+    assert "delta_k_factor: -0.124968757811" in detail_text
+    assert "intermediate_k_factor=497.512437810945" in detail_text
+
+
+def test_modbus_module_all_test_records_opens_without_profile(qtbot, tmp_path) -> None:
+    repository = _repository(tmp_path)
+    runtime = ModbusModuleRuntime(
+        repository,
+        transport_factory=placeholder_transport_factory([]),
+        zero_calibration_wait_s=0.0,
+    )
+    scanner = SerialPortScanner(provider=lambda: ())
+    window = ModbusModuleWindow(repository, runtime=runtime, port_scanner=scanner)
+    qtbot.addWidget(window)
+    window.show()
+
+    window.allHistoryAction.trigger()
+
+    qtbot.waitUntil(
+        lambda: window.allHistoryDialog is not None
+        and window.allHistoryDialog.isVisible(),
+        timeout=5000,
+    )
+    assert window.allHistoryDialog is not None
+    assert window.calibrationHistoryDialog is window.allHistoryDialog
+    assert window.allHistoryDialog.windowTitle() == "All Test Records"
+    assert window.allHistoryDialog.deviceIdFilterLineEdit.isEnabled()
+    assert window.allHistoryDialog.historyTable.rowCount() == 0
+
+
+def test_modbus_module_current_device_import_retargets_records(
+    qtbot,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    repository = _repository(tmp_path)
+    runtime = ModbusModuleRuntime(
+        repository,
+        transport_factory=placeholder_transport_factory([]),
+        zero_calibration_wait_s=0.0,
+    )
+    scanner = SerialPortScanner(provider=lambda: ())
+    window = ModbusModuleWindow(repository, runtime=runtime, port_scanner=scanner)
+    qtbot.addWidget(window)
+    window.show()
+    _save_profile_from_dialog(qtbot, window, device_id="CFM-IMPORT-UI")
+    import_path = tmp_path / "history.json"
+    import_path.write_text("{}", encoding="utf-8")
+    calls: list[tuple[str, str | None]] = []
+
+    def fake_import(path, *, target_device_id=None):
+        calls.append((str(path), target_device_id))
+        return object()
+
+    monkeypatch.setattr(
+        QFileDialog,
+        "getOpenFileName",
+        lambda *_args, **_kwargs: (str(import_path), ""),
+    )
+    monkeypatch.setattr(runtime, "import_calibration_history", fake_import)
+
+    def run_now(label, action, on_finished, **_kwargs):
+        on_finished(action())
+
+    monkeypatch.setattr(window, "_run_task", run_now)
+
+    window._open_current_device_test_records()
+    assert window.currentDeviceHistoryDialog is not None
+    window.currentDeviceHistoryDialog.importRequested.emit()
+
+    assert calls == [(str(import_path), "CFM-IMPORT-UI")]
+
+
+def test_modbus_module_device_analysis_opens_for_selected_profile(
+    qtbot,
+    tmp_path,
+) -> None:
+    repository = _repository(tmp_path)
+    runtime = ModbusModuleRuntime(
+        repository,
+        transport_factory=placeholder_transport_factory([]),
+        zero_calibration_wait_s=0.0,
+    )
+    scanner = SerialPortScanner(provider=lambda: ())
+    window = ModbusModuleWindow(repository, runtime=runtime, port_scanner=scanner)
+    qtbot.addWidget(window)
+    window.show()
+    _save_profile_from_dialog(
+        qtbot,
+        window,
+        device_id="CFM-ANALYSIS-001",
+        device_model="CFM-A",
+        tube_model="T-A",
+        transmitter_model="TX-A",
+    )
+
+    assert window.deviceAnalysisAction.isEnabled()
+    window.deviceAnalysisAction.trigger()
+
+    qtbot.waitUntil(
+        lambda: window.deviceAnalysisDialog is not None
+        and window.deviceAnalysisDialog.isVisible(),
+        timeout=5000,
+    )
+    assert window.deviceAnalysisDialog is not None
+    assert window.deviceAnalysisDialog.titleLabel.text() == (
+        "Device ID: CFM-ANALYSIS-001"
+    )
+    assert window.deviceAnalysisDialog.selectTrialsButton.text() == (
+        "Select And Calculate..."
+    )
+    assert window.deviceAnalysisDialog.saveReportButton.text() == "Save"
+    assert window.deviceAnalysisDialog.statusLabel.text() == (
+        "Accepted trials available: 0"
+    )
+    assert not hasattr(window.deviceAnalysisDialog, "summaryTextEdit")
+    assert not hasattr(window.deviceAnalysisDialog, "flowTable")
+    assert not hasattr(window.deviceAnalysisDialog, "refreshButton")
+    assert not hasattr(window.deviceAnalysisDialog, "selectComparisonVariablesButton")
+
+
+def test_modbus_module_all_test_records_shows_load_errors(qtbot, tmp_path) -> None:
+    repository = _repository(tmp_path)
+    runtime = ModbusModuleRuntime(
+        repository,
+        transport_factory=placeholder_transport_factory([]),
+        zero_calibration_wait_s=0.0,
+    )
+
+    def broken_list_test_records(**_kwargs):
+        raise RuntimeError("history database is unavailable")
+
+    runtime.list_test_records = broken_list_test_records
+    scanner = SerialPortScanner(provider=lambda: ())
+    window = ModbusModuleWindow(repository, runtime=runtime, port_scanner=scanner)
+    qtbot.addWidget(window)
+    window.show()
+
+    window.allHistoryAction.trigger()
+
+    qtbot.waitUntil(
+        lambda: window.allHistoryDialog is not None
+        and window.allHistoryDialog.isVisible(),
+        timeout=5000,
+    )
+    assert window.allHistoryDialog is not None
+    assert window.allHistoryDialog.detailTitleLabel.text() == "Load Error"
+    assert "history database is unavailable" in (
+        window.allHistoryDialog.detailTextEdit.toPlainText()
+    )
 
 
 def test_modbus_calibration_history_export_dialog_selects_time_range(
@@ -1616,7 +3885,7 @@ def test_modbus_module_window_manual_coil_write_refreshes_value_without_read(
     _wait_for_scanned_ports(qtbot, dialog, 1)
     _click(qtbot, dialog.connectButton)
     qtbot.waitUntil(
-        lambda: window.statusValueLabel.text() == "Connected modbus:COM9:1",
+        lambda: window.statusValueLabel.text() == "Connected CFM-UI-001",
         timeout=5000,
     )
     zero_start_row = _find_row(window.variableMapTable, "zero_calibration_start")
@@ -1647,13 +3916,17 @@ def test_modbus_module_window_supports_custom_row_read_write_and_polling(qtbot, 
     window = ModbusModuleWindow(repository, runtime=runtime, port_scanner=scanner)
     qtbot.addWidget(window)
     window.show()
-    _click(qtbot, window.addVariableButton)
-    custom_row = window.variableMapTable.rowCount() - 1
-    _set_table_text(window.variableMapTable, custom_row, 0, "custom_value")
-    _set_table_text(window.variableMapTable, custom_row, 2, "106")
-    _set_table_text(window.variableMapTable, custom_row, 3, "1")
-    window.variableMapTable.cellWidget(custom_row, 4).setCurrentText("uint16")
-    window.variableMapTable.cellWidget(custom_row, 7).setCurrentText("true")
+    dialog = _open_profile_dialog(qtbot, window)
+    dialog.deviceIdLineEdit.setText("CFM-UI-001")
+    _click(qtbot, dialog.addVariableButton)
+    custom_row = dialog.mapTable.rowCount() - 1
+    _set_table_text(dialog.mapTable, custom_row, 0, "custom_value")
+    _set_table_text(dialog.mapTable, custom_row, 2, "106")
+    _set_table_text(dialog.mapTable, custom_row, 3, "1")
+    dialog.mapTable.cellWidget(custom_row, 4).setCurrentText("uint16")
+    dialog.mapTable.cellWidget(custom_row, 7).setCurrentText("true")
+    _click(qtbot, dialog.saveButton)
+    custom_row = _find_row(window.variableMapTable, "custom_value")
 
     dialog = _open_connection_dialog(qtbot, window)
     _wait_for_scanned_ports(qtbot, dialog, 1)
@@ -1661,11 +3934,11 @@ def test_modbus_module_window_supports_custom_row_read_write_and_polling(qtbot, 
     dialog.orderCombo.setCurrentText("BADC")
     _click(qtbot, dialog.connectButton)
     qtbot.waitUntil(
-        lambda: window.statusValueLabel.text() == "Connected modbus:COM9:7",
+        lambda: window.statusValueLabel.text() == "Connected CFM-UI-001",
         timeout=5000,
     )
     assert runtime.register_map.by_name("custom_value").byte_order.value == "little"
-    assert repository.get_device("modbus:COM9:7") is None
+    assert repository.get_device("CFM-UI-001") is not None
 
     transports[0].registers[106] = encode_registers(
         ModbusRegister(
@@ -1727,7 +4000,7 @@ def test_modbus_module_window_supports_scrollable_reorderable_map_and_disables_n
 
     assert not window.variableMapTable.verticalHeader().isVisible()
     assert window.variableMapTable.horizontalHeader().sectionsMovable()
-    assert window.variableMapTable.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+    assert window.variableMapTable.horizontalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAsNeeded
     assert window.variableMapTable.verticalScrollBarPolicy() == Qt.ScrollBarPolicy.ScrollBarAlwaysOn
     assert window.variableMapTable.verticalScrollMode() == QAbstractItemView.ScrollMode.ScrollPerPixel
     assert window.variableMapTable.dragDropMode() == QAbstractItemView.DragDropMode.InternalMove
@@ -1760,7 +4033,7 @@ def test_modbus_module_window_supports_scrollable_reorderable_map_and_disables_n
     dialog.unitIdSpinBox.setValue(7)
     _click(qtbot, dialog.connectButton)
     qtbot.waitUntil(
-        lambda: window.statusValueLabel.text() == "Connected modbus:COM9:7",
+        lambda: window.statusValueLabel.text() == "Connected CFM-UI-001",
         timeout=5000,
     )
 
@@ -1788,7 +4061,7 @@ def test_modbus_module_window_variable_map_uses_native_scroll_bar(qtbot, tmp_pat
     window.show()
 
     for _ in range(20):
-        _click(qtbot, window.addVariableButton)
+        window._add_variable_row()
     window.resize(1080, 520)
     qtbot.wait(50)
     scroll_bar = window.variableMapTable.verticalScrollBar()
@@ -1805,7 +4078,7 @@ def test_modbus_module_window_variable_map_uses_native_scroll_bar(qtbot, tmp_pat
     assert scroll_bar.value() > previous_value
 
 
-def test_modbus_module_window_rejects_invalid_ui_variable_map(qtbot, tmp_path) -> None:
+def test_modbus_module_window_rejects_invalid_profile_register_map(qtbot, tmp_path) -> None:
     repository = _repository(tmp_path)
     runtime = ModbusModuleRuntime(
         repository,
@@ -1816,13 +4089,15 @@ def test_modbus_module_window_rejects_invalid_ui_variable_map(qtbot, tmp_path) -
     window = ModbusModuleWindow(repository, runtime=runtime, port_scanner=scanner)
     qtbot.addWidget(window)
     window.show()
-    dialog = _open_connection_dialog(qtbot, window)
-    _wait_for_scanned_ports(qtbot, dialog, 1)
-    _set_table_text(window.variableMapTable, 0, 2, "-1")
+    _save_profile_from_dialog(qtbot, window, device_id="CFM-INVALID-MAP")
+    dialog = _open_edit_profile_dialog(qtbot, window)
+    mass_rate_row = _find_row(dialog.mapTable, "mass_rate")
+    _set_table_text(dialog.mapTable, mass_rate_row, 2, "-1")
 
-    _click(qtbot, dialog.connectButton)
+    _click(qtbot, dialog.saveButton)
 
-    assert "Address must be non-negative for mass_rate." in window.logTextEdit.toPlainText()
+    assert "Address must be non-negative for mass_rate." in dialog.statusLabel.text()
+    assert "Save device profile failed" in window.logTextEdit.toPlainText()
 
 
 def test_modbus_module_window_logs_operation_failures_without_crashing(qtbot, tmp_path) -> None:
@@ -1843,7 +4118,7 @@ def test_modbus_module_window_logs_operation_failures_without_crashing(qtbot, tm
 
     _click(qtbot, dialog.connectButton)
     qtbot.waitUntil(
-        lambda: window.statusValueLabel.text() == "Connected modbus:COM9:7",
+        lambda: window.statusValueLabel.text() == "Connected CFM-UI-001",
         timeout=5000,
     )
     transports[0].read_errors[12] = "timeout"
@@ -1876,7 +4151,7 @@ def test_modbus_module_window_recovers_after_slow_partial_sample(qtbot, tmp_path
 
     _click(qtbot, dialog.connectButton)
     qtbot.waitUntil(
-        lambda: window.statusValueLabel.text() == "Connected modbus:COM9:7",
+        lambda: window.statusValueLabel.text() == "Connected CFM-UI-001",
         timeout=5000,
     )
     transports[0].read_delay_s = 0.05
@@ -1912,3 +4187,26 @@ def test_modbus_module_window_disables_connect_without_discovered_ports(qtbot, t
     assert dialog.portCombo.currentData() == ""
     assert not dialog.connectButton.isEnabled()
     assert "No serial ports found." in window.logTextEdit.toPlainText()
+
+
+def test_modbus_module_window_hides_sample_variables_operation(qtbot, tmp_path) -> None:
+    repository = _repository(tmp_path)
+    runtime = ModbusModuleRuntime(
+        repository,
+        transport_factory=placeholder_transport_factory([]),
+        zero_calibration_wait_s=0.0,
+    )
+    scanner = SerialPortScanner(provider=lambda: (SerialPortInfo(port="COM9"),))
+    window = ModbusModuleWindow(repository, runtime=runtime, port_scanner=scanner)
+    qtbot.addWidget(window)
+    window.show()
+
+    operation_texts = [
+        action.text()
+        for action in window.operationsMenu.actions()
+        if not action.isSeparator()
+    ]
+
+    assert "Sample Variables" not in operation_texts
+    assert "All Test Records" in operation_texts
+    assert "Current Device Test Records" in operation_texts
