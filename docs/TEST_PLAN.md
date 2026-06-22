@@ -239,16 +239,17 @@ Scenarios:
 ### UI Tests
 ID: TP-UI-001
 
-Goal: Verify main connection and workflow UI.
+Goal: Verify the main module shell and embedded module UI.
 
 Scenarios:
 
 - Launch the main window.
-- Create simulated channels.
-- Connect and disconnect devices.
-- Start and cancel a workflow without freezing the UI.
-- Open the standalone Modbus Module from the toolbar or menu.
+- Confirm the main window only exposes the `Modules` menu and the central module workspace.
+- Confirm the main window opens directly into the embedded Modbus Module by default.
+- Select the Modbus Module from the `Modules` menu and confirm it remains in the main workspace instead of opening a top-level module window.
 - Confirm the Modbus Module has its own connection state and does not create or connect simulator/replay channels in the main window.
+- Open the ASIO/IIS Module from the `Modules` menu and confirm it refreshes into the main workspace instead of opening a top-level module window.
+- Switch between Modbus and ASIO/IIS modules without losing each module's local UI state.
 - For every bug fix that adds, moves, or relabels a control in a dialog, open
   that dialog through the same button/action used by the operator and assert the
   label and input widget are visible. Do not rely only on direct internal-widget
@@ -259,14 +260,13 @@ Scenarios:
 
 ID: TP-UI-002
 
-Goal: Verify live and historical display.
+Goal: Verify live and historical display where exposed by the active module or console-backed smoke workflows.
 
 Scenarios:
 
-- Show live numeric readings.
-- Show live time-series chart.
-- Open a completed run from history.
-- Display stored result tables and artifact links.
+- Show live module values or traces where the active module supports them.
+- Open stored Modbus test records from the active Modbus module.
+- Display stored result tables, details, and artifact links where the active module exposes history.
 
 ID: TP-UI-003
 
@@ -274,10 +274,10 @@ Goal: Verify the ASIO/IIS module UI remains independent from other communication
 
 Scenarios:
 
-- Open the ASIO/IIS module window from the main window.
+- Open the ASIO/IIS module from the main window `Modules` menu.
 - Display editable ASIO/IIS normal-use parameters for detected device, sample rate, bit depth or sample format, input/output channel count up to 2, frame size, and drive/test amplitude.
 - Connect and disconnect the module through its own controls.
-- Probe the selected module from the main ASIO/IIS window and show driver capability messages.
+- Probe the selected module from the main ASIO/IIS workspace and show driver capability messages.
 - Show module status and log messages for connection, diagnostics, and loopback runs.
 - Confirm ASIO/IIS connect/disconnect does not change simulator, replay, serial Modbus, or other device-channel connection state.
 - Confirm test-only settings such as frame count and latency search are not exposed in the normal-use parameter panel.

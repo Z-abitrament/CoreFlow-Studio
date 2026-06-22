@@ -3,7 +3,7 @@
 ## Scope
 This manual describes the current M12 CoreFlow Studio build. The application is a Windows-first desktop tool for simulator-backed Coriolis flowmeter workflow development and packaging validation.
 
-The current build supports simulated devices, live readings, calibration preview, a standalone Modbus Module window, automated factory test, a basic flexible experiment, run inspection, and report/export generation. The standalone Modbus Module can attempt a configured serial Modbus connection from its own window, but production real-transmitter use still requires a validated register map, confirmed calibration formulas, and hardware acceptance.
+The current desktop UI is module-centered. The main window keeps only the `Modules` menu and opens directly into the `Modbus Module` workspace by default. Use the menu to switch to another module such as `ASIO/IIS Module`. Headless simulator, replay, and export smoke paths remain available from the console diagnostics executable, but the old simulator dashboard is no longer shown in the main window.
 
 ## Starting The Application
 From the packaged distribution folder, double-click:
@@ -56,72 +56,21 @@ artifacts/runs/<year>/<month>/<run_id>/
 ```
 
 ## Main Window Overview
-The UI has three working areas.
+The main window intentionally contains only the `Modules` menu and the active module workspace. On startup, the active workspace is `Modbus Module`.
 
-- Connection: choose simulator or serial mode, add simulator channels, connect and disconnect devices, and view device state.
-- Live Readings: show mass flow, density, temperature, volume flow, and a live mass-flow plot.
-- Workflows And Results: run workflows, inspect status events, browse run history, inspect results, and generate exports.
+- `Modules > Modbus Module` returns to the Modbus master operator interface.
+- `Modules > ASIO/IIS Module` shows the ASIO/IIS frame-stream interface in the main window.
+- Selecting another module replaces the central workspace instead of opening a new top-level module window.
 
-## Simulator Workflow
-The current UI workflow is simulator-first.
-
-1. Leave Mode set to `Simulator`.
-2. Click `Add Simulator`.
-3. Select the new device row, for example `SIM-UI-001`.
-4. Click `Connect`.
-5. Click `Read Live`.
-
-The live reading fields and chart update from deterministic simulator data.
-
-## Replay CSV Workflow
-Replay CSV mode loads recorded or generated samples as a read-only simulated device.
-
-1. Generate or prepare a replay CSV file.
-2. Set Mode to `Replay CSV`.
-3. Enter the CSV path in the Replay CSV field.
-4. Click `Add Replay`.
-5. Select the replay channel.
-6. Click `Connect`.
-7. Click `Read Live` or run supported workflows such as `Run Experiment`.
-
-Replay CSV files require `mass_flow`. Optional columns include `captured_at`, `volume_flow`, `density`, `temperature`, `status_flags`, and `source_channel`.
-
-## Serial Modbus RTU Mode
-`Serial Modbus RTU` in the main connection panel is shown as a future hardware path, but main-window serial device creation is disabled in this build.
-
-If you choose serial mode and click `Add Simulator`, the status log reports that serial Modbus setup is configured but disabled until hardware acceptance. This is intentional: real-device register maps, acceptance thresholds, fixture rules, and write policies are still known unknowns.
-
-For direct Modbus master operations, use the standalone Modbus Module from the toolbar or the `Modules` menu. That module is independent from the main simulator/replay device list.
-
-Use the console command below only to write a placeholder register-map template for engineering review:
-
-```powershell
-.\CoreFlowStudioConsole.exe --write-register-map-template .\placeholder_modbus.json
-```
-
-Do not use the placeholder register map as production transmitter documentation.
-
-## Calibration Preview
-Calibration Preview collects simulator samples against a built-in reference point and stores a preview result. It does not write parameters to a device.
-
-1. Add and connect a simulator.
-2. Select the connected simulator row.
-3. Click `Calibration Preview`.
-4. Wait for the workflow to complete.
-5. Select the new run in Run History.
-6. Review steps, metrics, decisions, and artifacts in Result Details.
-
-The calculation module is a placeholder until production calibration formulas are supplied.
-
-## Standalone Modbus Module
-Open the Modbus Module from the main toolbar or `Modules` menu. The module has its own connection state, device profiles, connection dialog, variable map, Operations menu, communication-frame view, and log. It does not require adding a simulator or replay channel in the main window.
+## Modbus Module
+Open `Modules > Modbus Module`. The module has its own connection state, device profiles, connection dialog, variable map, Operations menu, communication-frame view, and log.
 
 - Create or select a `Device Profile` before connecting. Use `New Profile` to create a new device profile and `Edit Profile` to modify the selected one. The `Device ID` is a stable asset ID for the tested device and is independent from the Modbus RTU unit ID. Do not use simple numeric unit addresses such as `01` as device IDs. When the Modbus Module opens, it automatically selects the most recently used saved profile if it still exists.
 - A saved profile stores the device metadata, connection settings, and register map. Selecting a profile loads those fields back into the Modbus window.
 - Edit the full register map inside the profile dialog before connecting. It sets each variable's register kind, address, word count, data type, scale, unit, and writable flag. `Delete` removes the selected reusable profile, but existing device records and test records remain stored under that Device ID.
 - Click `Connection...` after selecting a profile to open the Modbus connection dialog. The port list is discovered automatically from connected serial adapters. Use `Refresh Ports` after plugging in or removing a USB-to-serial adapter. Use `Order` for 32-bit byte/word order such as `ABCD`, `BADC`, `CDAB`, or `DCBA`. Use `Timeout` and `Retries` to tolerate slower or occasionally missed device responses.
 - The default map includes `mass_rate`, `mass_acc`, `temperature`, `delta_t`, `zero_offset`, `k_factor`, `low_threshold`, and `zero_calibration_start`.
-- The main window shows a compact `Live Variables` table for runtime work. It hides register-map configuration columns and keeps variable name, poll checkbox, value, write value, and row read/write actions visible.
+- The module shows a compact `Live Variables` table for runtime work. It hides register-map configuration columns and keeps variable name, poll checkbox, value, write value, and row read/write actions visible.
 - Use `Add`, `Delete`, and `Reset` in the profile dialog to maintain custom variable rows while disconnected. Saving the profile persists edited addresses, types, scales, units, writable flags, and row order with that device ID.
 - The editable profile map covers sampled variables plus the zero-calibration start coil. Disconnect before changing the map for a new connection.
 - `Connect` opens the selected Modbus RTU port only from the connection dialog. The selected profile's `Device ID` is used for stored data, while the dialog's Unit ID is stored only as the Modbus protocol address. After the connection succeeds, the dialog can be closed manually while the module window remains connected.
@@ -142,71 +91,14 @@ The current module still uses the placeholder register-map template unless engin
 
 For implementation-level operation sequences and history fields, see `docs/MODBUS_OPERATIONS.md`.
 
-## Factory Test
-Factory Test runs a fixed simulator-backed outgoing-test path:
+## ASIO/IIS Module
+Open `Modules > ASIO/IIS Module`. The module keeps its own connection state and does not create or connect transmitter channels.
 
-- communication and device context through the device interface;
-- measurement check against a reference mass flow;
-- short stability segment;
-- step-level pass/fail results;
-- stored raw artifacts and analysis records.
-
-Steps:
-
-1. Add and connect a simulator.
-2. Select the connected simulator row.
-3. Click `Factory Test`.
-4. Select the completed run in Run History.
-5. Inspect metrics and artifacts in Result Details.
-
-## Flexible Experiment
-Run Experiment executes the current sample R&D workflow:
-
-- capture 6 simulator samples;
-- run the `basic_signal_stats` processing module;
-- keep fixture control as a no-op placeholder;
-- keep ML inference as a placeholder result.
-
-Steps:
-
-1. Add and connect a simulator.
-2. Select the connected simulator row.
-3. Click `Run Experiment`.
-4. Select the completed run in Run History.
-5. Inspect processing metrics and generated artifacts.
-
-## Reports And Exports
-Generate Export creates report and export artifacts for a selected run.
-
-1. Select a completed run in Run History.
-2. Click `Generate Export`.
-3. Select the run again if needed.
-4. Review generated artifacts in Result Details.
-
-Export package artifacts include:
-
-- `operator_report.txt`
-- `metrics.csv`
-- `measurements.csv`
-- `export_manifest.json`
-
-The artifact paths shown in Result Details are relative to the active data root.
-
-## Status Log And Run History
-The status log shows connection actions, live-read messages, workflow start/completion messages, and user-requested cancellation notices.
-
-Run History lists stored runs with:
-
-- run ID;
-- workflow name;
-- device ID;
-- status;
-- start time.
-
-Selecting a run populates Result Details with run metadata, workflow steps, analysis results, metrics, and artifacts.
-
-## Cancellation Behavior
-The `Cancel` button records that cancellation was requested. Current workflow tasks are short simulator tasks and may complete before cancellation can stop them. If a run completes after cancellation was requested, it remains stored and inspectable.
+- Select the backend and device, then review normal-use parameters such as sample rate, bit depth, sample format, input/output channel count, samples per frame, and test amplitude.
+- Use `Refresh Devices` to rescan device options.
+- Use `Probe` to check the selected device or backend capabilities.
+- Use `Connect` and `Disconnect` to change only the ASIO/IIS module state.
+- Use `Tests` to open the loopback and non-loopback test dialog. The test dialog can generate sine, square, or white-noise signals and plot input, output, or both together.
 
 ## Command-Line Diagnostics
 Use `CoreFlowStudioConsole.exe` in the packaged folder.
@@ -246,7 +138,7 @@ Replay CSV files require a `mass_flow` column. Optional columns are `captured_at
 ## Safety Notes
 - Simulator workflows are safe and require no hardware.
 - Calibration Preview does not write device parameters.
-- The standalone Modbus Module can open the selected COM port when the operator clicks `Connect` in its connection dialog.
+- The Modbus Module can open the selected COM port when the operator clicks `Connect` in its connection dialog.
 - Write-capable Modbus operations must go through explicit write-guard and audit behavior.
 - Real transmitter register maps, calibration formulas, fixture behavior, and acceptance thresholds must be supplied before hardware use.
 - Do not use the placeholder register map for production transmitter writes.

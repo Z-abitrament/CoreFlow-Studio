@@ -1,20 +1,15 @@
 # M8 Verification
 
 ## Scope
-M8 implements the first usable Qt desktop UI for simulator-backed operation. It does not implement report generation, production calibration formulas, real hardware acceptance, or serial-port hardware access.
+M8 originally implemented the first usable Qt desktop UI for simulator-backed operation. The current UI shell is module-centered: the main window keeps only the Modules menu and swaps the selected module into the central workspace.
 
 ## Implemented
-- Qt main window with device/channel list.
-- Connection setup panel with simulator and Serial Modbus RTU configuration fields.
-- Simulator channel creation, connect, disconnect, and live measurement read actions.
-- Live numeric readings for mass flow, density, temperature, and volume flow.
-- Live mass-flow time-series chart using pyqtgraph.
-- Background worker boundary for calibration preview, factory test, and experiment launch.
-- Independent Modbus module window entry point from the toolbar and Modules menu.
-- Modbus module window with its own connection state, connection dialog, order selector, larger editable and persistable variable map, row-level variable read/write controls, one-second selected-variable polling, Operations menu, TX/RX frame display, zero calibration dialog, Test Records dialog, K factor calibration, and manual mass-total repeatability controls.
-- Workflow status log and cancel-request button.
-- Run history table backed by SQLite run-session records.
-- Result inspection table showing run summary, step statuses, analysis results, metrics, and artifact links.
+- Qt main window with only the `Modules` menu and a central module workspace.
+- Embedded Modbus module shown by default on startup and selectable from `Modules > Modbus Module`.
+- Embedded ASIO/IIS module selected from `Modules > ASIO/IIS Module`.
+- Module switching refreshes the main workspace instead of opening a new top-level module window.
+- Modbus module with its own connection state, connection dialog, order selector, larger editable and persistable variable map, row-level variable read/write controls, one-second selected-variable polling, Operations menu, TX/RX frame display, zero calibration dialog, Test Records dialog, K factor calibration, and manual mass-total repeatability controls.
+- ASIO/IIS module with independent connection state, device discovery, probe, normal-use parameters, and test dialog.
 - `python -m coreflow --ui` launch path with optional `--data-root`.
 
 ## Commands Run
@@ -24,15 +19,15 @@ conda run -n coreflow-studio python -m pytest -q
 ```
 
 ## Results
-- UI smoke tests cover simulator, replay, standalone Modbus module, export, and ASIO/IIS window paths.
+- UI smoke tests cover module-menu shell behavior plus embedded Modbus and ASIO/IIS paths.
 - Full test suite passed in the current verification run.
-- M8 covers `TP-UI-001` and `TP-UI-002` for simulator-backed paths and standalone module entry points.
+- M8 covers module entry behavior for `TP-UI-001` and ASIO/IIS module behavior for `TP-UI-003`.
 
 ## Notes
-- Serial Modbus RTU UI fields are visible for the connection setup path, but hardware access remains disabled until M11 hardware acceptance preparation.
+- The old main-window simulator/replay dashboard has been removed from the UI shell. Simulator and replay smoke paths remain available from console diagnostics.
 - The Modbus module is independent from simulator/replay channels. It opens a Modbus connection only from its connection dialog when the operator clicks `Connect`; the dialog can be closed manually after a successful connection.
 - Variable Map supports custom variables before connection, row-level values after connection, guarded row writes, and selected-variable polling. Poll cycles can merge adjacent addresses in the same Modbus table into one read request.
-- Variable Map supports visible scroll bars, column reordering, default `mass_rate` and `temperature` rows, disabled write controls for non-writable rows, and `Save Map` persistence under the user data directory. The standalone Modbus window uses a vertical splitter so the map remains scrollable when the window is compressed.
+- Variable Map supports visible scroll bars, column reordering, default `mass_rate` and `temperature` rows, disabled write controls for non-writable rows, and `Save Map` persistence under the user data directory. The Modbus module layout uses a vertical splitter so the map remains scrollable when the workspace is compressed.
 - The old operation button strip and sampled-variable result table have been removed; operations are exposed through the Modbus module menu, and raw TX/RX data codes are shown in the frame table.
 - Zero calibration opens a dedicated dialog. The `Start` action reads before values, writes `zero_calibration_start` through the write guard, waits before checking completion, displays before/after `zero_offset` and `delta_t`, and refreshes the Variable Map values including the final coil state.
 - Test Records opens as a separate dialog, supports operation filtering, shows
@@ -42,5 +37,4 @@ conda run -n coreflow-studio python -m pytest -q
 - Modbus test records now include automatically created device profiles, test
   sessions, operation attempts, accepted repeatability trial records, and raw
   Modbus polling artifact references.
-- The cancel button records a cancel request at the UI boundary. Step-level workflow cancellation remains a future workflow-runner feature.
 - UI tests use Qt offscreen mode and deterministic simulator data.

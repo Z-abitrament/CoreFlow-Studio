@@ -59,7 +59,7 @@ fix(packaging): hide console for UI executable
 ```
 
 ## Versioning
-The current project software version is `0.4.0`. It is defined in exactly two
+The current project software version is `0.5.0`. It is defined in exactly two
 places and both must match:
 
 - `pyproject.toml` under `[project].version`.

@@ -3600,8 +3600,11 @@ class ModbusModuleWindow(QDialog):
         thread_pool: QThreadPool | None = None,
         data_root: Path | None = None,
         parent: QWidget | None = None,
+        embedded: bool = False,
     ) -> None:
         super().__init__(parent)
+        if embedded:
+            self.setWindowFlags(Qt.WindowType.Widget)
         self._data_root = Path(data_root) if data_root is not None else None
         self.runtime = runtime or ModbusModuleRuntime(
             repository,

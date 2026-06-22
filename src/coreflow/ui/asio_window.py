@@ -8,7 +8,7 @@ from datetime import datetime
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QThreadPool
+from PySide6.QtCore import Qt, QThreadPool
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -62,8 +62,12 @@ class AsioIisWindow(QDialog):
         self,
         thread_pool: QThreadPool | None = None,
         parent: QWidget | None = None,
+        *,
+        embedded: bool = False,
     ) -> None:
         super().__init__(parent)
+        if embedded:
+            self.setWindowFlags(Qt.WindowType.Widget)
         self._thread_pool = thread_pool or QThreadPool.globalInstance()
         self._connected = False
         self._active_tasks: list[WorkflowTask] = []

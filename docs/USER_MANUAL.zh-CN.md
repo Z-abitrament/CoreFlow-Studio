@@ -3,7 +3,7 @@
 ## 适用范围
 本手册描述当前 M12 版本的 CoreFlow Studio。当前版本是一个 Windows 优先的桌面工具，主要用于基于模拟器的科里奥利流量计 PC 端自动化流程开发、验证和打包交付检查。
 
-当前版本支持模拟设备、实时读数、校准预览、独立 Modbus Module 窗口、自动化工厂测试、基础灵活实验、运行记录检查以及报告/导出生成。独立 Modbus Module 可以在自己的窗口中尝试连接配置的串口 Modbus 设备，但生产真实发射机使用前仍需要验证后的寄存器表、确认后的校准公式和硬件验收结果。
+当前桌面 UI 采用模块化主界面。主窗口只保留 `Modules` 菜单，并默认直接进入 `Modbus Module` 工作区。可通过菜单切换到其他模块，例如 `ASIO/IIS Module`。无界面的模拟器、replay 和导出 smoke 路径仍可通过控制台诊断程序运行，但旧的模拟器 dashboard 不再显示在主窗口中。
 
 ## 启动应用
 在打包分发目录中双击：
@@ -56,72 +56,21 @@ artifacts/runs/<year>/<month>/<run_id>/
 ```
 
 ## 主窗口区域
-UI 当前分为三个主要工作区。
+主窗口有意只保留 `Modules` 菜单和当前模块工作区。启动时默认显示 `Modbus Module`。
 
-- Connection：选择模拟器或串口模式，添加模拟通道，连接/断开设备，查看设备状态。
-- Live Readings：显示质量流量、密度、温度、体积流量，以及质量流量实时曲线。
-- Workflows And Results：启动流程，查看状态日志，浏览运行历史，检查结果，并生成导出。
+- `Modules > Modbus Module` 会回到 Modbus 主站操作界面。
+- `Modules > ASIO/IIS Module` 会在主窗口中显示 ASIO/IIS 帧流界面。
+- 选择另一个模块时，中央工作区会刷新为该模块界面，而不是打开新的顶层模块窗口。
 
-## 模拟器流程
-当前 UI 采用模拟器优先开发方式。
-
-1. 保持 Mode 为 `Simulator`。
-2. 点击 `Add Simulator`。
-3. 选择新出现的设备行，例如 `SIM-UI-001`。
-4. 点击 `Connect`。
-5. 点击 `Read Live`。
-
-实时读数区域和曲线会显示确定性的模拟器数据。
-
-## Replay CSV 流程
-Replay CSV 模式会把记录或生成的样本作为只读模拟器设备加载。
-
-1. 准备或生成 replay CSV 文件。
-2. 将 Mode 设置为 `Replay CSV`。
-3. 在 Replay CSV 输入框中填写 CSV 路径。
-4. 点击 `Add Replay`。
-5. 选择 replay 通道。
-6. 点击 `Connect`。
-7. 点击 `Read Live`，或运行 `Run Experiment` 等已支持流程。
-
-Replay CSV 必须包含 `mass_flow`。可选列包括 `captured_at`、`volume_flow`、`density`、`temperature`、`status_flags` 和 `source_channel`。
-
-## Serial Modbus RTU 模式
-主窗口连接面板中的 `Serial Modbus RTU` 目前作为未来真实硬件路径展示，但当前版本禁用了主窗口串口设备创建。
-
-如果选择串口模式后点击 `Add Simulator`，状态日志会提示串口 Modbus 已配置但在硬件验收前禁用。这是有意设计：真实设备寄存器表、验收阈值、夹具规则和写入策略仍属于待确认项。
-
-如需直接执行 Modbus 主站操作，请从工具栏或 `Modules` 菜单打开独立 Modbus Module。该模块独立于主窗口的模拟器/replay 设备列表。
-
-如需生成占位寄存器表模板，仅用于工程评审，可运行：
-
-```powershell
-.\CoreFlowStudioConsole.exe --write-register-map-template .\placeholder_modbus.json
-```
-
-不要把该占位寄存器表当作生产发射机文档使用。
-
-## 校准预览
-Calibration Preview 会根据内置参考点采集模拟器样本并保存预览结果。它不会向设备写入参数。
-
-1. 添加并连接一个模拟器。
-2. 选择已连接的模拟器行。
-3. 点击 `Calibration Preview`。
-4. 等待流程完成。
-5. 在 Run History 中选择新生成的运行记录。
-6. 在 Result Details 中查看步骤、指标、判定和 artifacts。
-
-当前计算模块仍是占位实现，生产校准公式提供后才能替换为真实算法。
-
-## 独立 Modbus Module
-可以从主工具栏或 `Modules` 菜单打开 Modbus Module。该模块拥有自己的连接状态、设备档案、连接弹窗、变量映射、`Operations` 菜单、通信数据码显示区和日志，不需要先在主窗口添加模拟器或 replay 通道。
+## Modbus Module
+打开 `Modules > Modbus Module`。该模块拥有自己的连接状态、设备档案、连接弹窗、变量映射、`Operations` 菜单、通信数据码显示区和日志。
 
 - 连接前先创建或选择 `Device Profile`。点击 `New Profile` 新建设备档案，点击 `Edit Profile` 修改当前选中的设备档案。`Device ID` 是被测设备的稳定资产 ID，独立于 Modbus RTU 的 Unit ID。不要把 `01` 这类简单从站地址当作设备 ID。Modbus Module 打开时会自动选择最近使用过且仍然存在的设备档案。
 - 设备档案会保存设备元数据、连接参数和寄存器映射。选择已有档案后，这些字段会自动加载到 Modbus 窗口。
 - 连接前在设备档案弹窗里编辑完整寄存器映射，包括变量名、寄存器类型、地址、字数、数据类型、缩放、单位和是否可写。`Delete` 只删除当前选中的可复用设备档案配置，不会删除已经保存的设备记录和测试记录。
 - 选择设备档案后，点击 `Connection...` 打开 Modbus 连接弹窗。端口列表会根据已接入的串口适配器自动发现。插入或拔出 USB 转串口适配器后，可点击 `Refresh Ports` 重新扫描。`Order` 用于选择 32 位数据的字节/字序，例如 `ABCD`、`BADC`、`CDAB` 或 `DCBA`。`Timeout` 和 `Retries` 可用于容忍从机响应较慢或偶发无响应的情况。
 - 默认映射包含 `mass_rate`、`mass_acc`、`temperature`、`delta_t`、`zero_offset`、`k_factor`、`low_threshold` 和 `zero_calibration_start`。
-- 主窗口显示精简的 `Live Variables` 表格，用于运行时读取、写入和轮询；寄存器类型、地址、字数、数据类型、缩放、单位和是否可写等配置列会隐藏，因为这些内容属于设备档案。
+- 模块显示精简的 `Live Variables` 表格，用于运行时读取、写入和轮询；寄存器类型、地址、字数、数据类型、缩放、单位和是否可写等配置列会隐藏，因为这些内容属于设备档案。
 - 在设备档案弹窗里使用 `Add`、`Delete` 和 `Reset` 维护自定义变量行。保存档案后，地址、类型、缩放、单位、是否可写和行顺序会跟随该设备 ID 保存。
 - 可编辑档案映射包含采样变量以及零点校准启动 coil。如需切换映射，请先断开连接再修改。
 - `Connect` 只会在连接弹窗中打开所选的 Modbus RTU 串口。保存数据时使用当前设备档案的 `Device ID`，连接弹窗中的 Unit ID 只作为 Modbus 协议地址保存。连接完成后可以手动关闭弹窗，模块窗口会保持已连接状态。
@@ -136,71 +85,14 @@ Calibration Preview 会根据内置参考点采集模拟器样本并保存预览
 
 当前模块在没有工程提供验证寄存器表时仍使用占位寄存器表模板。不要把占位寄存器表当作生产发射机文档使用。
 
-## 工厂测试
-Factory Test 会运行固定的模拟器出厂测试路径：
+## ASIO/IIS Module
+打开 `Modules > ASIO/IIS Module`。该模块拥有自己的连接状态，不会创建或连接发射机通道。
 
-- 通过设备接口获取通信和设备上下文；
-- 根据参考质量流量进行测量检查；
-- 执行短时稳定性片段；
-- 保存步骤级 pass/fail 结果；
-- 保存原始 artifacts 和分析记录。
-
-操作步骤：
-
-1. 添加并连接一个模拟器。
-2. 选择已连接的模拟器行。
-3. 点击 `Factory Test`。
-4. 在 Run History 中选择完成的运行记录。
-5. 在 Result Details 中检查指标和 artifacts。
-
-## 灵活实验
-Run Experiment 会执行当前示例研发流程：
-
-- 采集 6 个模拟器样本；
-- 运行 `basic_signal_stats` 信号处理模块；
-- 夹具控制保持为 no-op 占位；
-- ML 推理保持为占位结果。
-
-操作步骤：
-
-1. 添加并连接一个模拟器。
-2. 选择已连接的模拟器行。
-3. 点击 `Run Experiment`。
-4. 在 Run History 中选择完成的运行记录。
-5. 查看处理指标和生成 artifacts。
-
-## 报告与导出
-Generate Export 会为选中的运行记录生成报告和导出 artifacts。
-
-1. 在 Run History 中选择一个已完成的运行记录。
-2. 点击 `Generate Export`。
-3. 如有需要，再次选择该运行记录。
-4. 在 Result Details 中查看生成的 artifacts。
-
-导出包包括：
-
-- `operator_report.txt`
-- `metrics.csv`
-- `measurements.csv`
-- `export_manifest.json`
-
-Result Details 中显示的 artifact 路径是相对于当前数据目录的相对路径。
-
-## 状态日志与运行历史
-状态日志显示连接动作、实时读数消息、流程开始/完成消息，以及用户请求取消的记录。
-
-Run History 显示已保存运行：
-
-- run ID；
-- workflow name；
-- device ID；
-- status；
-- start time。
-
-选择某条运行记录后，Result Details 会显示运行元数据、流程步骤、分析结果、指标和 artifacts。
-
-## 取消行为
-`Cancel` 按钮会记录用户请求取消。当前流程是较短的模拟器任务，可能在真正停止前已经完成。如果请求取消后流程仍完成，该运行仍会保存，并可继续检查。
+- 选择 backend 和 device，然后检查 sample rate、bit depth、sample format、input/output channel count、samples per frame、test amplitude 等常用参数。
+- 使用 `Refresh Devices` 重新扫描设备选项。
+- 使用 `Probe` 检查所选设备或 backend 能力。
+- 使用 `Connect` 和 `Disconnect` 只改变 ASIO/IIS 模块自身状态。
+- 使用 `Tests` 打开 loopback 和 non-loopback 测试弹窗。测试弹窗可生成 sine、square 或 white-noise 信号，并显示 input、output 或两者叠加的曲线。
 
 ## 命令行诊断
 打包版本中请使用 `CoreFlowStudioConsole.exe`。
@@ -240,7 +132,7 @@ Replay CSV 必须包含 `mass_flow` 列。可选列包括 `captured_at`、`volum
 ## 安全说明
 - 模拟器流程不需要硬件，属于安全路径。
 - Calibration Preview 不会写入设备参数。
-- 独立 Modbus Module 会在操作员于连接弹窗点击 `Connect` 时尝试打开所选 COM 口。
+- Modbus Module 会在操作员于连接弹窗点击 `Connect` 时尝试打开所选 COM 口。
 - 具备写入能力的 Modbus 操作必须经过明确的 write-guard 和审计流程。
 - 真实发射机寄存器表、校准公式、夹具行为和验收阈值必须在硬件使用前提供。
 - 不要使用占位寄存器表执行生产发射机写入。
