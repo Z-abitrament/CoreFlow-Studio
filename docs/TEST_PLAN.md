@@ -371,6 +371,10 @@ Scenarios:
   update package, lists that patch before the full package in `latest.json`, and
   skips patch generation for source versions older than the patch-capable
   updater.
+- Confirm that `scripts\release.ps1` documents and enforces a clean working
+  tree before building, verifying, generating update assets, tagging, pushing,
+  and creating the GitHub Release, and that `.githooks\post-commit` only invokes
+  it when `coreflow.autoRelease=true` and both version files changed.
 - Run the console diagnostics executable's headless simulator smoke command with an explicit data root.
 - Run the console diagnostics executable with `--ui`, capture stdout/stderr, and confirm the UI stays alive through startup without missing-module errors.
 - Run the windowed UI executable and confirm it stays alive through startup.

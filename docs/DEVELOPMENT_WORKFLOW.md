@@ -92,6 +92,38 @@ Run the same check manually when needed:
 python scripts/check_version_update.py
 ```
 
+## Release Automation
+Version commits are not automatically published by default. To publish the
+current committed version as a GitHub Release, run:
+
+```powershell
+.\scripts\release.ps1
+```
+
+The script reads the synchronized version, requires a clean working tree, builds
+and verifies `dist\CoreFlowStudio`, creates full and compatible patch update
+assets, creates and pushes the version tag, and uploads the GitHub Release
+assets.
+
+To make version commits publish automatically after commit, enable the
+repository-local post-commit switch:
+
+```powershell
+git config core.hooksPath .githooks
+git config coreflow.autoRelease true
+```
+
+With that switch enabled, the post-commit hook runs `scripts\release.ps1 -Yes`
+only when the commit changes both version files. Turn it off with:
+
+```powershell
+git config coreflow.autoRelease false
+```
+
+Keep automatic release disabled while making experimental version commits or
+when GitHub/network access is unavailable. The release script can be rerun after
+a transient upload failure as long as the GitHub Release was not created.
+
 ## Overnight Autonomous Run Checklist
 Before an unattended run:
 

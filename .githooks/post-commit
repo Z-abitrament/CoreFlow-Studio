@@ -1,0 +1,18 @@
+#!/usr/bin/env sh
+auto_release="$(git config --bool coreflow.autoRelease 2>/dev/null || true)"
+if [ "$auto_release" != "true" ]; then
+  exit 0
+fi
+
+changed_files="$(git diff-tree --no-commit-id --name-only -r HEAD)"
+echo "$changed_files" | grep -qx "pyproject.toml" || exit 0
+echo "$changed_files" | grep -qx "src/coreflow/__init__.py" || exit 0
+
+if command -v powershell >/dev/null 2>&1; then
+  powershell -ExecutionPolicy Bypass -File scripts/release.ps1 -Yes
+elif command -v powershell.exe >/dev/null 2>&1; then
+  powershell.exe -ExecutionPolicy Bypass -File scripts/release.ps1 -Yes
+else
+  echo "Automatic release skipped: PowerShell was not found." >&2
+  exit 1
+fi
