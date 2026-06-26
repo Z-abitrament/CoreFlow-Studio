@@ -19,8 +19,9 @@ foundation is now available for lab use.
 - Headless packaged-app simulator smoke command via `python -m coreflow --simulator-smoke`.
 - Packaged `CoreFlowStudio.exe` opens the Qt desktop UI without a console window.
 - Packaged `CoreFlowStudioConsole.exe` keeps console diagnostics available for build info, simulator smoke, and register-map template generation.
-- Packaged `CoreFlowStudioConsole.exe` can generate a full update zip and
-  `latest.json` manifest for upload to GitHub Release.
+- Packaged `CoreFlowStudioConsole.exe` can generate a full update zip,
+  optional file-level patch zip, and `latest.json` manifest for upload to
+  GitHub Release.
 - The desktop UI exposes `Help > Check for Updates...` so target-PC operators
   can check, download, verify, and apply updates from inside the app.
 - Packaged UI startup failures are logged to `<data-root>\logs\startup.log` before the process exits.
@@ -49,7 +50,7 @@ powershell -ExecutionPolicy Bypass -File .\packaging\windows\verify_package.ps1
 - Windowed packaged executable started without a console window.
 - Console packaged executable printed build info.
 - Console packaged executable wrote a placeholder register-map JSON file.
-- Console packaged executable can write an update package zip plus
+- Console packaged executable can write full and patch update package zips plus
   `latest.json` manifest for GitHub Release assets.
 - Console packaged executable ran simulator-backed calibration preview, factory test, experiment, and export generation through the headless smoke command.
 - Distribution includes `USER_MANUAL.en.md` and `USER_MANUAL.zh-CN.md`.

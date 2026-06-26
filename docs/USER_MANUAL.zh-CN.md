@@ -65,7 +65,7 @@ artifacts/runs/<year>/<month>/<run_id>/
   GitHub Release 的 `latest.json` 地址并点击 `Save URL`；之后按顺序点击
   `Check`、`Download`、`Update and Restart` 即可。目标电脑操作者不需要
   运行 PowerShell 命令。下载的更新包会先按 `latest.json` 中的 SHA-256
-  校验，通过后才由独立 updater 替换安装目录；`%LOCALAPPDATA%\CoreFlow Studio`
+  校验；如果有匹配当前版本的小型 patch 包，软件会优先下载 patch，否则回退到完整更新包。校验通过后才由独立 updater 修补或替换安装目录；`%LOCALAPPDATA%\CoreFlow Studio`
   下的用户数据不会被替换。
 
 ## Modbus Module

@@ -48,18 +48,31 @@ dist/
 ```
 
 ## GitHub Release Updates
-For online updates, publish a GitHub Release asset set that contains a full
-update zip and `latest.json`. After building and verifying the package, generate
-those files from the repository root:
+For online updates, publish a GitHub Release asset set that always contains a
+full update zip and `latest.json`. Starting with source versions `0.6.1` and
+newer, the same command can also create a smaller file-level patch zip from the
+previous full update package. Target PCs automatically prefer a matching patch
+package and fall back to the full package when no safe patch is available.
+
+After building and verifying the package, generate full assets from the
+repository root:
 
 ```powershell
-.\dist\CoreFlowStudio\CoreFlowStudioConsole.exe --make-update-package .\dist\CoreFlowStudio --update-output-dir .\dist\updates --update-base-url https://github.com/<owner>/<repo>/releases/download/v0.6.0
+.\dist\CoreFlowStudio\CoreFlowStudioConsole.exe --make-update-package .\dist\CoreFlowStudio --update-output-dir .\dist\updates --update-base-url https://github.com/<owner>/<repo>/releases/download/v0.6.1
 ```
 
-Upload both generated files to the GitHub Release:
+To generate a patch package as well, provide the previous version and the
+previous release's full zip:
+
+```powershell
+.\dist\CoreFlowStudio\CoreFlowStudioConsole.exe --make-update-package .\dist\CoreFlowStudio --update-output-dir .\dist\updates --update-base-url https://github.com/<owner>/<repo>/releases/download/v0.6.2 --previous-update-version 0.6.1 --previous-update-package .\dist\updates\CoreFlowStudio-0.6.1-full.zip
+```
+
+Upload all generated files to the GitHub Release:
 
 ```text
-dist\updates\CoreFlowStudio-0.6.0-full.zip
+dist\updates\CoreFlowStudio-0.6.2-full.zip
+dist\updates\CoreFlowStudio-0.6.1-to-0.6.2-patch.zip
 dist\updates\latest.json
 ```
 
@@ -74,7 +87,7 @@ https://github.com/<owner>/<repo>/releases/latest/download/latest.json
 ```
 
 The app verifies the downloaded zip with the SHA-256 hash from `latest.json`
-before the updater replaces the install folder. User data under
+before the updater replaces or patches the install folder. User data under
 `%LOCALAPPDATA%\CoreFlow Studio` is not part of the package and is not replaced.
 
 ## Runtime Data

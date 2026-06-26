@@ -65,8 +65,10 @@ The main window intentionally contains only the `Modules` menu and the active mo
   GitHub Release `latest.json` URL once, click `Save URL`, then use `Check`,
   `Download`, and `Update and Restart`. The target PC operator does not need to
   run PowerShell commands for updates. The downloaded package is verified with
-  SHA-256 before the external updater replaces the install folder, and user data
-  under `%LOCALAPPDATA%\CoreFlow Studio` is left in place.
+  SHA-256 before the external updater patches or replaces the install folder,
+  and user data under `%LOCALAPPDATA%\CoreFlow Studio` is left in place. When a
+  matching patch package is available, the app downloads that smaller package;
+  otherwise it falls back to the full update package.
 
 ## Modbus Module
 Open `Modules > Modbus Module`. The module has its own connection state, device profiles, connection dialog, variable map, Operations menu, communication-frame view, and log.

@@ -18,6 +18,18 @@ from coreflow import __version__
 
 
 UPDATE_SETTINGS_ENV = "COREFLOW_UPDATE_MANIFEST_URL"
+PATCH_MANIFEST_NAME = "coreflow_patch_manifest.json"
+PATCH_INSTALLER_MIN_VERSION = "0.6.1"
+
+
+@dataclass(frozen=True, slots=True)
+class UpdateAssetBuildResult:
+    """Release assets created for a GitHub Release update."""
+
+    full_zip_path: Path
+    manifest_path: Path
+    patch_zip_path: Path | None = None
+    skipped_patch_reason: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +83,18 @@ class DownloadedUpdate:
     package_path: Path
     package: UpdatePackage
     checked_at: datetime
+
+
+def _validate_patch_relative_path(value: str) -> None:
+    path = Path(value)
+    if (
+        not value
+        or path.is_absolute()
+        or ".." in path.parts
+        or value.startswith("/")
+        or value.startswith("\\")
+    ):
+        raise ValueError(f"Unsafe patch path: {value}")
 
 
 class UpdateSettingsStore:
@@ -440,12 +464,199 @@ def create_full_update_package(
 ) -> tuple[Path, Path]:
     """Create a full GitHub Release update zip and latest.json manifest."""
 
+    output_dir = Path(output_dir)
+    zip_path, package = _create_full_update_zip(
+        dist_dir=dist_dir,
+        output_dir=output_dir,
+        version=version,
+        base_url=base_url,
+        package_name=package_name,
+    )
+    manifest_path = output_dir / "latest.json"
+    _write_latest_manifest(
+        manifest_path,
+        latest_version=version,
+        packages=(package,),
+    )
+    return zip_path, manifest_path
+
+
+def create_update_release_assets(
+    *,
+    dist_dir: Path,
+    output_dir: Path,
+    version: str,
+    base_url: str,
+    previous_version: str | None = None,
+    previous_dist_dir: Path | None = None,
+    previous_package: Path | None = None,
+) -> UpdateAssetBuildResult:
+    """Create full and optional patch update assets for a GitHub Release."""
+
+    if previous_dist_dir is not None and previous_package is not None:
+        raise ValueError("Use either previous_dist_dir or previous_package, not both.")
+    if (previous_dist_dir is not None or previous_package is not None) and not previous_version:
+        raise ValueError("previous_version is required when building a patch package.")
+    if previous_version and compare_versions(previous_version, version) >= 0:
+        raise ValueError("previous_version must be older than the new version.")
+
+    output_dir = Path(output_dir)
+    full_zip_path, full_package = _create_full_update_zip(
+        dist_dir=dist_dir,
+        output_dir=output_dir,
+        version=version,
+        base_url=base_url,
+    )
+    packages: list[UpdatePackage] = [full_package]
+    patch_zip_path: Path | None = None
+    skipped_patch_reason = ""
+
+    if previous_version is not None:
+        if previous_dist_dir is None and previous_package is None:
+            skipped_patch_reason = (
+                "Patch package skipped because no previous dist folder or "
+                "previous full update package was provided."
+            )
+        elif compare_versions(previous_version, PATCH_INSTALLER_MIN_VERSION) < 0:
+            skipped_patch_reason = (
+                "Patch package skipped because source versions older than "
+                f"{PATCH_INSTALLER_MIN_VERSION} cannot apply patch updates safely."
+            )
+        elif previous_dist_dir is not None:
+            patch_zip_path, patch_package = create_patch_update_package(
+                previous_dist_dir=previous_dist_dir,
+                dist_dir=dist_dir,
+                output_dir=output_dir,
+                from_version=previous_version,
+                to_version=version,
+                base_url=base_url,
+            )
+            packages.insert(0, patch_package)
+        elif previous_package is not None:
+            with _extracted_update_package(previous_package) as extracted_dist_dir:
+                patch_zip_path, patch_package = create_patch_update_package(
+                    previous_dist_dir=extracted_dist_dir,
+                    dist_dir=dist_dir,
+                    output_dir=output_dir,
+                    from_version=previous_version,
+                    to_version=version,
+                    base_url=base_url,
+                )
+            packages.insert(0, patch_package)
+
+    manifest_path = Path(output_dir) / "latest.json"
+    _write_latest_manifest(
+        manifest_path,
+        latest_version=version,
+        packages=tuple(packages),
+    )
+    return UpdateAssetBuildResult(
+        full_zip_path=full_zip_path,
+        manifest_path=manifest_path,
+        patch_zip_path=patch_zip_path,
+        skipped_patch_reason=skipped_patch_reason,
+    )
+
+
+def create_patch_update_package(
+    *,
+    previous_dist_dir: Path,
+    dist_dir: Path,
+    output_dir: Path,
+    from_version: str,
+    to_version: str,
+    base_url: str,
+    package_name: str | None = None,
+) -> tuple[Path, UpdatePackage]:
+    """Create a file-level patch package between two packaged dist folders."""
+
+    import zipfile
+
+    if compare_versions(from_version, PATCH_INSTALLER_MIN_VERSION) < 0:
+        raise ValueError(
+            "Patch updates require source version "
+            f"{PATCH_INSTALLER_MIN_VERSION} or newer."
+        )
+    if compare_versions(from_version, to_version) >= 0:
+        raise ValueError("from_version must be older than to_version.")
+    previous_dist_dir = Path(previous_dist_dir)
+    dist_dir = Path(dist_dir)
+    output_dir = Path(output_dir)
+    _ensure_dist_dir(previous_dist_dir)
+    _ensure_dist_dir(dist_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    previous_files = _package_file_map(previous_dist_dir)
+    new_files = _package_file_map(dist_dir)
+    changed_files: list[tuple[str, Path]] = []
+    for relative, new_path in sorted(new_files.items()):
+        _validate_patch_relative_path(relative)
+        old_path = previous_files.get(relative)
+        if old_path is None or file_sha256(old_path) != file_sha256(new_path):
+            changed_files.append((relative, new_path))
+    deleted_files = sorted(set(previous_files) - set(new_files))
+    for relative in deleted_files:
+        _validate_patch_relative_path(relative)
+    if not changed_files and not deleted_files:
+        raise ValueError("Patch package would contain no file changes.")
+
+    name = package_name or f"CoreFlowStudio-{from_version}-to-{to_version}-patch.zip"
+    zip_path = output_dir / name
+    if zip_path.exists():
+        zip_path.unlink()
+    patch_manifest = {
+        "schema_version": 1,
+        "package_type": "patch",
+        "from_version": from_version,
+        "to_version": to_version,
+        "changed_files": [
+            {
+                "path": relative,
+                "sha256": file_sha256(path),
+                "size_bytes": path.stat().st_size,
+            }
+            for relative, path in changed_files
+        ],
+        "deleted_files": deleted_files,
+    }
+    with zipfile.ZipFile(
+        zip_path,
+        "w",
+        compression=zipfile.ZIP_DEFLATED,
+        compresslevel=9,
+    ) as archive:
+        archive.writestr(
+            PATCH_MANIFEST_NAME,
+            json.dumps(patch_manifest, indent=2, sort_keys=True),
+        )
+        for relative, path in changed_files:
+            archive.write(path, f"CoreFlowStudio/{relative}")
+
+    package = UpdatePackage(
+        package_type="patch",
+        from_version=from_version,
+        to_version=to_version,
+        file_name=name,
+        url=_package_url(base_url, name),
+        sha256=file_sha256(zip_path),
+        size_bytes=zip_path.stat().st_size,
+    )
+    return zip_path, package
+
+
+def _create_full_update_zip(
+    *,
+    dist_dir: Path,
+    output_dir: Path,
+    version: str,
+    base_url: str,
+    package_name: str | None = None,
+) -> tuple[Path, UpdatePackage]:
     import zipfile
 
     dist_dir = Path(dist_dir)
     output_dir = Path(output_dir)
-    if not (dist_dir / "CoreFlowStudio.exe").exists():
-        raise ValueError(f"Not a CoreFlowStudio dist directory: {dist_dir}")
+    _ensure_dist_dir(dist_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     name = package_name or f"CoreFlowStudio-{version}-full.zip"
     zip_path = output_dir / name
@@ -457,37 +668,109 @@ def create_full_update_package(
         compression=zipfile.ZIP_DEFLATED,
         compresslevel=9,
     ) as archive:
-        for path in sorted(dist_dir.rglob("*")):
-            if not path.is_file():
-                continue
-            relative = path.relative_to(dist_dir)
-            if _should_exclude_from_update_package(relative):
-                continue
-            archive.write(path, Path("CoreFlowStudio") / relative)
-    sha256 = file_sha256(zip_path)
-    package_url = f"{base_url.rstrip('/')}/{name}" if base_url else name
+        for relative, path in sorted(_package_file_map(dist_dir).items()):
+            archive.write(path, f"CoreFlowStudio/{relative}")
+    package = UpdatePackage(
+        package_type="full",
+        to_version=version,
+        file_name=name,
+        url=_package_url(base_url, name),
+        sha256=file_sha256(zip_path),
+        size_bytes=zip_path.stat().st_size,
+    )
+    return zip_path, package
+
+
+def _ensure_dist_dir(dist_dir: Path) -> None:
+    if not (dist_dir / "CoreFlowStudio.exe").exists():
+        raise ValueError(f"Not a CoreFlowStudio dist directory: {dist_dir}")
+
+
+def _package_file_map(dist_dir: Path) -> dict[str, Path]:
+    files: dict[str, Path] = {}
+    for path in sorted(Path(dist_dir).rglob("*")):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(dist_dir)
+        if _should_exclude_from_update_package(relative):
+            continue
+        files[relative.as_posix()] = path
+    return files
+
+
+def _package_url(base_url: str, name: str) -> str:
+    return f"{base_url.rstrip('/')}/{name}" if base_url else name
+
+
+def _write_latest_manifest(
+    manifest_path: Path,
+    *,
+    latest_version: str,
+    packages: tuple[UpdatePackage, ...],
+    release_notes: str = "",
+) -> None:
     manifest = {
         "schema_version": 1,
-        "latest_version": version,
+        "latest_version": latest_version,
         "generated_at": datetime.now(UTC).isoformat(),
-        "release_notes": "",
-        "packages": [
-            {
-                "type": "full",
-                "to_version": version,
-                "file_name": name,
-                "url": package_url,
-                "sha256": sha256,
-                "size_bytes": zip_path.stat().st_size,
-            }
-        ],
+        "release_notes": release_notes,
+        "packages": [_package_to_manifest_dict(package) for package in packages],
     }
-    manifest_path = output_dir / "latest.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(
         json.dumps(manifest, indent=2, sort_keys=True),
         encoding="utf-8",
     )
-    return zip_path, manifest_path
+
+
+def _package_to_manifest_dict(package: UpdatePackage) -> dict[str, object]:
+    data: dict[str, object] = {
+        "type": package.package_type,
+        "to_version": package.to_version,
+        "file_name": package.file_name,
+        "url": package.url,
+        "sha256": package.sha256,
+        "size_bytes": package.size_bytes,
+    }
+    if package.from_version is not None:
+        data["from_version"] = package.from_version
+    if package.notes:
+        data["notes"] = package.notes
+    return {key: value for key, value in data.items() if value is not None}
+
+
+class _extracted_update_package:
+    def __init__(self, package_path: Path) -> None:
+        self.package_path = Path(package_path)
+        self._temp_dir = None
+
+    def __enter__(self) -> Path:
+        import tempfile
+        import zipfile
+
+        self._temp_dir = tempfile.TemporaryDirectory()
+        extract_root = Path(self._temp_dir.name)
+        with zipfile.ZipFile(self.package_path) as archive:
+            _safe_extract_zip(archive, extract_root)
+        nested = extract_root / "CoreFlowStudio"
+        if (nested / "CoreFlowStudio.exe").exists():
+            return nested
+        if (extract_root / "CoreFlowStudio.exe").exists():
+            return extract_root
+        raise ValueError(f"Update package does not contain CoreFlowStudio.exe: {self.package_path}")
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self._temp_dir is not None:
+            self._temp_dir.cleanup()
+
+
+def _safe_extract_zip(archive, extract_root: Path) -> None:
+    root = extract_root.resolve()
+    for member in archive.infolist():
+        target = (extract_root / member.filename).resolve()
+        if target != root and root not in target.parents:
+            raise ValueError(f"Unsafe path in update package: {member.filename}")
+        archive.extract(member, extract_root)
 
 
 def _should_exclude_from_update_package(relative_path: Path) -> bool:
@@ -535,6 +818,29 @@ function Write-UpdateLog {
     }
 }
 
+function Assert-SafePatchPath {
+    param([string]$RelativePath)
+    if ([string]::IsNullOrWhiteSpace($RelativePath)) {
+        throw "Patch path is empty."
+    }
+    if ([System.IO.Path]::IsPathRooted($RelativePath)) {
+        throw "Patch path is absolute: $RelativePath"
+    }
+    $parts = $RelativePath -split '[\\/]'
+    if ($parts -contains '..') {
+        throw "Patch path escapes the install directory: $RelativePath"
+    }
+}
+
+function Join-InstallPath {
+    param(
+        [string]$Root,
+        [string]$RelativePath
+    )
+    Assert-SafePatchPath -RelativePath $RelativePath
+    return Join-Path $Root $RelativePath
+}
+
 Write-UpdateLog "Starting CoreFlow Studio update."
 if ($WaitForPid -gt 0) {
     try {
@@ -561,32 +867,91 @@ $stamp = Get-Date -Format "yyyyMMddHHmmss"
 $backup = Join-Path $parent "$leaf.backup.$stamp"
 $extract = Join-Path ([System.IO.Path]::GetTempPath()) "CoreFlowUpdate-$([Guid]::NewGuid())"
 New-Item -ItemType Directory -Path $extract -Force | Out-Null
+$patchManifestName = "coreflow_patch_manifest.json"
 
 try {
     Expand-Archive -LiteralPath $PackageZip -DestinationPath $extract -Force
-    $payload = Join-Path $extract "CoreFlowStudio"
-    if (-not (Test-Path -LiteralPath (Join-Path $payload "CoreFlowStudio.exe"))) {
-        $payload = $extract
-    }
-    if (-not (Test-Path -LiteralPath (Join-Path $payload "CoreFlowStudio.exe"))) {
-        throw "Update package does not contain CoreFlowStudio.exe."
-    }
+    $patchManifestPath = Join-Path $extract $patchManifestName
 
-    Write-UpdateLog "Moving current install to backup: $backup"
-    Move-Item -LiteralPath $installPath.Path -Destination $backup
-    try {
-        Write-UpdateLog "Installing payload from: $payload"
-        Move-Item -LiteralPath $payload -Destination $installPath.Path
-        Remove-Item -LiteralPath $backup -Recurse -Force
-    } catch {
-        Write-UpdateLog "Install failed, restoring backup: $_"
-        if (Test-Path -LiteralPath $installPath.Path) {
-            Remove-Item -LiteralPath $installPath.Path -Recurse -Force
+    if (Test-Path -LiteralPath $patchManifestPath) {
+        $patchManifest = Get-Content -LiteralPath $patchManifestPath -Raw | ConvertFrom-Json
+        if ($patchManifest.package_type -ne "patch") {
+            throw "Unsupported patch package manifest type: $($patchManifest.package_type)"
         }
-        Move-Item -LiteralPath $backup -Destination $installPath.Path
-        throw
+        $payload = Join-Path $extract "CoreFlowStudio"
+        if (-not (Test-Path -LiteralPath $payload)) {
+            throw "Patch package does not contain a CoreFlowStudio payload folder."
+        }
+
+        Write-UpdateLog "Backing up current install for patch: $backup"
+        Copy-Item -LiteralPath $installPath.Path -Destination $backup -Recurse -Force
+        try {
+            foreach ($entry in @($patchManifest.deleted_files)) {
+                if ([string]::IsNullOrWhiteSpace([string]$entry)) {
+                    continue
+                }
+                $target = Join-InstallPath -Root $installPath.Path -RelativePath ([string]$entry)
+                if (Test-Path -LiteralPath $target) {
+                    Remove-Item -LiteralPath $target -Recurse -Force
+                }
+            }
+            foreach ($entry in @($patchManifest.changed_files)) {
+                $relative = [string]$entry.path
+                if ([string]::IsNullOrWhiteSpace($relative)) {
+                    continue
+                }
+                $source = Join-InstallPath -Root $payload -RelativePath $relative
+                $target = Join-InstallPath -Root $installPath.Path -RelativePath $relative
+                if (-not (Test-Path -LiteralPath $source)) {
+                    throw "Patch payload missing changed file: $relative"
+                }
+                $targetParent = Split-Path -Parent $target
+                if (-not [string]::IsNullOrWhiteSpace($targetParent)) {
+                    New-Item -ItemType Directory -Path $targetParent -Force | Out-Null
+                }
+                Copy-Item -LiteralPath $source -Destination $target -Force
+                if (-not [string]::IsNullOrWhiteSpace([string]$entry.sha256)) {
+                    $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $target).Hash.ToLowerInvariant()
+                    if ($actual -ne ([string]$entry.sha256).ToLowerInvariant()) {
+                        throw "Patched file checksum mismatch for $relative"
+                    }
+                }
+            }
+            Remove-Item -LiteralPath $backup -Recurse -Force
+            Write-UpdateLog "Patch update installed successfully."
+        } catch {
+            Write-UpdateLog "Patch install failed, restoring backup: $_"
+            if (Test-Path -LiteralPath $installPath.Path) {
+                Remove-Item -LiteralPath $installPath.Path -Recurse -Force
+            }
+            Move-Item -LiteralPath $backup -Destination $installPath.Path
+            throw
+        }
+    } else {
+        $payload = Join-Path $extract "CoreFlowStudio"
+        if (-not (Test-Path -LiteralPath (Join-Path $payload "CoreFlowStudio.exe"))) {
+            $payload = $extract
+        }
+        if (-not (Test-Path -LiteralPath (Join-Path $payload "CoreFlowStudio.exe"))) {
+            throw "Update package does not contain CoreFlowStudio.exe."
+        }
+
+        Write-UpdateLog "Moving current install to backup: $backup"
+        Move-Item -LiteralPath $installPath.Path -Destination $backup
+        try {
+            Write-UpdateLog "Installing payload from: $payload"
+            Move-Item -LiteralPath $payload -Destination $installPath.Path
+            Remove-Item -LiteralPath $backup -Recurse -Force
+        } catch {
+            Write-UpdateLog "Install failed, restoring backup: $_"
+            if (Test-Path -LiteralPath $installPath.Path) {
+                Remove-Item -LiteralPath $installPath.Path -Recurse -Force
+            }
+            Move-Item -LiteralPath $backup -Destination $installPath.Path
+            throw
+        }
+        Write-UpdateLog "Full update installed successfully."
     }
-    Write-UpdateLog "Update installed successfully."
     if (Test-Path -LiteralPath $RestartExe) {
         Start-Process -FilePath $RestartExe
     }

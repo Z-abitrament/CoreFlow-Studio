@@ -181,19 +181,19 @@ def test_make_update_package_cli_writes_release_assets(tmp_path, capsys) -> None
                 "--update-output-dir",
                 str(output_dir),
                 "--update-base-url",
-                "https://github.com/acme/CoreFlowStudio/releases/download/v0.6.0",
+                "https://github.com/acme/CoreFlowStudio/releases/download/v0.6.1",
             ]
         )
         == 0
     )
 
     captured = capsys.readouterr()
-    assert "Wrote update package:" in captured.out
+    assert "Wrote full update package:" in captured.out
     assert "Wrote update manifest:" in captured.out
-    assert (output_dir / "CoreFlowStudio-0.6.0-full.zip").exists()
+    assert (output_dir / "CoreFlowStudio-0.6.1-full.zip").exists()
     manifest = (output_dir / "latest.json").read_text(encoding="utf-8")
-    assert '"latest_version": "0.6.0"' in manifest
-    assert "CoreFlowStudio-0.6.0-full.zip" in manifest
+    assert '"latest_version": "0.6.1"' in manifest
+    assert "CoreFlowStudio-0.6.1-full.zip" in manifest
 
 
 def test_windows_packaging_files_are_present() -> None:
@@ -264,6 +264,8 @@ def test_windows_packaging_files_are_present() -> None:
     assert "CoreFlowStudioConsole.exe --replay-smoke" in readme_text
     assert "CoreFlowStudioConsole.exe --ui" in readme_text
     assert "--make-update-package" in readme_text
+    assert "--previous-update-version" in readme_text
+    assert "--previous-update-package" in readme_text
     assert "latest.json" in readme_text
     assert "startup.log" in readme_text
     assert "CoreFlowStudio.exe` with no command-line arguments" in readme_text

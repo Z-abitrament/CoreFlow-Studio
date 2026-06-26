@@ -31,7 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--make-update-package",
         type=Path,
         default=None,
-        help="Create a full update zip and latest.json from a packaged dist folder.",
+        help="Create update zip assets and latest.json from a packaged dist folder.",
     )
     parser.add_argument(
         "--update-output-dir",
@@ -43,6 +43,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--update-base-url",
         default="",
         help="Base GitHub Release asset URL for generated update manifests.",
+    )
+    parser.add_argument(
+        "--previous-update-version",
+        default=None,
+        help="Previous released version used to generate a patch package.",
+    )
+    parser.add_argument(
+        "--previous-update-dist",
+        type=Path,
+        default=None,
+        help="Previous packaged dist folder used to generate a patch package.",
+    )
+    parser.add_argument(
+        "--previous-update-package",
+        type=Path,
+        default=None,
+        help="Previous full update zip used to generate a patch package.",
     )
     parser.add_argument(
         "--ui",
@@ -201,6 +218,9 @@ def main(argv: list[str] | None = None) -> int:
             args.make_update_package,
             output_dir=args.update_output_dir,
             base_url=args.update_base_url,
+            previous_version=args.previous_update_version,
+            previous_dist_dir=args.previous_update_dist,
+            previous_package=args.previous_update_package,
         )
     elif args.write_register_map_template is not None:
         from coreflow.hardware import (
@@ -327,20 +347,30 @@ def make_update_package_cli(
     *,
     output_dir: Path | None,
     base_url: str,
+    previous_version: str | None = None,
+    previous_dist_dir: Path | None = None,
+    previous_package: Path | None = None,
 ) -> int:
     from coreflow.build_info import current_build_info
-    from coreflow.app.updates import create_full_update_package
+    from coreflow.app.updates import create_update_release_assets
 
     info = current_build_info()
     resolved_output_dir = output_dir or dist_dir.parent / "updates"
-    zip_path, manifest_path = create_full_update_package(
+    result = create_update_release_assets(
         dist_dir=dist_dir,
         output_dir=resolved_output_dir,
         version=info.version,
         base_url=base_url,
+        previous_version=previous_version,
+        previous_dist_dir=previous_dist_dir,
+        previous_package=previous_package,
     )
-    print(f"Wrote update package: {zip_path}")
-    print(f"Wrote update manifest: {manifest_path}")
+    print(f"Wrote full update package: {result.full_zip_path}")
+    if result.patch_zip_path is not None:
+        print(f"Wrote patch update package: {result.patch_zip_path}")
+    elif result.skipped_patch_reason:
+        print(result.skipped_patch_reason)
+    print(f"Wrote update manifest: {result.manifest_path}")
     return 0
 
 

@@ -366,13 +366,20 @@ Scenarios:
 - Confirm the console diagnostics executable can generate a full GitHub Release
   update package and `latest.json` manifest from a packaged distribution folder,
   excluding runtime data folders.
+- Confirm that when a previous source version and previous full update package
+  are provided, the console diagnostics executable generates a smaller patch
+  update package, lists that patch before the full package in `latest.json`, and
+  skips patch generation for source versions older than the patch-capable
+  updater.
 - Run the console diagnostics executable's headless simulator smoke command with an explicit data root.
 - Run the console diagnostics executable with `--ui`, capture stdout/stderr, and confirm the UI stays alive through startup without missing-module errors.
 - Run the windowed UI executable and confirm it stays alive through startup.
 - Open `Help > Check for Updates...` from the packaged UI, enter a reachable
   `latest.json` URL, check for an update, download it, verify SHA-256, and
   confirm `Update and Restart` starts the external updater without requiring the
-  operator to run PowerShell commands.
+  operator to run PowerShell commands. Verify a matching patch package is
+  selected ahead of the full package and that the full package remains a
+  fallback when no safe patch exists.
 - Force or mock a packaged UI startup failure and confirm the failure is appended to `<data-root>\logs\startup.log`.
 - Confirm the simulator smoke command performs connection, live read, calibration preview, factory test, experiment, and export generation.
 - Confirm runtime data is stored under `%LOCALAPPDATA%\CoreFlow Studio` by default or `COREFLOW_DATA_ROOT` when configured.
