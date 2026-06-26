@@ -107,7 +107,9 @@ os.environ.setdefault("COREFLOW_BUILD_COMMIT", "$env:COREFLOW_BUILD_COMMIT")
         -LiteralPath (Join-Path $RepoRoot "docs\USER_MANUAL.zh-CN.md") `
         -Destination (Join-Path $RepoRoot "dist\CoreFlowStudio\USER_MANUAL.zh-CN.md") `
         -Force
-    Remove-Item -LiteralPath $BuildStampHook -Force
+    if (Test-Path $BuildStampHook) {
+        Remove-Item -LiteralPath $BuildStampHook -Force
+    }
 
     Write-Host "Built dist\CoreFlowStudio\CoreFlowStudio.exe"
     Write-Host "Built dist\CoreFlowStudio\CoreFlowStudioConsole.exe"

@@ -5,11 +5,14 @@ from __future__ import annotations
 import json
 import csv
 import io
+import base64
+import hashlib
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from math import sqrt
 from pathlib import Path
+from time import monotonic, sleep
 from typing import Any
 from uuid import uuid4
 
@@ -126,6 +129,29 @@ class ModbusVariableSampleResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ModbusVariableSamplingRunResult:
+    """Saved multi-sample variable polling operation."""
+
+    run_id: str
+    variable_names: tuple[str, ...]
+    units: dict[str, str]
+    samples: tuple[ModbusTrialSamplePoint, ...]
+    poll_interval_s: float
+    started_at: datetime
+    ended_at: datetime
+    flow_samples_artifact_id: str | None = None
+    raw_artifact_id: str | None = None
+    test_session_id: str | None = None
+    errors: tuple[str, ...] = ()
+    status: str = "passed"
+    notes: str = ""
+
+    @property
+    def sample_count(self) -> int:
+        return len(self.samples)
+
+
+@dataclass(frozen=True, slots=True)
 class ModbusZeroCalibrationResult:
     """UI-ready zero calibration result."""
 
@@ -201,6 +227,73 @@ class ModbusKFactorSimpleResult:
 
 
 @dataclass(frozen=True, slots=True)
+class ModbusFlowSamplePoint:
+    """One flow-rate sample captured during a manual flow segment."""
+
+    captured_at: datetime
+    value: float
+
+
+@dataclass(frozen=True, slots=True)
+class ModbusTrialSamplePoint:
+    """One multi-variable sample captured during a manual trial segment."""
+
+    captured_at: datetime
+    values: dict[str, object]
+
+
+@dataclass(frozen=True, slots=True)
+class ModbusFlowSampleSeries:
+    """Trial samples loaded from a saved repeatability artifact."""
+
+    artifact_id: str
+    run_id: str
+    flow_rate_parameter: str
+    unit: str
+    samples: tuple[ModbusFlowSamplePoint, ...]
+    variable_names: tuple[str, ...] = ()
+    units: dict[str, str] = field(default_factory=dict)
+    points: tuple[ModbusTrialSamplePoint, ...] = ()
+
+    def __post_init__(self) -> None:
+        variable_names = self.variable_names
+        if not variable_names and self.flow_rate_parameter:
+            variable_names = (self.flow_rate_parameter,)
+        elif (
+            self.flow_rate_parameter
+            and self.flow_rate_parameter not in variable_names
+        ):
+            variable_names = (self.flow_rate_parameter, *variable_names)
+        object.__setattr__(self, "variable_names", _unique_names(variable_names))
+        units = dict(self.units)
+        if self.flow_rate_parameter and self.unit:
+            units.setdefault(self.flow_rate_parameter, self.unit)
+        object.__setattr__(self, "units", units)
+        if not self.points and self.samples and self.flow_rate_parameter:
+            object.__setattr__(
+                self,
+                "points",
+                tuple(
+                    ModbusTrialSamplePoint(
+                        captured_at=sample.captured_at,
+                        values={self.flow_rate_parameter: sample.value},
+                    )
+                    for sample in self.samples
+                ),
+            )
+
+    def values_for(self, variable_name: str) -> tuple[float | None, ...]:
+        if self.points:
+            return tuple(
+                _optional_float(point.values.get(variable_name))
+                for point in self.points
+            )
+        if variable_name == self.flow_rate_parameter:
+            return tuple(sample.value for sample in self.samples)
+        return tuple(None for _sample in self.samples)
+
+
+@dataclass(frozen=True, slots=True)
 class ModbusRepeatabilitySimpleCapture:
     """Captured device data before one repeatability standard-mass entry."""
 
@@ -217,9 +310,16 @@ class ModbusRepeatabilitySimpleCapture:
     mass_acc_after: float
     segment: FlowSegmentCaptureResult
     poll_interval_s: float
+    post_snapshot: dict[str, object] = field(default_factory=dict)
+    post_snapshot_captured_at: datetime | None = None
     raw_curve: tuple[dict[str, object], ...] = ()
     raw_artifact_id: str | None = None
     test_session_id: str | None = None
+    capture_started_at: datetime | None = None
+    flow_samples: tuple[ModbusFlowSamplePoint, ...] = ()
+    trial_samples: tuple[ModbusTrialSamplePoint, ...] = ()
+    trial_sample_variable_names: tuple[str, ...] = ()
+    flow_samples_artifact_id: str | None = None
 
     @property
     def measured_mass_delta(self) -> float:
@@ -256,11 +356,23 @@ class ModbusRepeatabilitySimpleTrialResult:
     flow_instant_at: datetime
     flow_ended_at: datetime
     poll_interval_s: float
+    post_snapshot: dict[str, object] = field(default_factory=dict)
+    post_snapshot_captured_at: datetime | None = None
     flow_rate_source: str = "device"
     raw_artifact_id: str | None = None
     test_session_id: str | None = None
     trial_status: str = "accepted"
     notes: str = ""
+    capture_started_at: datetime | None = None
+    flow_samples: tuple[ModbusFlowSamplePoint, ...] = ()
+    trial_samples: tuple[ModbusTrialSamplePoint, ...] = ()
+    trial_sample_variable_names: tuple[str, ...] = ()
+    flow_samples_artifact_id: str | None = None
+    recorded_flow_sample_count: int = 0
+
+    @property
+    def flow_sample_count(self) -> int:
+        return len(self.flow_samples) if self.flow_samples else self.recorded_flow_sample_count
 
     @property
     def duration_s(self) -> float:
@@ -445,11 +557,12 @@ _CALIBRATION_HISTORY_WORKFLOWS = {
     "zero_calibration",
     "k_factor_calibration",
     "k_factor_calibration_capture",
+    "modbus_variable_sampling",
     "manual_error_repeatability",
     "manual_error_repeatability_final_k",
     "manual_error_repeatability_trial",
 }
-_CALIBRATION_HISTORY_STATUSES = {"passed", "failed", "canceled", "error"}
+_CALIBRATION_HISTORY_STATUSES = {"passed", "captured", "failed", "canceled", "error"}
 _RAW_CAPTURE_IMPORT_STATUS_FALLBACKS = {
     "accepted": RunStatus.PASSED,
     "captured": RunStatus.PASSED,
@@ -788,6 +901,180 @@ class ModbusModuleRuntime:
             samples.extend(result.samples)
             errors.extend(result.errors)
         return ModbusVariableSampleResult(samples=tuple(samples), errors=tuple(errors))
+
+    def run_variable_sampling(
+        self,
+        variable_names: tuple[str, ...],
+        *,
+        poll_interval_s: float = 1.0,
+        max_samples: int | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
+        status_callback: Callable[[str], None] | None = None,
+        sample_callback: Callable[[datetime, dict[str, object]], None] | None = None,
+        operation_metadata: ModbusOperationMetadata | None = None,
+        notes: str = "",
+    ) -> ModbusVariableSamplingRunResult:
+        """Poll selected variables, save a wide sample CSV, and record test history."""
+
+        variable_names = _unique_names(variable_names)
+        if not variable_names:
+            raise ValueError("Select at least one variable to sample.")
+        if poll_interval_s <= 0:
+            raise ValueError("Variable sampling poll interval must be positive.")
+        if max_samples is not None and max_samples < 1:
+            raise ValueError("Variable sampling max samples must be at least 1.")
+        for variable_name in variable_names:
+            self._register_map.by_name(variable_name)
+
+        run_id = self._next_run_id()
+        started_at = datetime.now(UTC)
+        device = self._require_device()
+        recording_device = _RawCurveRecordingDevice(
+            device,
+            register_map=self._register_map,
+            default_phase="variable_sampling",
+        )
+        identity = self._require_identity()
+        self._repository.save_device(
+            DeviceRecord(
+                device_id=identity.device_id,
+                device_type=identity.device_type.value,
+                serial_number=identity.serial_number,
+                model=identity.model,
+                firmware_version=identity.firmware_version,
+                hardware_version=identity.hardware_version,
+                protocol_address=identity.protocol_address,
+                connection_metadata=identity.metadata,
+            )
+        )
+
+        samples: list[ModbusTrialSamplePoint] = []
+        errors: list[str] = []
+        seen_errors: set[str] = set()
+        poll_count = 0
+        _emit_status(
+            status_callback,
+            f"Sampling {len(variable_names)} variable(s)...",
+        )
+        while True:
+            if cancel_requested is not None and cancel_requested() and samples:
+                break
+            poll_count += 1
+            parameters, read_errors = _read_sampling_parameters(
+                recording_device,
+                variable_names,
+            )
+            for error in read_errors:
+                if error not in seen_errors:
+                    seen_errors.add(error)
+                    errors.append(error)
+                    _emit_status(
+                        status_callback,
+                        f"Variable sampling warning: {error}",
+                    )
+
+            captured_at = datetime.now(UTC)
+            values: dict[str, object] = {}
+            for variable_name in variable_names:
+                try:
+                    parameter = _find_parameter(parameters, variable_name)
+                except Exception as exc:
+                    errors.append(f"{variable_name}: {exc}")
+                    continue
+                values[variable_name] = _json_metric_value(parameter.value)
+            if values:
+                point = ModbusTrialSamplePoint(
+                    captured_at=captured_at,
+                    values=values,
+                )
+                samples.append(point)
+                if sample_callback is not None:
+                    sample_callback(point.captured_at, dict(point.values))
+                _emit_status(
+                    status_callback,
+                    f"Sampled {len(samples)} point(s).",
+                )
+            if max_samples is not None and (
+                len(samples) >= max_samples
+                or (not values and poll_count >= max_samples)
+            ):
+                break
+            if cancel_requested is not None and cancel_requested():
+                break
+            _sleep_poll_interval(
+                poll_interval_s,
+                cancel_requested=cancel_requested,
+            )
+
+        ended_at = datetime.now(UTC)
+        sample_points = tuple(samples)
+        if not sample_points:
+            raise RuntimeError("Variable sampling stopped before any samples were recorded.")
+        raw_curve = tuple(recording_device.points)
+        raw_artifact_id = self._save_raw_curve_artifact(
+            run_id=run_id,
+            operation_type="modbus_variable_sampling",
+            points=raw_curve,
+            created_at=started_at,
+        )
+        flow_samples_artifact_id = self._save_flow_samples_artifact(
+            run_id=run_id,
+            operation_type="modbus_variable_sampling",
+            flow_rate_parameter=variable_names[0],
+            samples=sample_points,
+            variable_names=variable_names,
+            created_at=started_at,
+            curve_type="variable_samples",
+        )
+        metadata = self._operation_metadata_snapshot(operation_metadata)
+        units = {
+            name: _register_unit(self._register_map, name)
+            for name in variable_names
+        }
+        summary: dict[str, object] = {
+            **metadata,
+            "variable_names": list(variable_names),
+            "sample_variable_names": list(variable_names),
+            "flow_rate_parameter": variable_names[0],
+            "poll_interval_s": poll_interval_s,
+            "sample_count": len(sample_points),
+            "flow_sample_count": len(sample_points),
+            "flow_samples_artifact_id": flow_samples_artifact_id,
+            "raw_artifact_id": raw_artifact_id,
+            "units": units,
+            "errors": errors,
+            "notes": notes.strip(),
+            "started_at": started_at.isoformat(),
+            "ended_at": ended_at.isoformat(),
+        }
+        status = "passed" if not errors else "captured"
+        self._save_modbus_operation_attempt(
+            attempt_id=f"{run_id}-VARIABLE-SAMPLING",
+            operation_type="modbus_variable_sampling",
+            status=status,
+            run_id=run_id,
+            started_at=started_at,
+            ended_at=ended_at,
+            raw_artifact_id=raw_artifact_id,
+            summary=summary,
+            metadata=operation_metadata,
+            notes=notes.strip() or None,
+        )
+        return ModbusVariableSamplingRunResult(
+            run_id=run_id,
+            variable_names=variable_names,
+            units=units,
+            samples=sample_points,
+            poll_interval_s=poll_interval_s,
+            started_at=started_at,
+            ended_at=ended_at,
+            flow_samples_artifact_id=flow_samples_artifact_id,
+            raw_artifact_id=raw_artifact_id,
+            test_session_id=self._test_session_id,
+            errors=tuple(errors),
+            status=status,
+            notes=notes.strip(),
+        )
 
     def write_variable(self, variable_name: str, value: str) -> ParameterWriteResult:
         """Apply one operator-requested variable write through write guard."""
@@ -1186,9 +1473,11 @@ class ModbusModuleRuntime:
         self,
         *,
         run_id: str | None = None,
+        capture_started_at: datetime | None = None,
         flow_point: float,
         trial_index: int,
         snapshot_variable_names: tuple[str, ...] = (),
+        post_snapshot_variable_names: tuple[str, ...] = (),
         flow_rate_parameter: str = "mass_rate",
         flow_acc_parameter: str = "mass_acc",
         k_factor_parameter: str = "k_factor",
@@ -1201,11 +1490,16 @@ class ModbusModuleRuntime:
         capture_snapshot: bool = True,
         cancel_requested: Callable[[], bool] | None = None,
         status_callback: Callable[[str], None] | None = None,
+        flow_sample_callback: Callable[[datetime, float], None] | None = None,
+        sample_callback: Callable[[datetime, dict[str, object]], None] | None = None,
+        sample_variable_names: tuple[str, ...] = (),
+        record_flow_samples: bool = False,
     ) -> ModbusRepeatabilitySimpleCapture:
         if trial_index < 1:
             raise ValueError("Repeatability trial index must be at least 1.")
         if poll_interval_s <= 0:
             raise ValueError("Repeatability poll interval must be positive.")
+        capture_started_at = capture_started_at or datetime.now(UTC)
         capture_run_id = run_id or self._next_run_id()
         device = self._require_device()
         recording_device = _RawCurveRecordingDevice(
@@ -1227,11 +1521,14 @@ class ModbusModuleRuntime:
             )
         )
         _emit_status(status_callback, "Reading selected variables before this trial...")
+        snapshot_names = _unique_names(
+            snapshot_variable_names or post_snapshot_variable_names
+        )
         if capture_snapshot:
             recording_device.set_phase("pre_snapshot")
             pre_snapshot, pre_snapshot_captured_at = _pre_calibration_snapshot(
                 recording_device,
-                _unique_names(snapshot_variable_names),
+                snapshot_names,
             )
         else:
             pre_snapshot, pre_snapshot_captured_at = {}, None
@@ -1247,6 +1544,41 @@ class ModbusModuleRuntime:
             status_callback,
             "Selected variables read. Start this trial when the device flow is ready.",
         )
+        flow_samples: list[ModbusFlowSamplePoint] = []
+        trial_samples: list[ModbusTrialSamplePoint] = []
+        trial_sample_names = _unique_names(
+            (flow_rate_parameter, *sample_variable_names)
+        )
+        should_record_flow_samples = (
+            record_flow_samples
+            or flow_sample_callback is not None
+            or sample_callback is not None
+        )
+
+        def record_flow_sample(
+            captured_at: datetime,
+            values: dict[str, object],
+        ) -> None:
+            flow_value = float(values[flow_rate_parameter])
+            point = ModbusFlowSamplePoint(
+                captured_at=captured_at,
+                value=flow_value,
+            )
+            flow_samples.append(point)
+            trial_point = ModbusTrialSamplePoint(
+                captured_at=captured_at,
+                values={
+                    name: _json_metric_value(values[name])
+                    for name in trial_sample_names
+                    if name in values
+                },
+            )
+            trial_samples.append(trial_point)
+            if flow_sample_callback is not None:
+                flow_sample_callback(point.captured_at, point.value)
+            if sample_callback is not None:
+                sample_callback(trial_point.captured_at, dict(trial_point.values))
+
         recording_device.set_phase("flow_segment")
         segment = capture_flow_segment(
             recording_device,
@@ -1264,6 +1596,14 @@ class ModbusModuleRuntime:
                 max_wait_stop_polls=max_wait_stop_polls,
                 cancel_message="Repeatability capture canceled.",
                 cancel_requested=cancel_requested,
+                sample_variables=tuple(
+                    name for name in trial_sample_names if name != flow_rate_parameter
+                )
+                if should_record_flow_samples
+                else (),
+                multi_sample_callback=record_flow_sample
+                if should_record_flow_samples
+                else None,
             ),
         )
         _emit_status(status_callback, "Flow segment captured. Reading ending variables...")
@@ -1274,6 +1614,14 @@ class ModbusModuleRuntime:
             merge_adjacent=False,
         )
         mass_acc_after = float(_find_parameter(after_parameters, flow_acc_parameter).value)
+        if snapshot_names:
+            recording_device.set_phase("post_snapshot")
+            post_snapshot, post_snapshot_captured_at = _pre_calibration_snapshot(
+                recording_device,
+                snapshot_names,
+            )
+        else:
+            post_snapshot, post_snapshot_captured_at = {}, None
         raw_curve = tuple(recording_device.points)
         raw_artifact_id = self._save_raw_curve_artifact(
             run_id=capture_run_id,
@@ -1281,8 +1629,23 @@ class ModbusModuleRuntime:
             points=raw_curve,
             created_at=segment.started_at,
         )
+        flow_sample_points = tuple(flow_samples)
+        trial_sample_points = tuple(trial_samples)
+        flow_samples_artifact_id = (
+            self._save_flow_samples_artifact(
+                run_id=capture_run_id,
+                operation_type="manual_error_repeatability_trial",
+                flow_rate_parameter=flow_rate_parameter,
+                samples=trial_sample_points,
+                variable_names=trial_sample_names,
+                created_at=capture_started_at,
+            )
+            if record_flow_samples
+            else None
+        )
         return ModbusRepeatabilitySimpleCapture(
             run_id=capture_run_id,
+            capture_started_at=capture_started_at,
             flow_point=flow_point,
             trial_index=trial_index,
             flow_rate_parameter=flow_rate_parameter,
@@ -1295,9 +1658,15 @@ class ModbusModuleRuntime:
             mass_acc_after=mass_acc_after,
             segment=segment,
             poll_interval_s=poll_interval_s,
+            post_snapshot=post_snapshot,
+            post_snapshot_captured_at=post_snapshot_captured_at,
             raw_curve=raw_curve,
             raw_artifact_id=raw_artifact_id,
             test_session_id=self._start_modbus_test_session(),
+            flow_samples=flow_sample_points,
+            trial_samples=trial_sample_points,
+            trial_sample_variable_names=trial_sample_names,
+            flow_samples_artifact_id=flow_samples_artifact_id,
         )
 
     def calculate_repeatability_simple_trial(
@@ -1314,6 +1683,7 @@ class ModbusModuleRuntime:
         trial_notes = notes.strip()
         trial = ModbusRepeatabilitySimpleTrialResult(
             run_id=capture.run_id,
+            capture_started_at=capture.capture_started_at,
             flow_point=capture.flow_point,
             trial_index=capture.trial_index,
             flow_rate_parameter=capture.flow_rate_parameter,
@@ -1322,6 +1692,8 @@ class ModbusModuleRuntime:
             original_k_factor=capture.original_k_factor,
             pre_snapshot=capture.pre_snapshot,
             pre_snapshot_captured_at=capture.pre_snapshot_captured_at,
+            post_snapshot=capture.post_snapshot,
+            post_snapshot_captured_at=capture.post_snapshot_captured_at,
             mass_acc_before=capture.mass_acc_before,
             mass_acc_after=capture.mass_acc_after,
             measured_mass_delta=measured_mass_delta,
@@ -1338,6 +1710,11 @@ class ModbusModuleRuntime:
             test_session_id=capture.test_session_id,
             trial_status="accepted",
             notes=trial_notes,
+            flow_samples=capture.flow_samples,
+            trial_samples=capture.trial_samples,
+            trial_sample_variable_names=capture.trial_sample_variable_names,
+            flow_samples_artifact_id=capture.flow_samples_artifact_id,
+            recorded_flow_sample_count=len(capture.flow_samples),
         )
         self._save_modbus_trial_record(trial)
         return trial
@@ -1577,14 +1954,20 @@ class ModbusModuleRuntime:
                         for trial in trials
                         if trial.raw_artifact_id is not None
                     ],
+                    "flow_samples_artifact_ids": [
+                        trial.flow_samples_artifact_id
+                        for trial in trials
+                        if trial.flow_samples_artifact_id is not None
+                    ],
                 }
             )
 
         average_error = (max(measurement_errors) + min(measurement_errors)) / 2.0
         intermediate_k_values = []
         for row in flow_rows:
-            adjusted_error = float(row["measurement_error_percent"]) - average_error
-            denominator = 1.0 + adjusted_error / 100.0
+            measurement_error = float(row["measurement_error_percent"])
+            adjusted_error = measurement_error - average_error
+            denominator = 1.0 + measurement_error / 100.0
             if denominator == 0:
                 raise ValueError("Final K calculation produced a zero denominator.")
             intermediate_k = original_k_factor / denominator
@@ -1644,6 +2027,11 @@ class ModbusModuleRuntime:
                     "instant_flow": trial.instant_flow,
                     "trial_status": trial.trial_status,
                     "raw_artifact_id": trial.raw_artifact_id,
+                    "flow_samples_artifact_id": trial.flow_samples_artifact_id,
+                    "flow_sample_count": trial.flow_sample_count,
+                    "trial_sample_variable_names": list(
+                        trial.trial_sample_variable_names
+                    ),
                     "test_session_id": trial.test_session_id,
                     "duration_s": trial.duration_s,
                     "flow_started_at": trial.flow_started_at.isoformat(),
@@ -1675,11 +2063,7 @@ class ModbusModuleRuntime:
                 started_at=calculated_at,
                 ended_at=calculated_at,
                 metrics=metrics,
-                input_artifact_ids=tuple(
-                    trial.raw_artifact_id
-                    for trial in all_trials
-                    if trial.raw_artifact_id is not None
-                ),
+                input_artifact_ids=_repeatability_trial_artifact_ids(all_trials),
                 operation_metadata=operation_metadata,
                 notes=result_notes,
             )
@@ -1727,6 +2111,7 @@ class ModbusModuleRuntime:
                 flow_started_at = flow_instant_at
             if flow_ended_at is None:
                 flow_ended_at = flow_instant_at
+            summary = attempt.summary if attempt is not None else {}
             history_trials.append(
                 ModbusRepeatabilityHistoryTrial(
                     trial=ModbusRepeatabilitySimpleTrialResult(
@@ -1735,41 +2120,31 @@ class ModbusModuleRuntime:
                         trial_index=record.trial_index,
                         flow_rate_parameter=str(
                             pre_snapshot.get("flow_rate_parameter")
-                            or (
-                                attempt.summary.get("flow_rate_parameter")
-                                if attempt is not None
-                                else ""
-                            )
+                            or summary.get("flow_rate_parameter")
                             or "mass_rate"
                         ),
                         flow_acc_parameter=str(
                             pre_snapshot.get("flow_acc_parameter")
-                            or (
-                                attempt.summary.get("flow_acc_parameter")
-                                if attempt is not None
-                                else ""
-                            )
+                            or summary.get("flow_acc_parameter")
                             or "mass_acc"
                         ),
                         k_factor_parameter=(
                             record.k_factor_parameter
-                            or str(
-                                attempt.summary.get("k_factor_parameter")
-                                if attempt is not None
-                                else ""
-                            )
+                            or str(summary.get("k_factor_parameter") or "")
                             or "k_factor"
                         ),
                         original_k_factor=_history_trial_original_k_factor(
                             record,
-                            attempt.summary if attempt is not None else {},
+                            summary,
                         ),
                         pre_snapshot=pre_snapshot,
                         pre_snapshot_captured_at=_history_datetime(
-                            attempt.summary.get("pre_snapshot_captured_at")
-                        )
-                        if attempt is not None
-                        else None,
+                            summary.get("pre_snapshot_captured_at")
+                        ),
+                        post_snapshot=_history_dict(summary, "post_snapshot"),
+                        post_snapshot_captured_at=_history_datetime(
+                            summary.get("post_snapshot_captured_at")
+                        ),
                         mass_acc_before=record.mass_acc_before or 0.0,
                         mass_acc_after=record.mass_acc_after or 0.0,
                         measured_mass_delta=record.measured_mass_delta or 0.0,
@@ -1780,16 +2155,26 @@ class ModbusModuleRuntime:
                         flow_started_at=flow_started_at,
                         flow_instant_at=flow_instant_at,
                         flow_ended_at=flow_ended_at,
-                        poll_interval_s=float(
-                            attempt.summary.get("poll_interval_s", 0.0)
-                            if attempt is not None
-                            else 0.0
-                        ),
+                        poll_interval_s=float(summary.get("poll_interval_s", 0.0)),
                         raw_artifact_id=record.raw_artifact_id,
-            test_session_id=record.session_id,
-            trial_status=record.trial_status,
-            notes=record.notes or "",
-        ),
+                        test_session_id=record.session_id,
+                        trial_status=record.trial_status,
+                        notes=record.notes or "",
+                        capture_started_at=_history_datetime(
+                            summary.get("capture_started_at")
+                        ),
+                        flow_samples_artifact_id=_history_str(
+                            summary,
+                            "flow_samples_artifact_id",
+                        ),
+                        trial_sample_variable_names=_history_str_tuple(
+                            summary.get("trial_sample_variable_names")
+                        ),
+                        recorded_flow_sample_count=_history_optional_int(
+                            summary.get("flow_sample_count")
+                        )
+                        or 0,
+                    ),
                     attempt_id=record.attempt_id,
                     pre_snapshot=pre_snapshot,
                     device_metadata=dict(record.device_metadata),
@@ -2273,6 +2658,7 @@ class ModbusModuleRuntime:
                     metrics={
                         **attempt.summary,
                         **attempt.device_metadata,
+                        "register_map_snapshot": attempt.register_map_snapshot,
                         "attempt_id": attempt.attempt_id,
                         "session_id": attempt.session_id,
                         "raw_artifact_id": attempt.raw_artifact_id,
@@ -2404,6 +2790,80 @@ class ModbusModuleRuntime:
     def update_calibration_history_note(self, run_id: str, notes: str) -> None:
         self._repository.update_run_notes(run_id, notes)
 
+    def _artifact_to_history_payload(self, artifact: Artifact) -> dict[str, object]:
+        payload = _artifact_to_history_payload(artifact)
+        path = self._artifact_store.resolve(artifact.file_path)
+        try:
+            content = path.read_bytes()
+        except FileNotFoundError:
+            payload["content_missing"] = True
+            return payload
+        payload["content_base64"] = base64.b64encode(content).decode("ascii")
+        payload["content_encoding"] = "base64"
+        return payload
+
+    def load_flow_sample_series(self, artifact_id: str) -> ModbusFlowSampleSeries:
+        """Load one saved wide variable-sample CSV artifact."""
+
+        normalized_artifact_id = str(artifact_id).strip()
+        if not normalized_artifact_id:
+            raise ValueError("Flow-sample artifact ID is required.")
+        artifact = next(
+            (
+                item
+                for item in self._repository.list_artifacts()
+                if item.artifact_id == normalized_artifact_id
+            ),
+            None,
+        )
+        if artifact is None:
+            raise ValueError(f"Flow-sample artifact not found: {normalized_artifact_id}")
+        if artifact.metadata.get("curve_type") not in {
+            "flow_rate_samples",
+            "variable_samples",
+        }:
+            raise ValueError(
+                f"Artifact is not a flow-sample curve: {normalized_artifact_id}"
+            )
+        path = self._artifact_store.resolve(artifact.file_path)
+        if not path.exists():
+            raise FileNotFoundError(f"Flow-sample artifact file not found: {path}")
+        points = _flow_samples_from_csv(path.read_text(encoding="utf-8"))
+        if not points:
+            raise ValueError(f"Flow-sample artifact is empty: {normalized_artifact_id}")
+        flow_rate_parameter = str(artifact.metadata.get("flow_rate_parameter") or "")
+        variable_names = tuple(
+            str(name)
+            for name in artifact.metadata.get("variable_names", ())
+            if str(name)
+        )
+        if not variable_names:
+            variable_names = _trial_sample_variable_names(points, flow_rate_parameter)
+        flow_samples = tuple(
+            ModbusFlowSamplePoint(
+                captured_at=point.captured_at,
+                value=float(point.values[flow_rate_parameter]),
+            )
+            for point in points
+            if flow_rate_parameter in point.values
+            and _optional_float(point.values.get(flow_rate_parameter)) is not None
+        )
+        units = {
+            str(name): str(unit)
+            for name, unit in dict(artifact.metadata.get("units") or {}).items()
+        }
+        unit = str(artifact.metadata.get("unit") or units.get(flow_rate_parameter, ""))
+        return ModbusFlowSampleSeries(
+            artifact_id=artifact.artifact_id,
+            run_id=artifact.run_id,
+            flow_rate_parameter=flow_rate_parameter,
+            unit=unit,
+            samples=flow_samples,
+            variable_names=variable_names,
+            units=units,
+            points=points,
+        )
+
     def export_calibration_history(
         self,
         path: str | Path,
@@ -2512,7 +2972,7 @@ class ModbusModuleRuntime:
                         for result in analysis_results
                     ],
                     "artifacts": [
-                        _artifact_to_history_payload(artifact)
+                        self._artifact_to_history_payload(artifact)
                         for artifact in artifacts
                     ],
                     "test_sessions": [
@@ -2723,8 +3183,10 @@ class ModbusModuleRuntime:
                                 for result in analysis_results:
                                     self._repository.save_analysis_result(result)
                                 imported_analysis_results += len(analysis_results)
-                            for artifact in artifacts:
-                                self._repository.save_artifact(artifact)
+                            self._save_imported_artifacts(
+                                artifacts,
+                                raw_entry.get("artifacts"),
+                            )
                             test_sessions = _ensure_import_test_sessions(
                                 test_sessions,
                                 operation_attempts,
@@ -2957,8 +3419,10 @@ class ModbusModuleRuntime:
                     self._repository.save_step(step)
                 imported_workflow_steps += len(steps)
 
-                for artifact in artifacts:
-                    self._repository.save_artifact(artifact)
+                self._save_imported_artifacts(
+                    artifacts,
+                    raw_entry.get("artifacts"),
+                )
 
                 for result in analysis_results:
                     self._repository.save_analysis_result(result)
@@ -2992,6 +3456,31 @@ class ModbusModuleRuntime:
             retargeted_runs=retargeted_runs,
             errors=tuple(errors),
         )
+
+    def _save_imported_artifacts(
+        self,
+        artifacts: tuple[Artifact, ...],
+        raw_artifacts: object,
+    ) -> None:
+        raw_payloads = _artifact_payloads_by_id(raw_artifacts)
+        for artifact in artifacts:
+            raw_payload = raw_payloads.get(
+                str(
+                    artifact.metadata.get(
+                        "imported_from_artifact_id",
+                        artifact.artifact_id,
+                    )
+                )
+            )
+            if raw_payload is None:
+                raw_payload = raw_payloads.get(artifact.artifact_id)
+            if raw_payload is not None:
+                _restore_imported_artifact_content(
+                    self._artifact_store,
+                    artifact,
+                    raw_payload,
+                )
+            self._repository.save_artifact(artifact)
 
     def _save_k_factor_simple_history(
         self,
@@ -3149,11 +3638,7 @@ class ModbusModuleRuntime:
                 result_type="manual_error_repeatability",
                 algorithm_name="modbus_simple_mass_total_repeatability",
                 algorithm_version="0.2",
-                input_artifact_ids=tuple(
-                    trial.raw_artifact_id
-                    for trial in result.trials
-                    if trial.raw_artifact_id is not None
-                ),
+                input_artifact_ids=_repeatability_trial_artifact_ids(result.trials),
                 configuration_snapshot={
                     **metadata,
                     "formula": "e = (delta_m - standard_mass) / standard_mass * 100%",
@@ -3225,7 +3710,7 @@ class ModbusModuleRuntime:
                 run_id=run_id,
                 run_type=RunType.ERROR_ANALYSIS,
                 workflow_name="manual_error_repeatability_final_k",
-                workflow_version="0.3-final-k",
+                workflow_version="0.4-final-k",
                 device_id=resolved_device_id,
                 operator=self._operator,
                 status=status,
@@ -3280,7 +3765,7 @@ class ModbusModuleRuntime:
                 **metadata,
                 "formula_average_error": "(max(measurement_errors) + min(measurement_errors)) / 2",
                 "formula_adjusted_error": "measurement_error - average_error",
-                "formula_intermediate_k": "original_k / (1 + adjusted_error_percent / 100)",
+                "formula_intermediate_k": "original_k / (1 + measurement_error_percent / 100)",
                 "formula_new_k": "(max(intermediate_k) + min(intermediate_k)) / 2",
             },
             output_summary={
@@ -3301,7 +3786,7 @@ class ModbusModuleRuntime:
                 step_id=step.step_id,
                 result_type="manual_error_repeatability_final_k",
                 algorithm_name="modbus_repeatability_final_k",
-                algorithm_version="0.3",
+                algorithm_version="0.4",
                 input_artifact_ids=effective_input_artifact_ids,
                 configuration_snapshot=step.input_configuration,
                 summary_metrics=metrics,
@@ -3514,6 +3999,7 @@ class ModbusModuleRuntime:
     ) -> None:
         identity = self._require_identity()
         calculated_at = datetime.now(UTC)
+        record_started_at = trial.capture_started_at or calculated_at
         attempt_id = (
             f"{trial.run_id}-TRIAL-{trial.trial_index:03d}"
             f"-{uuid4().hex[:6]}"
@@ -3523,12 +4009,14 @@ class ModbusModuleRuntime:
             operation_type="manual_error_repeatability_trial",
             status=trial.trial_status,
             run_id=trial.run_id,
-            started_at=calculated_at,
+            started_at=record_started_at,
             ended_at=calculated_at,
             raw_artifact_id=trial.raw_artifact_id,
             summary={
                 "flow_point": trial.flow_point,
                 "trial_index": trial.trial_index,
+                "flow_rate_parameter": trial.flow_rate_parameter,
+                "flow_acc_parameter": trial.flow_acc_parameter,
                 "k_factor_parameter": trial.k_factor_parameter,
                 "original_k_factor": trial.original_k_factor,
                 "mass_acc_before": trial.mass_acc_before,
@@ -3539,20 +4027,31 @@ class ModbusModuleRuntime:
                 "mean_flow": trial.mean_flow,
                 "instant_flow": trial.instant_flow,
                 "duration_s": trial.duration_s,
+                "capture_started_at": record_started_at.isoformat(),
+                "calculated_at": calculated_at.isoformat(),
                 "flow_started_at": trial.flow_started_at.isoformat(),
                 "flow_instant_at": trial.flow_instant_at.isoformat(),
                 "flow_ended_at": trial.flow_ended_at.isoformat(),
-                "started_at": calculated_at.isoformat(),
+                "started_at": record_started_at.isoformat(),
                 "ended_at": calculated_at.isoformat(),
                 "poll_interval_s": trial.poll_interval_s,
                 "trial_status": trial.trial_status,
                 "raw_artifact_id": trial.raw_artifact_id,
+                "flow_samples_artifact_id": trial.flow_samples_artifact_id,
+                "flow_sample_count": trial.flow_sample_count,
+                "trial_sample_variable_names": list(trial.trial_sample_variable_names),
                 "test_session_id": trial.test_session_id,
                 "notes": trial.notes,
                 "pre_snapshot": trial.pre_snapshot,
                 "pre_snapshot_captured_at": (
                     trial.pre_snapshot_captured_at.isoformat()
                     if trial.pre_snapshot_captured_at is not None
+                    else None
+                ),
+                "post_snapshot": trial.post_snapshot,
+                "post_snapshot_captured_at": (
+                    trial.post_snapshot_captured_at.isoformat()
+                    if trial.post_snapshot_captured_at is not None
                     else None
                 ),
             },
@@ -3606,7 +4105,7 @@ class ModbusModuleRuntime:
             run_id=run_id,
             artifact_id=artifact_id,
             artifact_type=ArtifactType.RAW,
-            file_name=f"{operation_type}_raw_curve.csv",
+            file_name=f"{artifact_id}_raw_curve.csv",
             content=_raw_curve_csv(points),
             created_at=created,
             file_format="csv",
@@ -3618,6 +4117,52 @@ class ModbusModuleRuntime:
                 "operation_type": operation_type,
                 "curve_type": "modbus_polling",
                 "point_count": len(points),
+            },
+        )
+        self._repository.save_artifact(artifact)
+        return artifact.artifact_id
+
+    def _save_flow_samples_artifact(
+        self,
+        *,
+        run_id: str,
+        operation_type: str,
+        flow_rate_parameter: str,
+        samples: tuple[ModbusTrialSamplePoint, ...],
+        variable_names: tuple[str, ...],
+        created_at: datetime | None = None,
+        curve_type: str = "flow_rate_samples",
+    ) -> str | None:
+        if not samples:
+            return None
+        self._ensure_raw_artifact_run(run_id, operation_type, created_at)
+        artifact_id = f"{run_id}-{operation_type.upper()}-FLOW-SAMPLES-{uuid4().hex[:8]}"
+        created = created_at or samples[0].captured_at
+        variable_names = _unique_names(variable_names)
+        units = {
+            name: _register_unit(self._register_map, name)
+            for name in variable_names
+        }
+        artifact = self._artifact_store.write_artifact(
+            run_id=run_id,
+            artifact_id=artifact_id,
+            artifact_type=ArtifactType.RAW,
+            file_name=f"{artifact_id}_flow_samples.csv",
+            content=_flow_samples_csv(samples, variable_names),
+            created_at=created,
+            file_format="csv",
+        )
+        artifact = replace(
+            artifact,
+            metadata={
+                "source": "modbus_module",
+                "operation_type": operation_type,
+                "curve_type": curve_type,
+                "flow_rate_parameter": flow_rate_parameter,
+                "unit": units.get(flow_rate_parameter, ""),
+                "units": units,
+                "variable_names": list(variable_names),
+                "sample_count": len(samples),
             },
         )
         self._repository.save_artifact(artifact)
@@ -4215,11 +4760,26 @@ def _repeatability_simple_metrics(
                 "flow_rate_source": trial.flow_rate_source,
                 "trial_status": trial.trial_status,
                 "raw_artifact_id": trial.raw_artifact_id,
+                "flow_samples_artifact_id": trial.flow_samples_artifact_id,
+                "flow_sample_count": trial.flow_sample_count,
+                "trial_sample_variable_names": list(trial.trial_sample_variable_names),
                 "test_session_id": trial.test_session_id,
                 "duration_s": trial.duration_s,
                 "flow_started_at": trial.flow_started_at.isoformat(),
                 "flow_instant_at": trial.flow_instant_at.isoformat(),
                 "flow_ended_at": trial.flow_ended_at.isoformat(),
+                "pre_snapshot": trial.pre_snapshot,
+                "pre_snapshot_captured_at": (
+                    trial.pre_snapshot_captured_at.isoformat()
+                    if trial.pre_snapshot_captured_at is not None
+                    else None
+                ),
+                "post_snapshot": trial.post_snapshot,
+                "post_snapshot_captured_at": (
+                    trial.post_snapshot_captured_at.isoformat()
+                    if trial.post_snapshot_captured_at is not None
+                    else None
+                ),
                 "notes": trial.notes,
             }
             for trial in result.trials
@@ -4254,6 +4814,18 @@ def _repeatability_simple_metrics(
     return metrics
 
 
+def _repeatability_trial_artifact_ids(
+    trials: tuple[ModbusRepeatabilitySimpleTrialResult, ...],
+) -> tuple[str, ...]:
+    values: list[str] = []
+    for trial in trials:
+        if trial.raw_artifact_id is not None:
+            values.append(trial.raw_artifact_id)
+        if trial.flow_samples_artifact_id is not None:
+            values.append(trial.flow_samples_artifact_id)
+    return tuple(dict.fromkeys(values))
+
+
 def _flow_point_metric_label(flow_point: float) -> str:
     raw = f"{flow_point:.12g}".replace("-", "neg_")
     return "flow_point_" + raw.replace(".", "_")
@@ -4280,6 +4852,9 @@ def _final_k_artifact_ids(metrics: dict[str, object]) -> tuple[str, ...]:
             artifact_id = trial.get("raw_artifact_id")
             if artifact_id:
                 values.append(str(artifact_id))
+            flow_samples_artifact_id = trial.get("flow_samples_artifact_id")
+            if flow_samples_artifact_id:
+                values.append(str(flow_samples_artifact_id))
     if not values:
         flow_points = metrics.get("flow_points")
         if isinstance(flow_points, list):
@@ -4289,6 +4864,11 @@ def _final_k_artifact_ids(metrics: dict[str, object]) -> tuple[str, ...]:
                 artifact_ids = flow_point.get("raw_artifact_ids")
                 if isinstance(artifact_ids, list):
                     values.extend(str(value) for value in artifact_ids if value)
+                flow_sample_artifact_ids = flow_point.get("flow_samples_artifact_ids")
+                if isinstance(flow_sample_artifact_ids, list):
+                    values.extend(
+                        str(value) for value in flow_sample_artifact_ids if value
+                    )
     return tuple(dict.fromkeys(values))
 
 
@@ -4588,10 +5168,70 @@ def _emit_status(
         return
 
 
+def _sleep_poll_interval(
+    poll_interval_s: float,
+    *,
+    cancel_requested: Callable[[], bool] | None,
+) -> None:
+    deadline = monotonic() + poll_interval_s
+    while True:
+        if cancel_requested is not None and cancel_requested():
+            return
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            return
+        sleep(min(remaining, 0.05))
+
+
 def _json_metric_value(value: object) -> object:
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
     return str(value)
+
+
+def _csv_metric_value(value: object) -> object:
+    value = _json_metric_value(value)
+    if value is None:
+        return ""
+    return value
+
+
+def _parse_csv_metric_value(value: str) -> object:
+    lowered = value.lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    try:
+        return int(value)
+    except ValueError:
+        pass
+    try:
+        return float(value)
+    except ValueError:
+        return value
+
+
+def _optional_float(value: object) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _trial_sample_variable_names(
+    samples: tuple[ModbusTrialSamplePoint, ...],
+    flow_rate_parameter: str,
+) -> tuple[str, ...]:
+    names: list[str] = []
+    for sample in samples:
+        for name in sample.values:
+            names.append(name)
+    if flow_rate_parameter and flow_rate_parameter not in names:
+        names.insert(0, flow_rate_parameter)
+    return _unique_names(tuple(names))
 
 
 def _raw_curve_csv(points: tuple[dict[str, object], ...]) -> bytes:
@@ -4625,6 +5265,75 @@ def _raw_curve_csv(points: tuple[dict[str, object], ...]) -> bytes:
             ]
         )
     return buffer.getvalue().encode("utf-8")
+
+
+def _flow_samples_csv(
+    samples: tuple[ModbusTrialSamplePoint, ...],
+    variable_names: tuple[str, ...],
+) -> bytes:
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    variable_names = _unique_names(variable_names)
+    writer.writerow(["captured_at", "elapsed_s", "sample_index", *variable_names])
+    first_at = samples[0].captured_at if samples else None
+    for index, sample in enumerate(samples, start=1):
+        elapsed = (
+            (sample.captured_at - first_at).total_seconds()
+            if first_at is not None
+            else 0.0
+        )
+        writer.writerow(
+            [
+                sample.captured_at.isoformat(),
+                elapsed,
+                index,
+                *[
+                    _csv_metric_value(sample.values.get(variable_name))
+                    for variable_name in variable_names
+                ],
+            ]
+        )
+    return buffer.getvalue().encode("utf-8")
+
+
+def _flow_samples_from_csv(content: str) -> tuple[ModbusTrialSamplePoint, ...]:
+    reader = csv.DictReader(io.StringIO(content))
+    samples: list[ModbusTrialSamplePoint] = []
+    metadata_columns = {"captured_at", "elapsed_s", "sample_index"}
+    variable_names = tuple(
+        column
+        for column in (reader.fieldnames or ())
+        if column not in metadata_columns and column
+    )
+    for row_number, row in enumerate(reader, start=2):
+        captured_at_text = (row.get("captured_at") or "").strip()
+        if not captured_at_text:
+            raise ValueError(f"Invalid flow-sample CSV row {row_number}.")
+        try:
+            captured_at = datetime.fromisoformat(captured_at_text)
+        except ValueError as exc:
+            raise ValueError(f"Invalid flow-sample CSV row {row_number}.") from exc
+        if captured_at.tzinfo is None:
+            captured_at = captured_at.replace(tzinfo=UTC)
+        values: dict[str, object] = {}
+        for variable_name in variable_names:
+            value_text = (row.get(variable_name) or "").strip()
+            if not value_text:
+                continue
+            values[variable_name] = _parse_csv_metric_value(value_text)
+        if not values:
+            raise ValueError(f"Invalid flow-sample CSV row {row_number}.")
+        if "flow_rate" in values and len(variable_names) == 1:
+            values["mass_rate"] = values.pop("flow_rate")
+        samples.append(ModbusTrialSamplePoint(captured_at=captured_at, values=values))
+    return tuple(samples)
+
+
+def _register_unit(register_map: ModbusRegisterMap, variable_name: str) -> str:
+    try:
+        return register_map.by_name(variable_name).unit or ""
+    except KeyError:
+        return ""
 
 
 def _zero_calibration_raw_points(
@@ -4941,6 +5650,52 @@ def _artifact_from_history_payload(value: object) -> Artifact:
         created_at=_history_datetime(value.get("created_at")),
         metadata=_history_dict(value, "metadata"),
     )
+
+
+def _artifact_payloads_by_id(value: object) -> dict[str, dict[str, object]]:
+    if not isinstance(value, list):
+        return {}
+    payloads: dict[str, dict[str, object]] = {}
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        artifact_id = item.get("artifact_id")
+        if isinstance(artifact_id, str) and artifact_id:
+            payloads[artifact_id] = item
+    return payloads
+
+
+def _restore_imported_artifact_content(
+    artifact_store: ArtifactStore,
+    artifact: Artifact,
+    raw_payload: dict[str, object],
+) -> None:
+    content_value = raw_payload.get("content_base64")
+    if not isinstance(content_value, str) or not content_value:
+        return
+    if raw_payload.get("content_encoding", "base64") != "base64":
+        raise ValueError(f"unsupported artifact content encoding: {artifact.artifact_id}")
+    try:
+        content = base64.b64decode(content_value.encode("ascii"), validate=True)
+    except Exception as exc:
+        raise ValueError(f"invalid artifact content for {artifact.artifact_id}: {exc}") from exc
+    if artifact.checksum and _history_content_sha256(content) != artifact.checksum:
+        raise ValueError(f"artifact content checksum mismatch: {artifact.artifact_id}")
+    target = artifact_store.resolve(artifact.file_path)
+    data_root = artifact_store.data_root.resolve()
+    resolved_target = target.resolve(strict=False)
+    try:
+        resolved_target.relative_to(data_root)
+    except ValueError as exc:
+        raise ValueError(
+            f"artifact path escapes data root: {artifact.file_path}"
+        ) from exc
+    resolved_target.parent.mkdir(parents=True, exist_ok=True)
+    resolved_target.write_bytes(content)
+
+
+def _history_content_sha256(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
 
 
 def _test_session_to_history_payload(
@@ -5528,8 +6283,24 @@ def _remap_imported_artifact(
         step_id=step_id_map.get(artifact.step_id)
         if artifact.step_id is not None
         else None,
+        file_path=_remap_imported_artifact_path(
+            artifact.file_path,
+            original_run_id=original_run_id,
+            new_run_id=new_run_id,
+        ),
         metadata=metadata,
     )
+
+
+def _remap_imported_artifact_path(
+    file_path: Path | object,
+    *,
+    original_run_id: str,
+    new_run_id: str,
+) -> Path:
+    path = Path(str(file_path))
+    parts = tuple(new_run_id if part == original_run_id else part for part in path.parts)
+    return Path(*parts)
 
 
 def _remap_imported_analysis_result(
@@ -5544,7 +6315,7 @@ def _remap_imported_analysis_result(
     configuration = dict(result.configuration_snapshot)
     configuration["imported_from_run_id"] = original_run_id
     configuration["imported_at"] = imported_at
-    metrics = dict(result.summary_metrics)
+    metrics = _remap_metric_artifact_ids(result.summary_metrics, artifact_id_map)
     metrics["imported_from_run_id"] = original_run_id
     return replace(
         result,
@@ -5572,7 +6343,7 @@ def _remap_imported_operation_attempt(
     artifact_id_map: dict[str, str],
     imported_at: str,
 ) -> ModbusOperationAttemptRecord:
-    summary = dict(attempt.summary)
+    summary = _remap_metric_artifact_ids(attempt.summary, artifact_id_map)
     summary["imported_from_run_id"] = original_run_id
     summary["imported_at"] = imported_at
     raw_artifact_id = (
@@ -5631,6 +6402,43 @@ def _remap_imported_trial_record(
     )
 
 
+def _remap_metric_artifact_ids(
+    value: dict[str, Any],
+    artifact_id_map: dict[str, str],
+) -> dict[str, Any]:
+    return {
+        key: _remap_metric_artifact_value(key, item, artifact_id_map)
+        for key, item in value.items()
+    }
+
+
+def _remap_metric_artifact_value(
+    key: str,
+    value: Any,
+    artifact_id_map: dict[str, str],
+) -> Any:
+    if key in {
+        "raw_artifact_id",
+        "flow_samples_artifact_id",
+        "report_artifact_id",
+    }:
+        return artifact_id_map.get(value, value) if value is not None else None
+    if key in {
+        "raw_artifact_ids",
+        "flow_samples_artifact_ids",
+        "input_artifact_ids",
+    } and isinstance(value, list):
+        return [artifact_id_map.get(item, item) for item in value]
+    if isinstance(value, dict):
+        return _remap_metric_artifact_ids(value, artifact_id_map)
+    if isinstance(value, list):
+        return [
+            _remap_metric_artifact_value("", item, artifact_id_map)
+            for item in value
+        ]
+    return value
+
+
 def _remap_imported_result_id(
     result_id: str,
     *,
@@ -5676,6 +6484,14 @@ def _history_str(payload: dict[str, object], key: str) -> str | None:
     if value is None:
         return None
     return str(value)
+
+
+def _history_str_tuple(value: object) -> tuple[str, ...]:
+    if isinstance(value, (list, tuple)):
+        return tuple(str(item) for item in value if str(item))
+    if isinstance(value, str) and value:
+        return (value,)
+    return ()
 
 
 def _required_history_str(payload: dict[str, object], key: str) -> str:
@@ -5743,6 +6559,26 @@ def _read_selected_parameters(
     parameters = device.read_configuration()
     names = set(variable_names)
     return tuple(parameter for parameter in parameters if parameter.name in names)
+
+
+def _read_sampling_parameters(
+    device: FlowmeterDevice,
+    variable_names: tuple[str, ...],
+) -> tuple[tuple[ConfigurationParameter, ...], tuple[str, ...]]:
+    parameters: list[ConfigurationParameter] = []
+    errors: list[str] = []
+    for variable_name in variable_names:
+        try:
+            parameters.extend(
+                _read_selected_parameters(
+                    device,
+                    (variable_name,),
+                    merge_adjacent=False,
+                )
+            )
+        except Exception as exc:
+            errors.append(f"{variable_name}: {exc}")
+    return tuple(parameters), tuple(errors)
 
 
 def _samples_from_parameters(

@@ -47,6 +47,36 @@ dist/
     _internal/
 ```
 
+## GitHub Release Updates
+For online updates, publish a GitHub Release asset set that contains a full
+update zip and `latest.json`. After building and verifying the package, generate
+those files from the repository root:
+
+```powershell
+.\dist\CoreFlowStudio\CoreFlowStudioConsole.exe --make-update-package .\dist\CoreFlowStudio --update-output-dir .\dist\updates --update-base-url https://github.com/<owner>/<repo>/releases/download/v0.6.0
+```
+
+Upload both generated files to the GitHub Release:
+
+```text
+dist\updates\CoreFlowStudio-0.6.0-full.zip
+dist\updates\latest.json
+```
+
+On the target PC, operators do not need PowerShell commands. They open
+`Help > Check for Updates...`, paste or keep the Release manifest URL, click
+`Check`, then `Download`, then `Update and Restart`.
+
+Recommended public Release manifest URL:
+
+```text
+https://github.com/<owner>/<repo>/releases/latest/download/latest.json
+```
+
+The app verifies the downloaded zip with the SHA-256 hash from `latest.json`
+before the updater replaces the install folder. User data under
+`%LOCALAPPDATA%\CoreFlow Studio` is not part of the package and is not replaced.
+
 ## Runtime Data
 By default, packaged builds store local SQLite data and artifacts under:
 

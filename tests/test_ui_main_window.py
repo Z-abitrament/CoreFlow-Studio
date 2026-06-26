@@ -22,7 +22,10 @@ def test_main_window_defaults_to_modbus_module(qtbot, tmp_path) -> None:
     qtbot.addWidget(window)
     window.show()
 
-    assert [action.text() for action in window.menuBar().actions()] == ["Modules"]
+    assert [action.text() for action in window.menuBar().actions()] == [
+        "Modules",
+        "Help",
+    ]
     assert window.centralWidget() is window.moduleStack
     assert window.modbusWindow is not None
     assert window.moduleStack.currentWidget() is window.modbusWindow
@@ -32,6 +35,23 @@ def test_main_window_defaults_to_modbus_module(qtbot, tmp_path) -> None:
     assert not hasattr(window, "deviceTable")
     assert not hasattr(window, "addSimulatorButton")
     assert not hasattr(window, "runCalibrationButton")
+
+
+def test_main_window_opens_update_dialog_from_help_menu(qtbot, tmp_path) -> None:
+    runtime = CoreFlowRuntime(data_root=tmp_path)
+    window = MainWindow(runtime=runtime)
+    qtbot.addWidget(window)
+    window.show()
+
+    assert window.checkUpdatesAction.text() == "Check for Updates..."
+    window.checkUpdatesAction.trigger()
+
+    assert window.updateDialog is not None
+    assert window.updateDialog.isVisible()
+    assert window.updateDialog.windowTitle() == "Software Update"
+    assert window.updateDialog.manifestUrlEdit.objectName() == "updateManifestUrlEdit"
+    assert window.updateDialog.downloadButton.text() == "Download"
+    assert window.updateDialog.installButton.text() == "Update and Restart"
 
 
 def test_main_window_embeds_modbus_module_from_menu(qtbot, tmp_path) -> None:

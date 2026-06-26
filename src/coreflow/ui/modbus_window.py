@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event
 
+import pyqtgraph as pg
 from shiboken6 import isValid
 from PySide6.QtCore import QDateTime, QMimeData, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QAction, QDrag, QKeySequence
@@ -32,6 +33,7 @@ from PySide6.QtWidgets import (
     QMenuBar,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSplitter,
     QSpinBox,
@@ -49,6 +51,8 @@ from coreflow.app.modbus_runtime import (
     ModbusCalibrationHistoryImportResult,
     ModbusConnectionSettings,
     ModbusDeviceProfile,
+    ModbusFlowSampleSeries,
+    ModbusTrialSamplePoint,
     ModbusRepeatabilityHistoryTrial,
     ModbusKFactorSimpleCapture,
     ModbusKFactorSimpleResult,
@@ -58,6 +62,7 @@ from coreflow.app.modbus_runtime import (
     ModbusRepeatabilitySimpleCapture,
     ModbusRepeatabilitySimpleResult,
     ModbusRepeatabilitySimpleTrialResult,
+    ModbusVariableSamplingRunResult,
     ModbusVariableSampleResult,
     ModbusZeroCalibrationResult,
 )
@@ -74,6 +79,14 @@ from coreflow.protocols.modbus import (
 )
 from coreflow.storage import StorageRepository
 from coreflow.ui.workers import WorkflowTask
+
+
+PLOT_LAYOUT_OVERLAY = "overlay"
+PLOT_LAYOUT_SEPARATE = "separate"
+PLOT_LAYOUTS = (PLOT_LAYOUT_OVERLAY, PLOT_LAYOUT_SEPARATE)
+PLOT_ALIGNMENT_FIRST_SAMPLE = "first_sample"
+PLOT_ALIGNMENT_PREFLOW_SAMPLE = "preflow_sample"
+PLOT_ALIGNMENTS = (PLOT_ALIGNMENT_FIRST_SAMPLE, PLOT_ALIGNMENT_PREFLOW_SAMPLE)
 
 
 class VariableMapTableWidget(QTableWidget):
@@ -689,10 +702,13 @@ class ZeroCalibrationDialog(QDialog):
         buttons.addStretch(1)
         self.startButton = QPushButton("Start")
         self.startButton.setObjectName("modbusZeroCalibrationStartButton")
+        self.saveConfigButton = QPushButton("Save Config")
+        self.saveConfigButton.setObjectName("modbusZeroCalibrationSaveConfigButton")
         self.closeButton = QPushButton("Close")
         self.closeButton.setObjectName("modbusZeroCalibrationCloseButton")
         self.closeButton.clicked.connect(self.close)
         buttons.addWidget(self.startButton)
+        buttons.addWidget(self.saveConfigButton)
         buttons.addWidget(self.closeButton)
         root.addLayout(buttons)
 
@@ -741,13 +757,44 @@ class ZeroCalibrationDialog(QDialog):
                 names.append(name)
         return tuple(names)
 
+    def capture_settings(self) -> dict[str, object]:
+        return {
+            "snapshot_variable_names": self.selected_snapshot_variable_names(),
+        }
+
+    def apply_configuration(self, settings: dict[str, object]) -> None:
+        names = settings.get("snapshot_variable_names")
+        if not isinstance(names, (list, tuple)):
+            return
+        available = {
+            _table_text(self.snapshotTable, row, 1)
+            for row in range(self.snapshotTable.rowCount())
+        }
+        selected = {
+            str(name)
+            for name in names
+            if str(name) in available
+        }
+        for row in range(self.snapshotTable.rowCount()):
+            check_item = self.snapshotTable.item(row, 0)
+            if check_item is None:
+                continue
+            name = _table_text(self.snapshotTable, row, 1)
+            check_item.setCheckState(
+                Qt.CheckState.Checked
+                if name in selected
+                else Qt.CheckState.Unchecked
+            )
+
     def set_running(self) -> None:
         self.startButton.setEnabled(False)
+        self.saveConfigButton.setEnabled(False)
         self.snapshotTable.setEnabled(False)
         self.statusLabel.setText("Running...")
 
     def set_ready(self, *, connected: bool) -> None:
         self.startButton.setEnabled(connected)
+        self.saveConfigButton.setEnabled(True)
         self.snapshotTable.setEnabled(True)
         if connected and self.statusLabel.text() == "Running...":
             self.statusLabel.setText("Ready")
@@ -775,6 +822,7 @@ class ZeroCalibrationDialog(QDialog):
         self.set_snapshot_result(result.pre_snapshot)
         self.snapshotTable.setEnabled(True)
         self.startButton.setEnabled(True)
+        self.saveConfigButton.setEnabled(True)
 
     def set_snapshot_result(self, snapshot: dict[str, object]) -> None:
         self.snapshotResultTable.setRowCount(len(snapshot))
@@ -788,6 +836,7 @@ class ZeroCalibrationDialog(QDialog):
         self.statusLabel.setText(f"Failed: {message}")
         self.snapshotTable.setEnabled(True)
         self.startButton.setEnabled(True)
+        self.saveConfigButton.setEnabled(True)
 
     def _set_table_text(self, row: int, column: int, value: str) -> None:
         item = QTableWidgetItem(value)
@@ -1218,6 +1267,7 @@ class RepeatabilityConfigurationDialog(QDialog):
         self.setModal(True)
         self._snapshot_registers: tuple[ModbusRegister, ...] = ()
         self._snapshot_variable_names: tuple[str, ...] = ()
+        self._sample_variable_names: tuple[str, ...] = ()
         self._config_enabled = True
         _fit_dialog_to_screen(self, 560, 500, 460, 360)
         self._build_ui()
@@ -1240,6 +1290,9 @@ class RepeatabilityConfigurationDialog(QDialog):
 
         self.flowRateCombo = QComboBox()
         self.flowRateCombo.setObjectName("modbusRepeatabilityFlowRateCombo")
+        self.flowRateCombo.currentTextChanged.connect(
+            lambda _text: self._update_sample_variables_button_text()
+        )
         settings.addRow("Flow Rate", self.flowRateCombo)
         self.flowAccCombo = QComboBox()
         self.flowAccCombo.setObjectName("modbusRepeatabilityFlowAccCombo")
@@ -1260,6 +1313,18 @@ class RepeatabilityConfigurationDialog(QDialog):
             lambda _value: self.settingsChanged.emit()
         )
         settings.addRow("Poll Interval (s)", self.pollIntervalSpinBox)
+        self.instantFlowOffsetSpinBox = QDoubleSpinBox()
+        self.instantFlowOffsetSpinBox.setObjectName(
+            "modbusRepeatabilityInstantFlowOffsetSpinBox"
+        )
+        self.instantFlowOffsetSpinBox.setRange(0.0, 300.0)
+        self.instantFlowOffsetSpinBox.setDecimals(2)
+        self.instantFlowOffsetSpinBox.setSingleStep(0.1)
+        self.instantFlowOffsetSpinBox.setValue(3.0)
+        self.instantFlowOffsetSpinBox.valueChanged.connect(
+            lambda _value: self.settingsChanged.emit()
+        )
+        settings.addRow("Instant Flow Offset (s)", self.instantFlowOffsetSpinBox)
 
         self.operationNotesTextEdit = QTextEdit()
         self.operationNotesTextEdit.setObjectName(
@@ -1280,16 +1345,31 @@ class RepeatabilityConfigurationDialog(QDialog):
             self.flowPointSpinBoxes.append(spin)
             settings.addRow(f"Flow Point {index}", spin)
 
-        self.snapshotButton = QPushButton("Pre-test Snapshot...")
+        self.snapshotButton = QPushButton("Pre/Post Snapshot...")
         self.snapshotButton.setObjectName("modbusRepeatabilitySnapshotButton")
         self.snapshotButton.clicked.connect(self._open_snapshot_dialog)
-        settings.addRow("Pre-test Snapshot", self.snapshotButton)
+        settings.addRow("Pre/Post Snapshot", self.snapshotButton)
+        self.sampleVariablesButton = QPushButton("Default Trial Samples...")
+        self.sampleVariablesButton.setObjectName(
+            "modbusRepeatabilitySampleVariablesButton"
+        )
+        self.sampleVariablesButton.clicked.connect(self._open_sample_variables_dialog)
+        settings.addRow("Trial Sample Defaults", self.sampleVariablesButton)
         self.saveHistoryCheckBox = QCheckBox("Record test records")
         self.saveHistoryCheckBox.setObjectName(
             "modbusRepeatabilitySaveHistoryCheckBox"
         )
         self.saveHistoryCheckBox.setChecked(True)
         settings.addRow("", self.saveHistoryCheckBox)
+        self.recordFlowSamplesCheckBox = QCheckBox("Record all flow samples")
+        self.recordFlowSamplesCheckBox.setObjectName(
+            "modbusRepeatabilityRecordFlowSamplesCheckBox"
+        )
+        self.recordFlowSamplesCheckBox.setChecked(False)
+        self.recordFlowSamplesCheckBox.toggled.connect(
+            lambda _checked: self.settingsChanged.emit()
+        )
+        settings.addRow("", self.recordFlowSamplesCheckBox)
         root.addWidget(settings_group, 1)
 
         self.statusLabel = QLabel("")
@@ -1312,6 +1392,7 @@ class RepeatabilityConfigurationDialog(QDialog):
         registers: tuple[ModbusRegister, ...],
         *,
         selected_names: tuple[str, ...] | None = None,
+        sample_selected_names: tuple[str, ...] | None = None,
     ) -> None:
         names = tuple(register.name for register in registers)
         self._set_combo_items(
@@ -1323,6 +1404,8 @@ class RepeatabilityConfigurationDialog(QDialog):
         self._set_combo_items(self.kFactorCombo, names, ("k_factor",))
         if selected_names is None:
             selected_names = self._snapshot_variable_names
+        if sample_selected_names is None:
+            sample_selected_names = self._sample_variable_names
         if not selected_names:
             selected_names = _default_zero_snapshot_names(registers)
         available = {register.name for register in registers}
@@ -1330,19 +1413,40 @@ class RepeatabilityConfigurationDialog(QDialog):
         self._snapshot_variable_names = tuple(
             name for name in selected_names if name in available
         )
+        self._sample_variable_names = tuple(
+            name for name in sample_selected_names if name in available
+        )
         self._update_snapshot_button_text()
+        self._update_sample_variables_button_text()
 
     def selected_snapshot_variable_names(self) -> tuple[str, ...]:
         return self._snapshot_variable_names
+
+    def selected_sample_variable_names(self) -> tuple[str, ...]:
+        flow_rate_name = self.flowRateCombo.currentText()
+        return tuple(
+            name for name in self._sample_variable_names if name != flow_rate_name
+        )
+
+    def set_sample_variable_names(self, names: tuple[str, ...]) -> None:
+        available = {register.name for register in self._snapshot_registers}
+        self._sample_variable_names = tuple(
+            name for name in names if name in available
+        )
+        self._update_sample_variables_button_text()
+        self.settingsChanged.emit()
 
     def capture_settings(self) -> dict[str, object]:
         return {
             "mode": self.mode(),
             "snapshot_variable_names": self.selected_snapshot_variable_names(),
+            "sample_variable_names": self.selected_sample_variable_names(),
             "flow_rate_parameter": self.flowRateCombo.currentText(),
             "flow_acc_parameter": self.flowAccCombo.currentText(),
             "k_factor_parameter": self.kFactorCombo.currentText(),
             "poll_interval_s": self.pollIntervalSpinBox.value(),
+            "instant_flow_offset_s": self.instantFlowOffsetSpinBox.value(),
+            "record_flow_samples": self.record_flow_samples(),
             "operation_notes": self.operation_notes(),
             "flow_points": self.flow_points(),
         }
@@ -1359,21 +1463,38 @@ class RepeatabilityConfigurationDialog(QDialog):
         poll_interval = settings.get("poll_interval_s")
         if isinstance(poll_interval, (int, float)):
             self.pollIntervalSpinBox.setValue(float(poll_interval))
+        instant_flow_offset = settings.get("instant_flow_offset_s")
+        if not isinstance(instant_flow_offset, (int, float)):
+            instant_flow_offset = settings.get("post_start_sample_s")
+        if isinstance(instant_flow_offset, (int, float)):
+            self.instantFlowOffsetSpinBox.setValue(float(instant_flow_offset))
         operation_notes = settings.get("operation_notes")
         if isinstance(operation_notes, str):
             self.operationNotesTextEdit.setPlainText(operation_notes)
+        record_flow_samples = settings.get("record_flow_samples")
+        if isinstance(record_flow_samples, bool):
+            self.recordFlowSamplesCheckBox.setChecked(record_flow_samples)
         flow_points = settings.get("flow_points")
         if isinstance(flow_points, (list, tuple)):
             for spin, value in zip(self.flowPointSpinBoxes, flow_points):
                 if isinstance(value, (int, float)):
                     spin.setValue(float(value))
         snapshot_names = settings.get("snapshot_variable_names")
+        if not isinstance(snapshot_names, (list, tuple)):
+            snapshot_names = settings.get("post_snapshot_variable_names")
         if isinstance(snapshot_names, (list, tuple)):
             available = {register.name for register in self._snapshot_registers}
             self._snapshot_variable_names = tuple(
                 str(name) for name in snapshot_names if str(name) in available
             )
             self._update_snapshot_button_text()
+        sample_names = settings.get("sample_variable_names")
+        if isinstance(sample_names, (list, tuple)):
+            available = {register.name for register in self._snapshot_registers}
+            self._sample_variable_names = tuple(
+                str(name) for name in sample_names if str(name) in available
+            )
+            self._update_sample_variables_button_text()
         self.settingsChanged.emit()
 
     def mode(self) -> str:
@@ -1389,6 +1510,9 @@ class RepeatabilityConfigurationDialog(QDialog):
     def operation_notes(self) -> str:
         return self.operationNotesTextEdit.toPlainText().strip()
 
+    def record_flow_samples(self) -> bool:
+        return self.recordFlowSamplesCheckBox.isChecked()
+
     def set_config_enabled(self, enabled: bool) -> None:
         self._config_enabled = enabled
         single_point = self.is_single_point_mode()
@@ -1398,9 +1522,12 @@ class RepeatabilityConfigurationDialog(QDialog):
             self.flowAccCombo,
             self.kFactorCombo,
             self.pollIntervalSpinBox,
+            self.instantFlowOffsetSpinBox,
             self.operationNotesTextEdit,
             self.snapshotButton,
+            self.sampleVariablesButton,
             self.saveHistoryCheckBox,
+            self.recordFlowSamplesCheckBox,
             self.saveConfigButton,
         ):
             widget.setEnabled(enabled)
@@ -1422,9 +1549,34 @@ class RepeatabilityConfigurationDialog(QDialog):
         self._update_snapshot_button_text()
         self.settingsChanged.emit()
 
+    def _open_sample_variables_dialog(self) -> None:
+        flow_rate_name = self.flowRateCombo.currentText()
+        dialog = SnapshotSelectionDialog(
+            self._snapshot_registers,
+            selected_names=self._sample_variable_names,
+            required_names=(flow_rate_name,) if flow_rate_name else (),
+            title="Default Trial Sample Variables",
+            object_name="modbusRepeatabilitySampleVariableSelectionTable",
+            parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._sample_variable_names = dialog.selected_names()
+        self._update_sample_variables_button_text()
+        self.settingsChanged.emit()
+
     def _update_snapshot_button_text(self) -> None:
         count = len(self._snapshot_variable_names)
-        self.snapshotButton.setText(f"Pre-test Snapshot... ({count})")
+        self.snapshotButton.setText(f"Pre/Post Snapshot... ({count})")
+
+    def _update_sample_variables_button_text(self) -> None:
+        flow_rate_name = self.flowRateCombo.currentText()
+        extra_count = sum(
+            1 for name in self._sample_variable_names if name != flow_rate_name
+        )
+        self.sampleVariablesButton.setText(
+            f"Default Trial Samples... ({extra_count + 1})"
+        )
 
     def _mode_changed(self) -> None:
         self.set_config_enabled(self._config_enabled)
@@ -1527,6 +1679,247 @@ class RepeatabilityCaptureProgressDialog(QDialog):
         self.close()
 
 
+class RepeatabilityFlowPlotDialog(QDialog):
+    """Non-modal live multi-variable chart for one repeatability trial capture."""
+
+    def __init__(self, *, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Trial Flow Samples")
+        self.setModal(False)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
+        self.setSizeGripEnabled(True)
+        self.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, True)
+        self.setWindowFlag(Qt.WindowType.WindowMinimizeButtonHint, True)
+        _fit_dialog_to_screen(self, 620, 380, 420, 280)
+        self._timestamps: list[datetime] = []
+        self._values: dict[str, list[float | None]] = {}
+        self._units: dict[str, str] = {}
+        self._variable_names: tuple[str, ...] = ()
+        self._plot_layout = PLOT_LAYOUT_OVERLAY
+        self._point_label = "current trial"
+        self._curves: dict[tuple[str, str], object] = {}
+        self._point_items: dict[tuple[str, str], object] = {}
+        self._plot_widgets: dict[str, pg.PlotWidget] = {}
+        self._plot_legends: dict[str, object] = {}
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(8)
+        self.summaryLabel = QLabel("No samples")
+        self.summaryLabel.setObjectName("modbusRepeatabilityFlowPlotSummaryLabel")
+        root.addWidget(self.summaryLabel)
+
+        self.plotScrollArea = QScrollArea()
+        self.plotScrollArea.setObjectName("modbusRepeatabilityFlowPlotScrollArea")
+        self.plotScrollArea.setWidgetResizable(True)
+        self.plotPanel = QWidget()
+        self.plotPanelLayout = QVBoxLayout(self.plotPanel)
+        self.plotPanelLayout.setContentsMargins(0, 0, 0, 0)
+        self.plotPanelLayout.setSpacing(8)
+        self.plotScrollArea.setWidget(self.plotPanel)
+        root.addWidget(self.plotScrollArea, 1)
+
+        self.selectedPointLabel = QLabel("Selected Point: none")
+        self.selectedPointLabel.setObjectName(
+            "modbusRepeatabilityFlowPlotSelectedPointLabel"
+        )
+        self.selectedPointLabel.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        root.addWidget(self.selectedPointLabel)
+
+        self.flowPlot = pg.PlotWidget()
+        self.flowPlot.setObjectName("modbusRepeatabilityFlowPlot")
+
+    def reset_trial(
+        self,
+        *,
+        flow_parameter: str,
+        variable_names: tuple[str, ...],
+        units: dict[str, str],
+        plot_layout: str = PLOT_LAYOUT_OVERLAY,
+        window_title: str | None = None,
+        point_label: str = "current trial",
+    ) -> None:
+        self._timestamps.clear()
+        self._variable_names = _unique_names(variable_names)
+        self._values = {name: [] for name in self._variable_names}
+        self._units = dict(units)
+        self._plot_layout = _normalize_plot_layout(plot_layout)
+        self._point_label = point_label
+        self._curves.clear()
+        self._point_items.clear()
+        self._clear_plot_panel()
+        self._build_plot_widgets()
+        self.setWindowTitle(window_title or f"Trial Flow Samples - {flow_parameter}")
+        self.summaryLabel.setText(
+            f"Waiting for samples... | {_plot_layout_label(self._plot_layout)}"
+        )
+        self.selectedPointLabel.setText("Selected Point: none")
+        self.show()
+        self.raise_()
+
+    def add_sample(self, captured_at: datetime, values: dict[str, object]) -> None:
+        self._timestamps.append(captured_at)
+        for name in self._variable_names:
+            self._values.setdefault(name, []).append(_optional_float(values.get(name)))
+        if not self._timestamps:
+            return
+        start = self._timestamps[0]
+        x_values = [
+            max(0.0, (timestamp - start).total_seconds())
+            for timestamp in self._timestamps
+        ]
+        for (_plot_key, name), curve in self._curves.items():
+            y_values = self._values.get(name, [])
+            valid_x = [
+                x_value
+                for x_value, y_value in zip(x_values, y_values)
+                if y_value is not None
+            ]
+            valid_y = [
+                y_value
+                for y_value in y_values
+                if y_value is not None
+            ]
+            curve.setData(valid_x, valid_y)
+            point_item = self._point_items.get((_plot_key, name))
+            if point_item is not None:
+                spots = []
+                unit = self._units.get(name, "")
+                for sample_index, (timestamp, x_value, y_value) in enumerate(
+                    zip(self._timestamps, x_values, y_values),
+                    start=1,
+                ):
+                    if y_value is None:
+                        continue
+                    spots.append(
+                        {
+                            "pos": (x_value, y_value),
+                            "data": {
+                                "label": self._point_label,
+                                "variable": name,
+                                "elapsed_s": x_value,
+                                "captured_at": timestamp,
+                                "value": y_value,
+                                "unit": unit,
+                                "sample_index": sample_index,
+                            },
+                        }
+                    )
+                point_item.setData(spots)
+        for plot_widget in self._plot_widgets.values():
+            plot_widget.plotItem.enableAutoRange(x=True, y=True)
+        elapsed = x_values[-1] if x_values else 0.0
+        latest_parts = []
+        for name in self._variable_names[:4]:
+            value = self._values.get(name, [None])[-1]
+            if value is None:
+                continue
+            unit = f" {self._units.get(name, '')}" if self._units.get(name, "") else ""
+            latest_parts.append(f"{name}={value:.6g}{unit}")
+        latest_text = ", ".join(latest_parts)
+        self.summaryLabel.setText(
+            f"{len(self._timestamps)} samples | elapsed {elapsed:.3g} s | "
+            f"{_plot_layout_label(self._plot_layout)} | latest {latest_text}"
+        )
+
+    def _build_plot_widgets(self) -> None:
+        if self._plot_layout == PLOT_LAYOUT_SEPARATE:
+            for index, name in enumerate(self._variable_names):
+                object_name = (
+                    "modbusRepeatabilityFlowPlot"
+                    if index == 0
+                    else f"modbusRepeatabilityFlowPlot_{_object_name_token(name)}"
+                )
+                plot_widget = self._new_plot_widget(
+                    object_name=object_name,
+                )
+                self._plot_widgets[name] = plot_widget
+                self._plot_legends[name] = plot_widget.addLegend(offset=(8, 8))
+                unit = self._units.get(name, "")
+                plot_widget.setTitle(name)
+                plot_widget.setLabel("bottom", "Time", units="s")
+                plot_widget.setLabel("left", name, units=unit or None)
+                self.plotPanelLayout.addWidget(plot_widget, 1)
+                self._curves[(name, name)] = plot_widget.plot(
+                    [],
+                    [],
+                    pen=pg.mkPen(_plot_colors()[index % len(_plot_colors())], width=2),
+                    name=_variable_label(name, unit),
+                )
+                point_item = self._new_point_item(
+                    color=_plot_colors()[index % len(_plot_colors())],
+                )
+                self._point_items[(name, name)] = point_item
+                plot_widget.addItem(point_item)
+            if self._variable_names:
+                self.flowPlot = self._plot_widgets[self._variable_names[0]]
+            return
+
+        plot_widget = self._new_plot_widget(object_name="modbusRepeatabilityFlowPlot")
+        self.flowPlot = plot_widget
+        self._plot_widgets["overlay"] = plot_widget
+        self._plot_legends["overlay"] = plot_widget.addLegend(offset=(8, 8))
+        plot_widget.setTitle(", ".join(self._variable_names))
+        plot_widget.setLabel("bottom", "Time", units="s")
+        plot_widget.setLabel("left", "Value")
+        colors = _plot_colors()
+        for index, name in enumerate(self._variable_names):
+            unit = self._units.get(name, "")
+            self._curves[("overlay", name)] = plot_widget.plot(
+                [],
+                [],
+                pen=pg.mkPen(colors[index % len(colors)], width=2),
+                name=_variable_label(name, unit),
+            )
+            point_item = self._new_point_item(color=colors[index % len(colors)])
+            self._point_items[("overlay", name)] = point_item
+            plot_widget.addItem(point_item)
+        self.plotPanelLayout.addWidget(plot_widget, 1)
+
+    def _new_point_item(self, *, color: str):
+        item = pg.ScatterPlotItem(
+            [],
+            [],
+            size=8,
+            brush=pg.mkBrush(color),
+            pen=pg.mkPen("w", width=1),
+            hoverable=True,
+        )
+        item.sigClicked.connect(self._point_clicked)
+        return item
+
+    def _point_clicked(self, _item, points, *_args) -> None:
+        if not points:
+            return
+        data = points[0].data()
+        if isinstance(data, dict):
+            self.selectedPointLabel.setText(
+                "Selected Point: " + _format_plot_point_data(data)
+            )
+
+    def _new_plot_widget(self, *, object_name: str) -> pg.PlotWidget:
+        plot_widget = pg.PlotWidget()
+        plot_widget.setObjectName(object_name)
+        plot_widget.setBackground("w")
+        plot_widget.showGrid(x=True, y=True, alpha=0.25)
+        plot_widget.setMinimumHeight(180)
+        return plot_widget
+
+    def _clear_plot_panel(self) -> None:
+        while self.plotPanelLayout.count():
+            item = self.plotPanelLayout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._plot_widgets.clear()
+        self._plot_legends.clear()
+        self._point_items.clear()
+
+
 class RepeatabilityTestDialog(QDialog):
     """Operator-facing simple error and repeatability test dialog."""
 
@@ -1555,6 +1948,7 @@ class RepeatabilityTestDialog(QDialog):
         ] = {}
         self._final_k_result: dict[str, object] | None = None
         self.captureProgressDialog: RepeatabilityCaptureProgressDialog | None = None
+        self.flowPlotDialog: RepeatabilityFlowPlotDialog | None = None
         self._capture_progress_active = False
         self._capture_progress_dismissed = False
         self.configurationDialog = RepeatabilityConfigurationDialog(parent=self)
@@ -1565,9 +1959,13 @@ class RepeatabilityTestDialog(QDialog):
         self.flowAccCombo = self.configurationDialog.flowAccCombo
         self.kFactorCombo = self.configurationDialog.kFactorCombo
         self.pollIntervalSpinBox = self.configurationDialog.pollIntervalSpinBox
+        self.instantFlowOffsetSpinBox = (
+            self.configurationDialog.instantFlowOffsetSpinBox
+        )
         self.flowPointSpinBoxes = self.configurationDialog.flowPointSpinBoxes
         self.operationNotesTextEdit = self.configurationDialog.operationNotesTextEdit
         self.snapshotButton = self.configurationDialog.snapshotButton
+        self.sampleVariablesButton = self.configurationDialog.sampleVariablesButton
         self.saveHistoryCheckBox = self.configurationDialog.saveHistoryCheckBox
         self.saveConfigButton = self.configurationDialog.saveConfigButton
         self._build_ui()
@@ -1582,6 +1980,12 @@ class RepeatabilityTestDialog(QDialog):
             and self.captureProgressDialog.isVisible()
         ):
             self.captureProgressDialog.close()
+        if (
+            self.flowPlotDialog is not None
+            and isValid(self.flowPlotDialog)
+            and self.flowPlotDialog.isVisible()
+        ):
+            self.flowPlotDialog.close()
         self.cancelRequested.emit()
         super().closeEvent(event)
 
@@ -1734,18 +2138,32 @@ class RepeatabilityTestDialog(QDialog):
         registers: tuple[ModbusRegister, ...],
         *,
         selected_names: tuple[str, ...] | None = None,
+        sample_selected_names: tuple[str, ...] | None = None,
     ) -> None:
         self._snapshot_registers = registers
         self.configurationDialog.set_registers(
             registers,
             selected_names=selected_names,
+            sample_selected_names=sample_selected_names,
         )
         self._snapshot_variable_names = (
             self.configurationDialog.selected_snapshot_variable_names()
         )
+        self._sample_variable_names = (
+            self.configurationDialog.selected_sample_variable_names()
+        )
 
     def selected_snapshot_variable_names(self) -> tuple[str, ...]:
         return self.configurationDialog.selected_snapshot_variable_names()
+
+    def selected_sample_variable_names(self) -> tuple[str, ...]:
+        return self.configurationDialog.selected_sample_variable_names()
+
+    def set_sample_variable_names(self, names: tuple[str, ...]) -> None:
+        self.configurationDialog.set_sample_variable_names(names)
+        self._sample_variable_names = (
+            self.configurationDialog.selected_sample_variable_names()
+        )
 
     def capture_settings(self) -> dict[str, object]:
         return self.configurationDialog.capture_settings()
@@ -1754,6 +2172,9 @@ class RepeatabilityTestDialog(QDialog):
         self.configurationDialog.apply_configuration(settings)
         self._snapshot_variable_names = (
             self.configurationDialog.selected_snapshot_variable_names()
+        )
+        self._sample_variable_names = (
+            self.configurationDialog.selected_sample_variable_names()
         )
         self._sync_operation_notes()
         self._populate_trial_placeholders()
@@ -1931,6 +2352,31 @@ class RepeatabilityTestDialog(QDialog):
         self._capture_progress_dismissed = False
         dialog.show_message(message)
 
+    def show_flow_plot(
+        self,
+        *,
+        flow_parameter: str,
+        variable_names: tuple[str, ...],
+        units: dict[str, str],
+        plot_layout: str = PLOT_LAYOUT_OVERLAY,
+    ) -> None:
+        dialog = self._ensure_flow_plot_dialog()
+        dialog.reset_trial(
+            flow_parameter=flow_parameter,
+            variable_names=variable_names,
+            units=units,
+            plot_layout=plot_layout,
+        )
+
+    def add_flow_plot_sample(
+        self,
+        captured_at: datetime,
+        values: dict[str, object],
+    ) -> None:
+        if self.flowPlotDialog is None or not isValid(self.flowPlotDialog):
+            return
+        self.flowPlotDialog.add_sample(captured_at, values)
+
     def update_capture_progress(self, message: str) -> None:
         if not self._capture_progress_active or self._capture_progress_dismissed:
             return
@@ -1969,6 +2415,11 @@ class RepeatabilityTestDialog(QDialog):
     def _capture_progress_closed(self, auto_closing: bool) -> None:
         if not auto_closing and self._capture_progress_active:
             self._capture_progress_dismissed = True
+
+    def _ensure_flow_plot_dialog(self) -> RepeatabilityFlowPlotDialog:
+        if self.flowPlotDialog is None or not isValid(self.flowPlotDialog):
+            self.flowPlotDialog = RepeatabilityFlowPlotDialog(parent=self)
+        return self.flowPlotDialog
 
     def _set_original_k_factor(self, value: float) -> None:
         self._original_k_factor = value
@@ -2926,14 +3377,23 @@ class SnapshotSelectionDialog(QDialog):
         registers: tuple[ModbusRegister, ...],
         *,
         selected_names: tuple[str, ...],
+        required_names: tuple[str, ...] = (),
+        title: str = "Pre-test Snapshot",
+        object_name: str = "modbusSnapshotSelectionTable",
+        plot_layout: str | None = None,
+        show_plot_layout: bool = False,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Pre-test Snapshot")
+        self.setWindowTitle(title)
         self.setModal(True)
         _fit_dialog_to_screen(self, 520, 420, 420, 320)
         self._registers = registers
         self._selected_names = selected_names
+        self._required_names = required_names
+        self._object_name = object_name
+        self._plot_layout = _normalize_plot_layout(plot_layout)
+        self._show_plot_layout = show_plot_layout
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -2942,7 +3402,7 @@ class SnapshotSelectionDialog(QDialog):
         root.setSpacing(10)
 
         self.snapshotTable = QTableWidget(0, 5)
-        self.snapshotTable.setObjectName("modbusSnapshotSelectionTable")
+        self.snapshotTable.setObjectName(self._object_name)
         self.snapshotTable.setHorizontalHeaderLabels(
             ["Capture", "Variable", "Kind", "Address", "Type"]
         )
@@ -2957,13 +3417,15 @@ class SnapshotSelectionDialog(QDialog):
         self.snapshotTable.setVerticalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOn
         )
-        selected = set(self._selected_names)
+        selected = set(self._selected_names) | set(self._required_names)
+        required = set(self._required_names)
         self.snapshotTable.setRowCount(len(self._registers))
         for row, register in enumerate(self._registers):
             check_item = QTableWidgetItem("")
-            check_item.setFlags(
-                Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable
-            )
+            flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable
+            if register.name in required:
+                flags = Qt.ItemFlag.ItemIsEnabled
+            check_item.setFlags(flags)
             check_item.setCheckState(
                 Qt.CheckState.Checked
                 if register.name in selected
@@ -2981,6 +3443,26 @@ class SnapshotSelectionDialog(QDialog):
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.snapshotTable.setItem(row, offset, item)
         root.addWidget(self.snapshotTable, 1)
+
+        if self._show_plot_layout:
+            self.plotLayoutCombo = QComboBox()
+            self.plotLayoutCombo.setObjectName(
+                "modbusRepeatabilityTrialSamplePlotLayoutCombo"
+            )
+            self.plotLayoutCombo.addItem(
+                _plot_layout_label(PLOT_LAYOUT_OVERLAY),
+                PLOT_LAYOUT_OVERLAY,
+            )
+            self.plotLayoutCombo.addItem(
+                _plot_layout_label(PLOT_LAYOUT_SEPARATE),
+                PLOT_LAYOUT_SEPARATE,
+            )
+            self.plotLayoutCombo.setCurrentIndex(
+                self.plotLayoutCombo.findData(self._plot_layout)
+            )
+            form = QFormLayout()
+            form.addRow("Plot Layout", self.plotLayoutCombo)
+            root.addLayout(form)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
@@ -3000,6 +3482,854 @@ class SnapshotSelectionDialog(QDialog):
             if name:
                 names.append(name)
         return tuple(names)
+
+    def plot_layout(self) -> str:
+        combo = getattr(self, "plotLayoutCombo", None)
+        if isinstance(combo, QComboBox):
+            return _normalize_plot_layout(combo.currentData())
+        return self._plot_layout
+
+
+class VariableSamplingDialog(QDialog):
+    """Operator-controlled polling, plotting, and recording for selected variables."""
+
+    startRequested = Signal()
+    stopRequested = Signal()
+
+    def __init__(self, *, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Variable Sampling")
+        self.setModal(False)
+        self.setSizeGripEnabled(True)
+        self.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, True)
+        self.setWindowFlag(Qt.WindowType.WindowMinimizeButtonHint, True)
+        _fit_dialog_to_screen(self, 620, 520, 440, 360)
+        self._registers: tuple[ModbusRegister, ...] = ()
+        self.flowPlotDialog: RepeatabilityFlowPlotDialog | None = None
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(10)
+
+        settings = QFormLayout()
+        self.pollIntervalSpinBox = QDoubleSpinBox()
+        self.pollIntervalSpinBox.setObjectName("modbusVariableSamplingIntervalSpinBox")
+        self.pollIntervalSpinBox.setRange(0.05, 3600.0)
+        self.pollIntervalSpinBox.setDecimals(3)
+        self.pollIntervalSpinBox.setSingleStep(0.1)
+        self.pollIntervalSpinBox.setValue(1.0)
+        settings.addRow("Poll Interval (s)", self.pollIntervalSpinBox)
+
+        self.plotLayoutCombo = QComboBox()
+        self.plotLayoutCombo.setObjectName("modbusVariableSamplingPlotLayoutCombo")
+        self.plotLayoutCombo.addItem(
+            _plot_layout_label(PLOT_LAYOUT_OVERLAY),
+            PLOT_LAYOUT_OVERLAY,
+        )
+        self.plotLayoutCombo.addItem(
+            _plot_layout_label(PLOT_LAYOUT_SEPARATE),
+            PLOT_LAYOUT_SEPARATE,
+        )
+        settings.addRow("Plot Layout", self.plotLayoutCombo)
+        root.addLayout(settings)
+
+        self.variableTable = QTableWidget(0, 5)
+        self.variableTable.setObjectName("modbusVariableSamplingVariableTable")
+        self.variableTable.setHorizontalHeaderLabels(
+            ["Sample", "Variable", "Kind", "Address", "Unit"]
+        )
+        self.variableTable.verticalHeader().setVisible(False)
+        self.variableTable.setAlternatingRowColors(True)
+        self.variableTable.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.variableTable.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
+        root.addWidget(self.variableTable, 1)
+
+        self.notesEdit = QTextEdit()
+        self.notesEdit.setObjectName("modbusVariableSamplingNotesEdit")
+        self.notesEdit.setPlaceholderText("Operation notes")
+        self.notesEdit.setFixedHeight(72)
+        root.addWidget(self.notesEdit)
+
+        self.statusLabel = QLabel("Ready")
+        self.statusLabel.setObjectName("modbusVariableSamplingStatusLabel")
+        self.statusLabel.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        root.addWidget(self.statusLabel)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch(1)
+        self.startButton = QPushButton("Start")
+        self.startButton.setObjectName("modbusVariableSamplingStartButton")
+        self.stopButton = QPushButton("Stop")
+        self.stopButton.setObjectName("modbusVariableSamplingStopButton")
+        self.stopButton.setEnabled(False)
+        self.saveConfigButton = QPushButton("Save Config")
+        self.saveConfigButton.setObjectName("modbusVariableSamplingSaveConfigButton")
+        self.closeButton = QPushButton("Close")
+        self.closeButton.setObjectName("modbusVariableSamplingCloseButton")
+        buttons.addWidget(self.startButton)
+        buttons.addWidget(self.stopButton)
+        buttons.addWidget(self.saveConfigButton)
+        buttons.addWidget(self.closeButton)
+        root.addLayout(buttons)
+
+        self.startButton.clicked.connect(self.startRequested.emit)
+        self.stopButton.clicked.connect(self.stopRequested.emit)
+        self.closeButton.clicked.connect(self.close)
+
+    def set_registers(
+        self,
+        registers: tuple[ModbusRegister, ...],
+        *,
+        selected_names: tuple[str, ...],
+    ) -> None:
+        previous_selection = set(self.selected_variable_names())
+        selected = set(selected_names) or previous_selection
+        self._registers = registers
+        self.variableTable.blockSignals(True)
+        self.variableTable.setRowCount(len(registers))
+        for row, register in enumerate(registers):
+            check_item = QTableWidgetItem("")
+            check_item.setFlags(
+                Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable
+            )
+            check_item.setCheckState(
+                Qt.CheckState.Checked
+                if register.name in selected
+                else Qt.CheckState.Unchecked
+            )
+            self.variableTable.setItem(row, 0, check_item)
+            values = (
+                register.name,
+                register.kind.value,
+                str(register.address),
+                register.unit or "",
+            )
+            for offset, value in enumerate(values, start=1):
+                item = QTableWidgetItem(value)
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self.variableTable.setItem(row, offset, item)
+        self.variableTable.blockSignals(False)
+
+    def selected_variable_names(self) -> tuple[str, ...]:
+        names: list[str] = []
+        for row in range(self.variableTable.rowCount()):
+            check_item = self.variableTable.item(row, 0)
+            name = _table_text(self.variableTable, row, 1)
+            if (
+                check_item is not None
+                and check_item.checkState() == Qt.CheckState.Checked
+                and name
+            ):
+                names.append(name)
+        return tuple(names)
+
+    def poll_interval_s(self) -> float:
+        return float(self.pollIntervalSpinBox.value())
+
+    def plot_layout(self) -> str:
+        return _normalize_plot_layout(self.plotLayoutCombo.currentData())
+
+    def notes(self) -> str:
+        return self.notesEdit.toPlainText().strip()
+
+    def capture_settings(self) -> dict[str, object]:
+        return {
+            "variable_names": list(self.selected_variable_names()),
+            "poll_interval_s": self.poll_interval_s(),
+            "plot_layout": self.plot_layout(),
+        }
+
+    def apply_configuration(self, settings: dict[str, object]) -> None:
+        names = settings.get("variable_names")
+        if not isinstance(names, (list, tuple)):
+            names = settings.get("sample_variable_names")
+        if isinstance(names, (list, tuple)):
+            available = {
+                _table_text(self.variableTable, row, 1)
+                for row in range(self.variableTable.rowCount())
+            }
+            selected = {str(name) for name in names if str(name) in available}
+            if selected:
+                for row in range(self.variableTable.rowCount()):
+                    check_item = self.variableTable.item(row, 0)
+                    if check_item is None:
+                        continue
+                    name = _table_text(self.variableTable, row, 1)
+                    check_item.setCheckState(
+                        Qt.CheckState.Checked
+                        if name in selected
+                        else Qt.CheckState.Unchecked
+                    )
+        poll_interval = settings.get("poll_interval_s")
+        if isinstance(poll_interval, (int, float)):
+            self.pollIntervalSpinBox.setValue(float(poll_interval))
+        plot_layout = settings.get("plot_layout")
+        index = self.plotLayoutCombo.findData(_normalize_plot_layout(plot_layout))
+        if index >= 0:
+            self.plotLayoutCombo.setCurrentIndex(index)
+
+    def set_ready(self, *, connected: bool) -> None:
+        self.startButton.setEnabled(connected)
+        self.stopButton.setEnabled(False)
+        self.saveConfigButton.setEnabled(True)
+        self.variableTable.setEnabled(True)
+        self.pollIntervalSpinBox.setEnabled(True)
+        self.plotLayoutCombo.setEnabled(True)
+        if self.statusLabel.text() == "Running...":
+            self.statusLabel.setText("Ready" if connected else "Disconnected")
+
+    def set_running(self) -> None:
+        self.startButton.setEnabled(False)
+        self.stopButton.setEnabled(True)
+        self.saveConfigButton.setEnabled(False)
+        self.variableTable.setEnabled(False)
+        self.pollIntervalSpinBox.setEnabled(False)
+        self.plotLayoutCombo.setEnabled(False)
+        self.statusLabel.setText("Running...")
+
+    def set_canceling(self) -> None:
+        self.stopButton.setEnabled(False)
+        self.saveConfigButton.setEnabled(False)
+        self.statusLabel.setText("Stopping...")
+
+    def set_status(self, message: str) -> None:
+        self.statusLabel.setText(message)
+
+    def set_error(self, message: str) -> None:
+        self.statusLabel.setText(f"Error: {message}")
+
+    def show_live_plot(
+        self,
+        *,
+        variable_names: tuple[str, ...],
+        units: dict[str, str],
+        plot_layout: str,
+    ) -> None:
+        dialog = self._ensure_flow_plot_dialog()
+        dialog.reset_trial(
+            flow_parameter=variable_names[0] if variable_names else "variables",
+            variable_names=variable_names,
+            units=units,
+            plot_layout=plot_layout,
+            window_title="Variable Sampling",
+            point_label="variable sampling",
+        )
+
+    def add_sample(self, captured_at: datetime, values: dict[str, object]) -> None:
+        if self.flowPlotDialog is None or not isValid(self.flowPlotDialog):
+            return
+        self.flowPlotDialog.add_sample(captured_at, values)
+
+    def _ensure_flow_plot_dialog(self) -> RepeatabilityFlowPlotDialog:
+        if self.flowPlotDialog is None or not isValid(self.flowPlotDialog):
+            self.flowPlotDialog = RepeatabilityFlowPlotDialog(parent=self)
+        return self.flowPlotDialog
+
+
+class CalibrationHistoryFlowPlotDialog(QDialog):
+    """Non-modal multi-variable sample chart for saved repeatability trials."""
+
+    def __init__(self, *, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Trial Flow Samples")
+        self.setModal(False)
+        self.setWindowFlag(Qt.WindowType.Window, True)
+        self.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, True)
+        self.setWindowFlag(Qt.WindowType.WindowMinimizeButtonHint, True)
+        self.setSizeGripEnabled(True)
+        _fit_dialog_to_screen(self, 720, 420, 500, 300)
+        self._series_items: tuple[tuple[str, ModbusFlowSampleSeries], ...] = ()
+        self._plot_layout = PLOT_LAYOUT_OVERLAY
+        self._plot_alignment = PLOT_ALIGNMENT_FIRST_SAMPLE
+        self._plot_widgets: dict[str, pg.PlotWidget] = {}
+        self._plot_legends: dict[str, object] = {}
+        self._overlay_right_axis_view: pg.ViewBox | None = None
+        self._overlay_right_axis_variable: str | None = None
+        self._point_items: list[object] = []
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(8)
+
+        self.summaryLabel = QLabel("No samples")
+        self.summaryLabel.setObjectName("modbusHistoryFlowPlotSummaryLabel")
+        root.addWidget(self.summaryLabel)
+
+        controls = QHBoxLayout()
+        controls.addWidget(QLabel("Plot Layout"))
+        self.plotLayoutCombo = QComboBox()
+        self.plotLayoutCombo.setObjectName("modbusHistoryFlowPlotLayoutCombo")
+        self.plotLayoutCombo.addItem(
+            _plot_layout_label(PLOT_LAYOUT_OVERLAY),
+            PLOT_LAYOUT_OVERLAY,
+        )
+        self.plotLayoutCombo.addItem(
+            _plot_layout_label(PLOT_LAYOUT_SEPARATE),
+            PLOT_LAYOUT_SEPARATE,
+        )
+        self.plotLayoutCombo.currentIndexChanged.connect(self._plot_layout_changed)
+        controls.addWidget(self.plotLayoutCombo)
+        controls.addWidget(QLabel("Alignment"))
+        self.plotAlignmentCombo = QComboBox()
+        self.plotAlignmentCombo.setObjectName("modbusHistoryFlowPlotAlignmentCombo")
+        self.plotAlignmentCombo.addItem(
+            _plot_alignment_label(PLOT_ALIGNMENT_FIRST_SAMPLE),
+            PLOT_ALIGNMENT_FIRST_SAMPLE,
+        )
+        self.plotAlignmentCombo.addItem(
+            _plot_alignment_label(PLOT_ALIGNMENT_PREFLOW_SAMPLE),
+            PLOT_ALIGNMENT_PREFLOW_SAMPLE,
+        )
+        self.plotAlignmentCombo.currentIndexChanged.connect(
+            self._plot_alignment_changed
+        )
+        controls.addWidget(self.plotAlignmentCombo)
+        controls.addStretch(1)
+        root.addLayout(controls)
+
+        self.variableTable = QTableWidget(0, 3)
+        self.variableTable.setObjectName("modbusHistoryFlowPlotVariableTable")
+        self.variableTable.setHorizontalHeaderLabels(["Show", "Variable", "Unit"])
+        self.variableTable.verticalHeader().setVisible(False)
+        self.variableTable.setAlternatingRowColors(True)
+        self.variableTable.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.variableTable.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
+        self.variableTable.itemChanged.connect(self._variable_selection_changed)
+        root.addWidget(self.variableTable, 0)
+
+        self.plotScrollArea = QScrollArea()
+        self.plotScrollArea.setObjectName("modbusHistoryFlowPlotScrollArea")
+        self.plotScrollArea.setWidgetResizable(True)
+        self.plotPanel = QWidget()
+        self.plotPanelLayout = QVBoxLayout(self.plotPanel)
+        self.plotPanelLayout.setContentsMargins(0, 0, 0, 0)
+        self.plotPanelLayout.setSpacing(8)
+        self.plotScrollArea.setWidget(self.plotPanel)
+        root.addWidget(self.plotScrollArea, 1)
+
+        self.selectedPointLabel = QLabel("Selected Point: none")
+        self.selectedPointLabel.setObjectName("modbusHistoryFlowPlotSelectedPointLabel")
+        self.selectedPointLabel.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        root.addWidget(self.selectedPointLabel)
+
+        self.flowPlot = pg.PlotWidget()
+        self.flowPlot.setObjectName("modbusHistoryFlowPlot")
+
+    def set_series(
+        self,
+        series_items: tuple[tuple[str, ModbusFlowSampleSeries], ...],
+    ) -> None:
+        self._series_items = series_items
+        self.selectedPointLabel.setText("Selected Point: none")
+        if not series_items:
+            self.summaryLabel.setText("No flow samples available.")
+            self._clear_plot_panel()
+            self.variableTable.setRowCount(0)
+            return
+        self._populate_variable_table(series_items)
+        self._redraw()
+
+    def set_plot_layout(self, plot_layout: str) -> None:
+        normalized = _normalize_plot_layout(plot_layout)
+        index = self.plotLayoutCombo.findData(normalized)
+        if index >= 0 and index != self.plotLayoutCombo.currentIndex():
+            self.plotLayoutCombo.setCurrentIndex(index)
+            return
+        self._plot_layout = normalized
+        self._redraw()
+
+    def _populate_variable_table(
+        self,
+        series_items: tuple[tuple[str, ModbusFlowSampleSeries], ...],
+    ) -> None:
+        previous_selection = set(self._selected_variable_names())
+        self.variableTable.blockSignals(True)
+        variable_names = _series_variable_names(series_items)
+        preserve_selection = bool(previous_selection.intersection(variable_names))
+        units = _series_units(series_items)
+        self.variableTable.setRowCount(len(variable_names))
+        for row, name in enumerate(variable_names):
+            check_item = QTableWidgetItem("")
+            check_item.setFlags(
+                Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable
+            )
+            check_item.setCheckState(
+                Qt.CheckState.Checked
+                if (
+                    (preserve_selection and name in previous_selection)
+                    or (not preserve_selection and row == 0)
+                )
+                else Qt.CheckState.Unchecked
+            )
+            self.variableTable.setItem(row, 0, check_item)
+            variable_item = QTableWidgetItem(name)
+            variable_item.setFlags(variable_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.variableTable.setItem(row, 1, variable_item)
+            unit_item = QTableWidgetItem(units.get(name, ""))
+            unit_item.setFlags(unit_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.variableTable.setItem(row, 2, unit_item)
+        self.variableTable.blockSignals(False)
+
+    def _selected_variable_names(self) -> tuple[str, ...]:
+        names: list[str] = []
+        for row in range(self.variableTable.rowCount()):
+            check_item = self.variableTable.item(row, 0)
+            if check_item is None or check_item.checkState() != Qt.CheckState.Checked:
+                continue
+            name = _table_text(self.variableTable, row, 1)
+            if name:
+                names.append(name)
+        return tuple(names)
+
+    def _variable_selection_changed(self, item: QTableWidgetItem) -> None:
+        if item.column() == 0:
+            self._redraw()
+
+    def _plot_layout_changed(self) -> None:
+        self._plot_layout = _normalize_plot_layout(self.plotLayoutCombo.currentData())
+        self._redraw()
+
+    def _plot_alignment_changed(self) -> None:
+        self._plot_alignment = _normalize_plot_alignment(
+            self.plotAlignmentCombo.currentData()
+        )
+        self._redraw()
+
+    def _redraw(self) -> None:
+        series_items = self._series_items
+        selected_variables = self._selected_variable_names()
+        if not selected_variables and self.variableTable.rowCount() > 0:
+            first_item = self.variableTable.item(0, 0)
+            if first_item is not None:
+                first_item.setCheckState(Qt.CheckState.Checked)
+            selected_variables = self._selected_variable_names()
+
+        self._clear_plot_panel()
+        self.selectedPointLabel.setText("Selected Point: none")
+        if not series_items or not selected_variables:
+            self.summaryLabel.setText("Select at least one variable.")
+            return
+
+        units = _series_units(series_items)
+        selected_units = {units.get(name, "") for name in selected_variables if units.get(name, "")}
+        left_unit = selected_units.pop() if len(selected_units) == 1 else ""
+        overlay_axis_by_variable: dict[str, str] = {}
+        if self._plot_layout == PLOT_LAYOUT_SEPARATE:
+            for index, variable_name in enumerate(selected_variables):
+                object_name = (
+                    "modbusHistoryFlowPlot"
+                    if index == 0
+                    else f"modbusHistoryFlowPlot_{_object_name_token(variable_name)}"
+                )
+                plot_widget = self._new_plot_widget(
+                    object_name=object_name
+                )
+                unit = units.get(variable_name, "")
+                plot_widget.setTitle(variable_name)
+                plot_widget.setLabel("bottom", "Aligned Time", units="s")
+                plot_widget.setLabel("left", variable_name, units=unit or None)
+                self._plot_widgets[variable_name] = plot_widget
+                self._plot_legends[variable_name] = plot_widget.addLegend(
+                    offset=(8, 8)
+                )
+                self.plotPanelLayout.addWidget(plot_widget, 1)
+            if selected_variables:
+                self.flowPlot = self._plot_widgets[selected_variables[0]]
+        else:
+            plot_widget = self._new_plot_widget(object_name="modbusHistoryFlowPlot")
+            self.flowPlot = plot_widget
+            self._plot_widgets["overlay"] = plot_widget
+            self._plot_legends["overlay"] = plot_widget.addLegend(offset=(8, 8))
+            plot_widget.setLabel("bottom", "Aligned Time", units="s")
+            if len(selected_variables) == 2:
+                left_variable, right_variable = selected_variables
+                plot_widget.setLabel(
+                    "left",
+                    left_variable,
+                    units=units.get(left_variable, "") or None,
+                )
+                self._setup_overlay_right_axis(
+                    plot_widget,
+                    variable_name=right_variable,
+                    unit=units.get(right_variable, ""),
+                )
+                overlay_axis_by_variable = {
+                    left_variable: "left",
+                    right_variable: "right",
+                }
+            else:
+                plot_widget.setLabel("left", "Value", units=left_unit or None)
+            self.plotPanelLayout.addWidget(plot_widget, 1)
+
+        colors = _plot_colors()
+        max_elapsed = 0.0
+        sample_count = 0
+        curve_index = 0
+        for index, (label, series) in enumerate(series_items):
+            timestamps = [sample.captured_at for sample in series.points]
+            if not timestamps:
+                continue
+            start = _flow_alignment_timestamp(series, self._plot_alignment) or timestamps[0]
+            x_values = [
+                (timestamp - start).total_seconds()
+                for timestamp in timestamps
+            ]
+            if x_values:
+                max_elapsed = max(max_elapsed, max(x_values) - min(x_values))
+            sample_count += len(timestamps)
+            for variable_name in selected_variables:
+                y_values = series.values_for(variable_name)
+                valid_x = [
+                    x_value
+                    for x_value, y_value in zip(x_values, y_values)
+                    if y_value is not None
+                ]
+                valid_y = [
+                    y_value
+                    for y_value in y_values
+                    if y_value is not None
+                ]
+                if not valid_y:
+                    continue
+                pen = pg.mkPen(colors[curve_index % len(colors)], width=2)
+                color = colors[curve_index % len(colors)]
+                curve_index += 1
+                curve_label = (
+                    label
+                    if len(selected_variables) == 1
+                    else f"{label} - {variable_name}"
+                )
+                plot_key = (
+                    variable_name
+                    if self._plot_layout == PLOT_LAYOUT_SEPARATE
+                    else "overlay"
+                )
+                plot_widget = self._plot_widgets.get(plot_key)
+                if plot_widget is not None:
+                    axis_side = overlay_axis_by_variable.get(variable_name, "left")
+                    self._plot_history_curve(
+                        plot_widget,
+                        valid_x,
+                        valid_y,
+                        pen=pen,
+                        name=curve_label,
+                        axis_side=axis_side,
+                    )
+                    spots = []
+                    unit = units.get(variable_name, "")
+                    for sample_index, (timestamp, x_value, y_value) in enumerate(
+                        zip(timestamps, x_values, y_values),
+                        start=1,
+                    ):
+                        if y_value is None:
+                            continue
+                        spots.append(
+                            {
+                                "pos": (x_value, y_value),
+                                "data": {
+                                    "label": label,
+                                    "variable": variable_name,
+                                    "elapsed_s": x_value,
+                                    "captured_at": timestamp,
+                                    "value": y_value,
+                                    "unit": unit,
+                                    "sample_index": sample_index,
+                                },
+                            }
+                        )
+                    point_item = self._new_point_item(color=color)
+                    point_item.setData(spots)
+                    self._point_items.append(point_item)
+                    if axis_side == "right" and self._overlay_right_axis_view is not None:
+                        self._overlay_right_axis_view.addItem(point_item)
+                    else:
+                        plot_widget.addItem(point_item)
+
+        for plot_widget in self._plot_widgets.values():
+            plot_widget.plotItem.enableAutoRange(x=True, y=True)
+        if self._overlay_right_axis_view is not None:
+            self._overlay_right_axis_view.enableAutoRange(x=True, y=True)
+        if len(series_items) == 1:
+            label, series = series_items[0]
+            self.setWindowTitle(f"Trial Flow Samples - {label}")
+            latest_parts = []
+            for variable_name in selected_variables:
+                values = [value for value in series.values_for(variable_name) if value is not None]
+                if values:
+                    unit = f" {units.get(variable_name, '')}" if units.get(variable_name, "") else ""
+                    latest_parts.append(f"{variable_name}={values[-1]:.6g}{unit}")
+            self.summaryLabel.setText(
+                f"{len(series.points)} samples | elapsed {max_elapsed:.3g} s | "
+                f"{_plot_layout_label(self._plot_layout)} | "
+                f"aligned at {_plot_alignment_label(self._plot_alignment).lower()} | "
+                "latest "
+                + ", ".join(latest_parts)
+            )
+            return
+
+        self.setWindowTitle("Compare Trial Flow Samples")
+        self.summaryLabel.setText(
+            f"{len(series_items)} trials | {sample_count} samples | "
+            f"{len(selected_variables)} variable(s) | "
+            f"{_plot_layout_label(self._plot_layout)} | "
+            f"aligned at {_plot_alignment_label(self._plot_alignment).lower()}"
+        )
+
+    def _setup_overlay_right_axis(
+        self,
+        plot_widget: pg.PlotWidget,
+        *,
+        variable_name: str,
+        unit: str,
+    ) -> None:
+        plot_item = plot_widget.plotItem
+        right_view = pg.ViewBox()
+        self._overlay_right_axis_view = right_view
+        self._overlay_right_axis_variable = variable_name
+        plot_item.showAxis("right")
+        plot_item.scene().addItem(right_view)
+        plot_item.getAxis("right").linkToView(right_view)
+        plot_item.getAxis("right").setLabel(variable_name, units=unit or None)
+        right_view.setXLink(plot_item)
+
+        def update_right_view() -> None:
+            right_view.setGeometry(plot_item.vb.sceneBoundingRect())
+            right_view.linkedViewChanged(plot_item.vb, right_view.XAxis)
+
+        update_right_view()
+        plot_item.vb.sigResized.connect(update_right_view)
+
+    def _plot_history_curve(
+        self,
+        plot_widget: pg.PlotWidget,
+        x_values: list[float],
+        y_values: list[float],
+        *,
+        pen: object,
+        name: str,
+        axis_side: str,
+    ) -> object:
+        if axis_side == "right" and self._overlay_right_axis_view is not None:
+            curve = pg.PlotDataItem(x_values, y_values, pen=pen, name=name)
+            self._overlay_right_axis_view.addItem(curve)
+            legend = self._plot_legends.get("overlay")
+            if legend is not None:
+                legend.addItem(curve, name)
+            return curve
+        return plot_widget.plot(x_values, y_values, pen=pen, name=name)
+
+    def _new_plot_widget(self, *, object_name: str) -> pg.PlotWidget:
+        plot_widget = pg.PlotWidget()
+        plot_widget.setObjectName(object_name)
+        plot_widget.setBackground("w")
+        plot_widget.showGrid(x=True, y=True, alpha=0.25)
+        plot_widget.setMinimumHeight(180)
+        return plot_widget
+
+    def _new_point_item(self, *, color: str):
+        item = pg.ScatterPlotItem(
+            [],
+            [],
+            size=8,
+            brush=pg.mkBrush(color),
+            pen=pg.mkPen("w", width=1),
+            hoverable=True,
+        )
+        item.sigClicked.connect(self._point_clicked)
+        return item
+
+    def _point_clicked(self, _item, points, *_args) -> None:
+        if not points:
+            return
+        data = points[0].data()
+        if isinstance(data, dict):
+            self.selectedPointLabel.setText(
+                "Selected Point: " + _format_plot_point_data(data)
+            )
+
+    def _clear_plot_panel(self) -> None:
+        while self.plotPanelLayout.count():
+            item = self.plotPanelLayout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._plot_widgets.clear()
+        self._plot_legends.clear()
+        self._overlay_right_axis_view = None
+        self._overlay_right_axis_variable = None
+        self._point_items.clear()
+
+
+class CalibrationHistoryFlowSampleTableDialog(QDialog):
+    """Non-modal table view for saved repeatability trial samples."""
+
+    def __init__(self, *, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Trial Flow Sample Data")
+        self.setModal(False)
+        self.setWindowFlag(Qt.WindowType.Window, True)
+        self.setWindowFlag(Qt.WindowType.WindowMaximizeButtonHint, True)
+        self.setWindowFlag(Qt.WindowType.WindowMinimizeButtonHint, True)
+        self.setSizeGripEnabled(True)
+        _fit_dialog_to_screen(self, 760, 460, 520, 320)
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(10, 10, 10, 10)
+        root.setSpacing(8)
+
+        self.summaryLabel = QLabel("No samples")
+        self.summaryLabel.setObjectName("modbusHistoryFlowSampleTableSummaryLabel")
+        root.addWidget(self.summaryLabel)
+
+        self.sampleTable = QTableWidget(0, 0)
+        self.sampleTable.setObjectName("modbusHistoryFlowSampleDataTable")
+        self.sampleTable.setAlternatingRowColors(True)
+        self.sampleTable.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.sampleTable.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectItems
+        )
+        self.sampleTable.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        self.sampleTable.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+        )
+        self.sampleTable.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOn
+        )
+        root.addWidget(self.sampleTable, 1)
+
+    def set_series(self, label: str, series: ModbusFlowSampleSeries) -> None:
+        variable_names = _unique_names(
+            (
+                *series.variable_names,
+                *(
+                    name
+                    for point in series.points
+                    for name in point.values
+                ),
+            )
+        )
+        headers = ("captured_at_local", "elapsed_s", "sample_index", *variable_names)
+        self.sampleTable.setColumnCount(len(headers))
+        self.sampleTable.setHorizontalHeaderLabels(headers)
+        self.sampleTable.setRowCount(len(series.points))
+        start = series.points[0].captured_at if series.points else None
+        for row, point in enumerate(series.points):
+            elapsed = (
+                max(0.0, (point.captured_at - start).total_seconds())
+                if start is not None
+                else 0.0
+            )
+            values: list[str] = [
+                _format_datetime(point.captured_at),
+                f"{elapsed:.9g}",
+                str(row),
+            ]
+            values.extend(_format_value(point.values.get(name, "")) for name in variable_names)
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                self.sampleTable.setItem(row, column, item)
+        self.sampleTable.resizeColumnsToContents()
+        self.setWindowTitle(f"Trial Flow Sample Data - {label}")
+        self.summaryLabel.setText(
+            f"{len(series.points)} samples | {len(variable_names)} variable(s) | {label}"
+        )
+
+
+class CalibrationHistoryFlowCompareSelectionDialog(QDialog):
+    """Choose saved trial sample artifacts before comparing curves."""
+
+    def __init__(
+        self,
+        items: tuple[tuple[str, str], ...],
+        *,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Select Flow Plots To Compare")
+        self.setObjectName("modbusHistoryFlowCompareSelectionDialog")
+        self.setModal(True)
+        _fit_dialog_to_screen(self, 520, 420, 420, 300)
+        self._items = items
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(10)
+
+        self.selectionTable = QTableWidget(0, 3)
+        self.selectionTable.setObjectName("modbusHistoryFlowCompareSelectionTable")
+        self.selectionTable.setHorizontalHeaderLabels(["Compare", "Trial", "Artifact"])
+        self.selectionTable.verticalHeader().setVisible(False)
+        self.selectionTable.setAlternatingRowColors(True)
+        self.selectionTable.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.selectionTable.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
+        self.selectionTable.setRowCount(len(self._items))
+        for row, (artifact_id, label) in enumerate(self._items):
+            check_item = QTableWidgetItem("")
+            check_item.setFlags(
+                Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable
+            )
+            check_item.setCheckState(
+                Qt.CheckState.Checked if row < 2 else Qt.CheckState.Unchecked
+            )
+            self.selectionTable.setItem(row, 0, check_item)
+            label_item = QTableWidgetItem(label)
+            label_item.setFlags(label_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.selectionTable.setItem(row, 1, label_item)
+            artifact_item = QTableWidgetItem(artifact_id)
+            artifact_item.setFlags(artifact_item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.selectionTable.setItem(row, 2, artifact_item)
+        root.addWidget(self.selectionTable, 1)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._accept_if_valid)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+    def selected_items(self) -> tuple[tuple[str, str], ...]:
+        values: list[tuple[str, str]] = []
+        for row in range(self.selectionTable.rowCount()):
+            check_item = self.selectionTable.item(row, 0)
+            if check_item is None or check_item.checkState() != Qt.CheckState.Checked:
+                continue
+            artifact_id = _table_text(self.selectionTable, row, 2)
+            label = _table_text(self.selectionTable, row, 1)
+            if artifact_id:
+                values.append((artifact_id, label or artifact_id))
+        return tuple(values)
+
+    def _accept_if_valid(self) -> None:
+        if len(self.selected_items()) < 2:
+            QMessageBox.information(
+                self,
+                "Flow Samples",
+                "Select at least two trials to compare.",
+            )
+            return
+        self.accept()
 
 
 class CalibrationHistoryExportDialog(QDialog):
@@ -3120,6 +4450,7 @@ class CalibrationHistoryDialog(QDialog):
 
     OPERATIONS = (
         ("All", "all"),
+        ("Variable Sampling", "modbus_variable_sampling"),
         ("Zero Calibration", "zero_calibration"),
         ("K Factor", "k_factor_calibration"),
         ("Repeatability", "manual_error_repeatability"),
@@ -3140,6 +4471,8 @@ class CalibrationHistoryDialog(QDialog):
         self._scope_label = scope_label
         self._loading = False
         self._entries: tuple[ModbusCalibrationHistoryEntry, ...] = ()
+        self._flow_plot_dialog: CalibrationHistoryFlowPlotDialog | None = None
+        self._flow_sample_table_dialog: CalibrationHistoryFlowSampleTableDialog | None = None
         if device_id is None:
             self.setWindowTitle("All Test Records")
         else:
@@ -3199,6 +4532,17 @@ class CalibrationHistoryDialog(QDialog):
             self.statusFilterCombo.addItem(label, value)
         self.refreshButton = QPushButton("Refresh")
         self.refreshButton.setObjectName("modbusHistoryRefreshButton")
+        self.showFlowPlotButton = QPushButton("View Flow Plot")
+        self.showFlowPlotButton.setObjectName("modbusHistoryShowFlowPlotButton")
+        self.showFlowPlotButton.setEnabled(False)
+        self.showFlowDataButton = QPushButton("View Flow Data")
+        self.showFlowDataButton.setObjectName("modbusHistoryShowFlowDataButton")
+        self.showFlowDataButton.setEnabled(False)
+        self.compareFlowPlotsButton = QPushButton("Compare Flow Plots")
+        self.compareFlowPlotsButton.setObjectName(
+            "modbusHistoryCompareFlowPlotsButton"
+        )
+        self.compareFlowPlotsButton.setEnabled(False)
         self.importButton = QPushButton("Import...")
         self.importButton.setObjectName("modbusHistoryImportButton")
         self.exportButton = QPushButton("Export...")
@@ -3207,6 +4551,9 @@ class CalibrationHistoryDialog(QDialog):
         filter_top.addWidget(self.statusFilterCombo)
         filter_top.addWidget(self.deviceIdFilterLineEdit)
         filter_top.addStretch(1)
+        filter_top.addWidget(self.showFlowPlotButton)
+        filter_top.addWidget(self.showFlowDataButton)
+        filter_top.addWidget(self.compareFlowPlotsButton)
         filter_top.addWidget(self.importButton)
         filter_top.addWidget(self.exportButton)
         filter_top.addWidget(self.refreshButton)
@@ -3294,6 +4641,9 @@ class CalibrationHistoryDialog(QDialog):
         self.transmitterModelFilterLineEdit.returnPressed.connect(self.refresh)
         self.sessionFilterLineEdit.returnPressed.connect(self.refresh)
         self.refreshButton.clicked.connect(self.refresh)
+        self.showFlowPlotButton.clicked.connect(self.show_selected_flow_plot)
+        self.showFlowDataButton.clicked.connect(self.show_selected_flow_data)
+        self.compareFlowPlotsButton.clicked.connect(self.compare_selected_flow_plots)
         self.importButton.clicked.connect(self.importRequested.emit)
         self.exportButton.clicked.connect(
             lambda: self.exportRequested.emit(
@@ -3348,6 +4698,7 @@ class CalibrationHistoryDialog(QDialog):
         else:
             self.detailTitleLabel.setText("Operation Detail")
             self.detailTextEdit.clear()
+        self._update_flow_plot_actions()
 
     def _populate_row(self, row: int, entry: ModbusCalibrationHistoryEntry) -> None:
         values = (
@@ -3413,10 +4764,12 @@ class CalibrationHistoryDialog(QDialog):
         if not indexes:
             self.detailTitleLabel.setText("Operation Detail")
             self.detailTextEdit.clear()
+            self._update_flow_plot_actions()
             return
         row = min(index.row() for index in indexes)
         if 0 <= row < len(self._entries):
             self._populate_detail(self._entries[row])
+        self._update_flow_plot_actions()
 
     def _populate_detail(self, entry: ModbusCalibrationHistoryEntry) -> None:
         self.detailTitleLabel.setText(
@@ -3431,6 +4784,162 @@ class CalibrationHistoryDialog(QDialog):
         if not isinstance(run_id, str) or not run_id:
             return
         self.runtime.update_calibration_history_note(run_id, item.text())
+
+    def show_selected_flow_plot(self) -> None:
+        series_items = self._selected_flow_series(limit=1)
+        if not series_items:
+            QMessageBox.information(
+                self,
+                "Flow Samples",
+                "The selected record has no saved flow-sample artifact.",
+            )
+            return
+        self._show_flow_series(series_items)
+
+    def show_selected_flow_data(self) -> None:
+        series_items = self._selected_flow_series(limit=1)
+        if not series_items:
+            QMessageBox.information(
+                self,
+                "Flow Samples",
+                "The selected record has no saved flow-sample artifact.",
+            )
+            return
+        label, series = series_items[0]
+        dialog = self._ensure_flow_sample_table_dialog()
+        dialog.set_series(label, series)
+        dialog.showNormal()
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def compare_selected_flow_plots(self) -> None:
+        items = self._selected_flow_artifact_items()
+        if len(items) < 2:
+            QMessageBox.information(
+                self,
+                "Flow Samples",
+                "Select at least two saved flow-sample records to compare.",
+            )
+            return
+        selection = CalibrationHistoryFlowCompareSelectionDialog(items, parent=self)
+        if selection.exec() != QDialog.DialogCode.Accepted:
+            return
+        series_items = self._flow_series_from_items(selection.selected_items())
+        if len(series_items) < 2:
+            return
+        self._show_flow_series(series_items)
+
+    def _show_flow_series(
+        self,
+        series_items: tuple[tuple[str, ModbusFlowSampleSeries], ...],
+    ) -> None:
+        dialog = self._ensure_flow_plot_dialog()
+        dialog.set_series(series_items)
+        dialog.showNormal()
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _ensure_flow_plot_dialog(self) -> CalibrationHistoryFlowPlotDialog:
+        if self._flow_plot_dialog is None or not isValid(self._flow_plot_dialog):
+            self._flow_plot_dialog = CalibrationHistoryFlowPlotDialog(parent=self)
+            self._flow_plot_dialog.destroyed.connect(
+                lambda: setattr(self, "_flow_plot_dialog", None)
+            )
+        return self._flow_plot_dialog
+
+    def _ensure_flow_sample_table_dialog(
+        self,
+    ) -> CalibrationHistoryFlowSampleTableDialog:
+        if (
+            self._flow_sample_table_dialog is None
+            or not isValid(self._flow_sample_table_dialog)
+        ):
+            self._flow_sample_table_dialog = CalibrationHistoryFlowSampleTableDialog(
+                parent=self
+            )
+            self._flow_sample_table_dialog.destroyed.connect(
+                lambda: setattr(self, "_flow_sample_table_dialog", None)
+            )
+        return self._flow_sample_table_dialog
+
+    def _selected_flow_series(
+        self,
+        *,
+        limit: int | None,
+    ) -> tuple[tuple[str, ModbusFlowSampleSeries], ...]:
+        items = self._selected_flow_artifact_items()
+        if limit is not None:
+            items = items[:limit]
+        return self._flow_series_from_items(items)
+
+    def _selected_flow_artifact_items(self) -> tuple[tuple[str, str], ...]:
+        items: list[tuple[str, str]] = []
+        for entry in self._selected_entries_with_flow_samples():
+            items.extend(_history_flow_sample_artifacts(entry))
+        unique: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for artifact_id, label in items:
+            if artifact_id in seen:
+                continue
+            seen.add(artifact_id)
+            unique.append((artifact_id, label))
+        return tuple(unique)
+
+    def _flow_series_from_items(
+        self,
+        items: tuple[tuple[str, str], ...],
+    ) -> tuple[tuple[str, ModbusFlowSampleSeries], ...]:
+        series_items: list[tuple[str, ModbusFlowSampleSeries]] = []
+        errors: list[str] = []
+        for artifact_id, label in items:
+            try:
+                series = self.runtime.load_flow_sample_series(artifact_id)
+            except Exception as exc:
+                errors.append(f"{label}: {exc}")
+                continue
+            series_items.append((label, series))
+        if errors:
+            QMessageBox.warning(
+                self,
+                "Flow Samples",
+                "Some flow-sample artifacts could not be loaded:\n"
+                + "\n".join(errors[:5]),
+            )
+        return tuple(series_items)
+
+    def _selected_entries_with_flow_samples(
+        self,
+    ) -> tuple[ModbusCalibrationHistoryEntry, ...]:
+        rows = self._selected_rows()
+        if not rows and self._entries:
+            rows = (0,)
+        return tuple(
+            self._entries[row]
+            for row in rows
+            if 0 <= row < len(self._entries)
+            and _history_flow_sample_artifacts(self._entries[row])
+        )
+
+    def _selected_rows(self) -> tuple[int, ...]:
+        return tuple(
+            sorted({index.row() for index in self.historyTable.selectedIndexes()})
+        )
+
+    def _update_flow_plot_actions(self) -> None:
+        if not hasattr(self, "showFlowPlotButton") or not hasattr(
+            self,
+            "showFlowDataButton",
+        ):
+            return
+        flow_artifact_count = sum(
+            len(_history_flow_sample_artifacts(entry))
+            for entry in self._selected_entries_with_flow_samples()
+        )
+        self.showFlowPlotButton.setEnabled(flow_artifact_count >= 1)
+        self.showFlowDataButton.setEnabled(flow_artifact_count >= 1)
+        self.compareFlowPlotsButton.setEnabled(flow_artifact_count >= 2)
 
 
 class DeviceAnalysisDialog(QDialog):
@@ -3628,20 +5137,29 @@ class ModbusModuleWindow(QDialog):
         self._last_order = "ABCD"
         self._loading_profiles = False
         self._pending_map_load_error: str | None = None
+        self._pending_zero_calibration_load_error: str | None = None
         self._pending_k_factor_load_error: str | None = None
         self._pending_repeatability_load_error: str | None = None
+        self._pending_variable_sampling_load_error: str | None = None
         self._zero_snapshot_variable_names: tuple[str, ...] | None = None
+        self._saved_variable_sampling_configuration: dict[str, object] = {}
+        self._variable_sampling_variable_names: tuple[str, ...] | None = None
+        self._saved_zero_calibration_configuration: dict[str, object] = {}
         self._saved_k_factor_configuration: dict[str, object] = {}
         self._k_factor_snapshot_variable_names: tuple[str, ...] | None = None
         self._k_factor_cancel_event: Event | None = None
+        self._variable_sampling_cancel_event: Event | None = None
         self._saved_repeatability_configuration: dict[str, object] = {}
         self._repeatability_snapshot_variable_names: tuple[str, ...] | None = None
+        self._repeatability_sample_variable_names: tuple[str, ...] | None = None
+        self._repeatability_plot_layout = PLOT_LAYOUT_OVERLAY
         self._saved_device_analysis_configuration: dict[str, object] = {}
         self._repeatability_cancel_event: Event | None = None
         self._poll_timer = QTimer(self)
         self._poll_timer.setInterval(1000)
         self._poll_timer.timeout.connect(self._poll_selected_variables)
         self.connectionDialog: ModbusConnectionDialog | None = None
+        self.variableSamplingDialog: VariableSamplingDialog | None = None
         self.zeroCalibrationDialog: ZeroCalibrationDialog | None = None
         self.kFactorDialog: KFactorCalibrationDialog | None = None
         self.repeatabilityDialog: RepeatabilityTestDialog | None = None
@@ -3654,6 +5172,8 @@ class ModbusModuleWindow(QDialog):
         _fit_dialog_to_screen(self, 1040, 720, 760, 480)
         legacy_profile_count = self.runtime.delete_legacy_port_profiles()
         self._load_saved_register_map()
+        self._load_saved_variable_sampling_configuration()
+        self._load_saved_zero_calibration_configuration()
         self._load_saved_k_factor_configuration()
         self._load_saved_repeatability_configuration()
         self._build_ui()
@@ -3668,6 +5188,11 @@ class ModbusModuleWindow(QDialog):
             )
         if self._pending_map_load_error:
             self._log(f"Saved variable map ignored: {self._pending_map_load_error}")
+        if self._pending_zero_calibration_load_error:
+            self._log(
+                "Saved zero calibration configuration ignored: "
+                f"{self._pending_zero_calibration_load_error}"
+            )
         if self._pending_k_factor_load_error:
             self._log(
                 f"Saved K factor configuration ignored: {self._pending_k_factor_load_error}"
@@ -3676,6 +5201,11 @@ class ModbusModuleWindow(QDialog):
             self._log(
                 "Saved repeatability configuration ignored: "
                 f"{self._pending_repeatability_load_error}"
+            )
+        if self._pending_variable_sampling_load_error:
+            self._log(
+                "Saved variable sampling configuration ignored: "
+                f"{self._pending_variable_sampling_load_error}"
             )
 
     def _build_ui(self) -> None:
@@ -3686,7 +5216,7 @@ class ModbusModuleWindow(QDialog):
         self.menuBar = QMenuBar()
         self.menuBar.setObjectName("modbusMenuBar")
         self.operationsMenu = self.menuBar.addMenu("Operations")
-        self.sampleVariablesAction = QAction("Sample Variables", self)
+        self.sampleVariablesAction = QAction("Variable Sampling", self)
         self.sampleVariablesAction.setObjectName("modbusSampleVariablesAction")
         self.zeroCalibrationAction = QAction("Zero Cal", self)
         self.zeroCalibrationAction.setObjectName("modbusZeroCalibrationAction")
@@ -3704,6 +5234,7 @@ class ModbusModuleWindow(QDialog):
         self.allHistoryAction.setObjectName("modbusAllHistoryAction")
         self.calibrationHistoryAction = self.allHistoryAction
         for action in (
+            self.sampleVariablesAction,
             self.zeroCalibrationAction,
             self.kFactorAction,
             self.repeatabilityAction,
@@ -4051,9 +5582,20 @@ class ModbusModuleWindow(QDialog):
         if profile.register_map is not None:
             self._populate_variable_map()
         self._sync_operation_metadata()
+        self._load_saved_variable_sampling_configuration(device_id=profile.device_id)
+        self._load_saved_zero_calibration_configuration(device_id=profile.device_id)
         self._load_saved_k_factor_configuration(device_id=profile.device_id)
         self._load_saved_repeatability_configuration(device_id=profile.device_id)
         self._load_saved_device_analysis_configuration(device_id=profile.device_id)
+        if (
+            self.variableSamplingDialog is not None
+            and isValid(self.variableSamplingDialog)
+        ):
+            self._refresh_variable_sampling_registers(self.variableSamplingDialog)
+        if self.zeroCalibrationDialog is not None and isValid(self.zeroCalibrationDialog):
+            self._refresh_zero_calibration_snapshot_variables(
+                self.zeroCalibrationDialog
+            )
         if self.repeatabilityDialog is not None and isValid(self.repeatabilityDialog):
             if (
                 self.repeatabilityDialog.current_capture() is None
@@ -4343,6 +5885,157 @@ class ModbusModuleWindow(QDialog):
             return None
         return self._data_root / "config" / "register_maps" / "modbus_module_map.json"
 
+    def _load_saved_variable_sampling_configuration(
+        self,
+        *,
+        device_id: str | None = None,
+    ) -> None:
+        path = self._saved_variable_sampling_configuration_path(device_id=device_id)
+        self._saved_variable_sampling_configuration = {}
+        self._variable_sampling_variable_names = None
+        if path is None or not path.exists():
+            self._pending_variable_sampling_load_error = None
+            return
+        try:
+            settings = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(settings, dict):
+                raise ValueError("configuration root must be an object")
+        except Exception as exc:
+            self._pending_variable_sampling_load_error = str(exc)
+            return
+        self._saved_variable_sampling_configuration = settings
+        names = settings.get("variable_names")
+        if not isinstance(names, list):
+            names = settings.get("sample_variable_names")
+        if isinstance(names, list):
+            self._variable_sampling_variable_names = tuple(
+                str(name) for name in names
+            )
+        self._pending_variable_sampling_load_error = None
+
+    def _save_variable_sampling_configuration(self) -> None:
+        dialog = self._ensure_variable_sampling_dialog()
+        path = self._saved_variable_sampling_configuration_path(
+            device_id=self._operation_configuration_device_id()
+        )
+        if path is None:
+            dialog.set_error("select a device profile before saving configuration")
+            self._log(
+                "Save variable sampling configuration failed: "
+                "select a device profile first."
+            )
+            return
+        settings = dialog.capture_settings()
+        if not settings["variable_names"]:
+            dialog.set_error("select at least one variable before saving configuration")
+            self._log(
+                "Save variable sampling configuration failed: "
+                "select at least one variable."
+            )
+            return
+        self._saved_variable_sampling_configuration = dict(settings)
+        self._variable_sampling_variable_names = tuple(settings["variable_names"])
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(settings, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            dialog.set_error(str(exc))
+            self._log(f"Save variable sampling configuration failed: {exc}")
+            return
+        dialog.set_status("Configuration saved for current device")
+        self._log(f"Variable sampling configuration saved: {path}")
+
+    def _saved_variable_sampling_configuration_path(
+        self,
+        *,
+        device_id: str | None = None,
+    ) -> Path | None:
+        if self._data_root is None or not device_id:
+            return None
+        return (
+            self._data_root
+            / "config"
+            / "workflow_templates"
+            / "devices"
+            / _safe_config_name(device_id)
+            / "modbus_variable_sampling.json"
+        )
+
+    def _load_saved_zero_calibration_configuration(
+        self,
+        *,
+        device_id: str | None = None,
+    ) -> None:
+        path = self._saved_zero_calibration_configuration_path(device_id=device_id)
+        self._saved_zero_calibration_configuration = {}
+        self._zero_snapshot_variable_names = None
+        if path is None or not path.exists():
+            self._pending_zero_calibration_load_error = None
+            return
+        try:
+            settings = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(settings, dict):
+                raise ValueError("configuration root must be an object")
+        except Exception as exc:
+            self._pending_zero_calibration_load_error = str(exc)
+            return
+        self._saved_zero_calibration_configuration = settings
+        snapshot_names = settings.get("snapshot_variable_names")
+        if isinstance(snapshot_names, list):
+            self._zero_snapshot_variable_names = tuple(
+                str(name) for name in snapshot_names
+            )
+        self._pending_zero_calibration_load_error = None
+
+    def _save_zero_calibration_configuration(self) -> None:
+        dialog = self._ensure_zero_calibration_dialog()
+        path = self._saved_zero_calibration_configuration_path(
+            device_id=self._operation_configuration_device_id()
+        )
+        if path is None:
+            dialog.set_error("select a device profile before saving configuration")
+            self._log(
+                "Save zero calibration configuration failed: "
+                "select a device profile first."
+            )
+            return
+        settings = dialog.capture_settings()
+        self._saved_zero_calibration_configuration = dict(settings)
+        self._zero_snapshot_variable_names = tuple(
+            settings["snapshot_variable_names"]
+        )
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(settings, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            dialog.set_error(str(exc))
+            self._log(f"Save zero calibration configuration failed: {exc}")
+            return
+        dialog.statusLabel.setText("Configuration saved for current device")
+        self._log(f"Zero calibration configuration saved: {path}")
+
+    def _saved_zero_calibration_configuration_path(
+        self,
+        *,
+        device_id: str | None = None,
+    ) -> Path | None:
+        if self._data_root is None or not device_id:
+            return None
+        return (
+            self._data_root
+            / "config"
+            / "workflow_templates"
+            / "devices"
+            / _safe_config_name(device_id)
+            / "modbus_zero_calibration.json"
+        )
+
     def _load_saved_k_factor_configuration(
         self,
         *,
@@ -4423,6 +6116,7 @@ class ModbusModuleWindow(QDialog):
         path = self._saved_repeatability_configuration_path(device_id=device_id)
         self._saved_repeatability_configuration = {}
         self._repeatability_snapshot_variable_names = None
+        self._repeatability_sample_variable_names = None
         if path is None or not path.exists():
             self._pending_repeatability_load_error = None
             return
@@ -4433,11 +6127,21 @@ class ModbusModuleWindow(QDialog):
         except Exception as exc:
             self._pending_repeatability_load_error = str(exc)
             return
-        self._saved_repeatability_configuration = settings
         snapshot_names = settings.get("snapshot_variable_names")
+        if not isinstance(snapshot_names, list):
+            snapshot_names = settings.get("post_snapshot_variable_names")
+            if isinstance(snapshot_names, list):
+                settings["snapshot_variable_names"] = list(snapshot_names)
         if isinstance(snapshot_names, list):
             self._repeatability_snapshot_variable_names = tuple(
                 str(name) for name in snapshot_names
+            )
+        settings.pop("post_snapshot_variable_names", None)
+        self._saved_repeatability_configuration = settings
+        sample_names = settings.get("sample_variable_names")
+        if isinstance(sample_names, list):
+            self._repeatability_sample_variable_names = tuple(
+                str(name) for name in sample_names
             )
         self._pending_repeatability_load_error = None
 
@@ -4459,6 +6163,9 @@ class ModbusModuleWindow(QDialog):
         self._saved_repeatability_configuration = dict(settings)
         self._repeatability_snapshot_variable_names = tuple(
             settings["snapshot_variable_names"]
+        )
+        self._repeatability_sample_variable_names = tuple(
+            settings["sample_variable_names"]
         )
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -4687,6 +6394,8 @@ class ModbusModuleWindow(QDialog):
 
     def _disconnect(self) -> None:
         self._stop_polling()
+        if self._variable_sampling_cancel_event is not None:
+            self._variable_sampling_cancel_event.set()
         status = self.runtime.disconnect()
         self.statusValueLabel.setText(status.message)
         if self.connectionDialog is not None and isValid(self.connectionDialog):
@@ -4695,15 +6404,205 @@ class ModbusModuleWindow(QDialog):
         self._log("Disconnected")
 
     def _sample_variables(self) -> None:
-        self._run_task(
-            "Sample",
-            lambda: self.runtime.sample_variables(_sample_variable_names()),
-            self._sample_finished,
-            requires_connection=True,
+        dialog = self._ensure_variable_sampling_dialog()
+        self._load_saved_variable_sampling_configuration(
+            device_id=self._operation_configuration_device_id()
         )
+        self._refresh_variable_sampling_registers(dialog)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        if self._busy and self._variable_sampling_cancel_event is not None:
+            dialog.set_canceling()
+        else:
+            dialog.set_ready(connected=self.runtime.status.connected and not self._busy)
+
+    def _ensure_variable_sampling_dialog(self) -> VariableSamplingDialog:
+        if (
+            self.variableSamplingDialog is None
+            or not isValid(self.variableSamplingDialog)
+        ):
+            self.variableSamplingDialog = VariableSamplingDialog(parent=self)
+            self.variableSamplingDialog.startRequested.connect(
+                self._start_variable_sampling
+            )
+            self.variableSamplingDialog.stopRequested.connect(
+                self._stop_variable_sampling
+            )
+            self.variableSamplingDialog.saveConfigButton.clicked.connect(
+                self._save_variable_sampling_configuration
+            )
+            self.variableSamplingDialog.destroyed.connect(
+                lambda: setattr(self, "variableSamplingDialog", None)
+            )
+        return self.variableSamplingDialog
+
+    def _refresh_variable_sampling_registers(
+        self,
+        dialog: VariableSamplingDialog,
+    ) -> None:
+        dialog.set_registers(
+            self._sampleable_registers(),
+            selected_names=self._default_variable_sampling_names(),
+        )
+        if self._saved_variable_sampling_configuration:
+            dialog.apply_configuration(self._saved_variable_sampling_configuration)
+            self._variable_sampling_variable_names = dialog.selected_variable_names()
+
+    def _sampleable_registers(self) -> tuple[ModbusRegister, ...]:
+        return tuple(
+            register
+            for register in self.runtime.register_map.registers
+            if register.kind
+            in {
+                RegisterKind.COIL,
+                RegisterKind.DISCRETE_INPUT,
+                RegisterKind.HOLDING,
+                RegisterKind.INPUT,
+            }
+        )
+
+    def _default_variable_sampling_names(self) -> tuple[str, ...]:
+        if self._variable_sampling_variable_names:
+            available = {register.name for register in self._sampleable_registers()}
+            names = tuple(
+                name
+                for name in self._variable_sampling_variable_names
+                if name in available
+            )
+            if names:
+                return names
+        selected = self._selected_poll_variable_names()
+        if selected:
+            return selected
+        preferred = ("mass_rate", "temperature")
+        available = {register.name for register in self._sampleable_registers()}
+        names = tuple(name for name in preferred if name in available)
+        if names:
+            return names
+        return tuple(register.name for register in self._sampleable_registers()[:1])
+
+    def _start_variable_sampling(self) -> None:
+        dialog = self._ensure_variable_sampling_dialog()
+        if self._busy:
+            dialog.set_error("another Modbus operation is running")
+            return
+        if not self.runtime.status.connected:
+            dialog.set_error("connect the Modbus module first")
+            self._log("Variable sampling failed: connect the Modbus module first.")
+            return
+        variable_names = dialog.selected_variable_names()
+        if not variable_names:
+            dialog.set_error("select at least one variable")
+            return
+        self._sync_operation_metadata()
+        cancel_event = Event()
+        self._variable_sampling_cancel_event = cancel_event
+        self._variable_sampling_variable_names = variable_names
+        dialog.set_running()
+        dialog.show_live_plot(
+            variable_names=variable_names,
+            units=self._register_units(variable_names),
+            plot_layout=dialog.plot_layout(),
+        )
+
+        def emit_sample(
+            progress,
+            captured_at: datetime,
+            values: dict[str, object],
+        ) -> None:
+            progress(
+                {
+                    "kind": "variable_sampling_sample",
+                    "captured_at": captured_at,
+                    "values": values,
+                }
+            )
+
+        self._run_task(
+            "Variable sampling",
+            lambda progress: self.runtime.run_variable_sampling(
+                variable_names,
+                poll_interval_s=dialog.poll_interval_s(),
+                cancel_requested=cancel_event.is_set,
+                status_callback=progress,
+                sample_callback=lambda captured_at, values: emit_sample(
+                    progress,
+                    captured_at,
+                    values,
+                ),
+                operation_metadata=self.runtime.operation_metadata,
+                notes=dialog.notes(),
+            ),
+            self._variable_sampling_finished,
+            requires_connection=True,
+            on_progress=self._variable_sampling_progress,
+        )
+
+    def _stop_variable_sampling(self) -> None:
+        if self._variable_sampling_cancel_event is None:
+            return
+        self._variable_sampling_cancel_event.set()
+        if self.variableSamplingDialog is not None and isValid(self.variableSamplingDialog):
+            self.variableSamplingDialog.set_canceling()
+        self._log("Variable sampling stopping...")
+
+    def _variable_sampling_progress(self, message: object) -> None:
+        if isinstance(message, dict) and message.get("kind") == "variable_sampling_sample":
+            captured_at = message.get("captured_at")
+            values = message.get("values")
+            if (
+                isinstance(captured_at, datetime)
+                and isinstance(values, dict)
+                and self.variableSamplingDialog is not None
+                and isValid(self.variableSamplingDialog)
+            ):
+                self.variableSamplingDialog.add_sample(captured_at, values)
+            return
+        text = str(message)
+        if self.variableSamplingDialog is not None and isValid(self.variableSamplingDialog):
+            self.variableSamplingDialog.set_status(text)
+        self._log(f"Variable sampling: {text}")
+
+    def _variable_sampling_finished(self, result: object) -> None:
+        self._variable_sampling_cancel_event = None
+        if not isinstance(result, ModbusVariableSamplingRunResult):
+            self._log(f"Variable sampling finished: {result}")
+            return
+        if self.variableSamplingDialog is not None and isValid(self.variableSamplingDialog):
+            self.variableSamplingDialog.set_status(
+                f"Saved {result.sample_count} sample(s) to {result.run_id}."
+            )
+            self.variableSamplingDialog.set_ready(connected=self.runtime.status.connected)
+        last_point = result.samples[-1] if result.samples else None
+        if last_point is not None:
+            self._update_map_values(
+                tuple(
+                    VariableSample(
+                        sample_id=f"{result.run_id}-SAMPLE-{name}",
+                        device_id=self.runtime.status.device_id or "",
+                        variable_name=name,
+                        captured_at=last_point.captured_at,
+                        value=value,
+                        unit=result.units.get(name, ""),
+                    )
+                    for name, value in last_point.values.items()
+                )
+            )
+        self._refresh_history_dialogs()
+        self._log(
+            "Variable sampling saved "
+            f"{result.run_id} ({result.sample_count} sample(s), "
+            f"artifact={result.flow_samples_artifact_id or 'none'})."
+        )
+        for error in result.errors:
+            self._log(f"Variable sampling warning: {error}")
 
     def _zero_calibration(self) -> None:
         dialog = self._ensure_zero_calibration_dialog()
+        self._load_saved_zero_calibration_configuration(
+            device_id=self._operation_configuration_device_id()
+        )
         self._refresh_zero_calibration_snapshot_variables(dialog)
         dialog.show()
         dialog.raise_()
@@ -4746,6 +6645,9 @@ class ModbusModuleWindow(QDialog):
             self.zeroCalibrationDialog.startButton.clicked.connect(
                 self._start_zero_calibration
             )
+            self.zeroCalibrationDialog.saveConfigButton.clicked.connect(
+                self._save_zero_calibration_configuration
+            )
             self._refresh_zero_calibration_snapshot_variables(
                 self.zeroCalibrationDialog
             )
@@ -4770,6 +6672,11 @@ class ModbusModuleWindow(QDialog):
             registers,
             selected_names=self._zero_snapshot_variable_names,
         )
+        if self._saved_zero_calibration_configuration:
+            dialog.apply_configuration(self._saved_zero_calibration_configuration)
+            self._zero_snapshot_variable_names = (
+                dialog.selected_snapshot_variable_names()
+            )
 
     def _open_calibration_history(self) -> None:
         self._open_all_test_records()
@@ -5190,36 +7097,141 @@ class ModbusModuleWindow(QDialog):
         except Exception as exc:
             dialog.set_error(str(exc))
             return
+        capture_started_at = datetime.now(UTC)
+        record_flow_samples = bool(settings.get("record_flow_samples"))
+        flow_rate_parameter = str(settings["flow_rate_parameter"])
+        sample_names = tuple(settings["sample_variable_names"])
+        plot_layout = self._repeatability_plot_layout
+        if record_flow_samples:
+            selection = self._select_repeatability_trial_sample_variables(
+                dialog,
+                flow_rate_parameter=flow_rate_parameter,
+                selected_names=sample_names,
+            )
+            if selection is None:
+                dialog.set_ready(connected=self.runtime.status.connected)
+                return
+            selected_names, plot_layout = selection
+            dialog.set_sample_variable_names(selected_names)
+            sample_names = dialog.selected_sample_variable_names()
+            self._repeatability_plot_layout = plot_layout
+        self._repeatability_sample_variable_names = sample_names
         cancel_event = Event()
         self._repeatability_cancel_event = cancel_event
         dialog.set_running()
-        dialog.show_capture_progress("Acquiring data...")
+        if record_flow_samples:
+            dialog.show_flow_plot(
+                flow_parameter=flow_rate_parameter,
+                variable_names=(flow_rate_parameter, *sample_names),
+                units=self._register_units((flow_rate_parameter, *sample_names)),
+                plot_layout=plot_layout,
+            )
         run_id = dialog.current_run_id()
+
+        def emit_trial_sample(
+            progress,
+            captured_at: datetime,
+            values: dict[str, object],
+        ) -> None:
+            progress(
+                {
+                    "kind": "repeatability_flow_sample",
+                    "captured_at": captured_at,
+                    "values": values,
+                }
+            )
+
         self._run_task(
             "Repeatability",
             lambda progress: self.runtime.capture_repeatability_simple_trial(
                 run_id=run_id,
+                capture_started_at=capture_started_at,
                 flow_point=flow_point,
                 trial_index=trial_index,
                 snapshot_variable_names=snapshot_names,
-                flow_rate_parameter=str(settings["flow_rate_parameter"]),
+                sample_variable_names=sample_names,
+                flow_rate_parameter=flow_rate_parameter,
                 flow_acc_parameter=str(settings["flow_acc_parameter"]),
                 k_factor_parameter=str(settings["k_factor_parameter"]),
                 poll_interval_s=float(settings["poll_interval_s"]),
+                post_start_sample_s=float(settings["instant_flow_offset_s"]),
                 capture_snapshot=True,
                 cancel_requested=cancel_event.is_set,
                 status_callback=progress,
+                record_flow_samples=record_flow_samples,
+                sample_callback=(
+                    lambda captured_at, values: emit_trial_sample(
+                        progress,
+                        captured_at,
+                        values,
+                    )
+                    if record_flow_samples
+                    else None
+                ),
             ),
             self._repeatability_capture_finished,
             requires_connection=True,
-            on_progress=lambda message: self._repeatability_progress(str(message)),
+            on_progress=self._repeatability_progress,
         )
 
-    def _repeatability_progress(self, message: str) -> None:
+    def _select_repeatability_trial_sample_variables(
+        self,
+        dialog: RepeatabilityTestDialog,
+        *,
+        flow_rate_parameter: str,
+        selected_names: tuple[str, ...],
+    ) -> tuple[tuple[str, ...], str] | None:
+        registers = tuple(
+            register
+            for register in self.runtime.register_map.registers
+            if register.kind
+            in {
+                RegisterKind.COIL,
+                RegisterKind.DISCRETE_INPUT,
+                RegisterKind.HOLDING,
+                RegisterKind.INPUT,
+            }
+        )
+        selection = SnapshotSelectionDialog(
+            registers,
+            selected_names=selected_names,
+            required_names=(flow_rate_parameter,) if flow_rate_parameter else (),
+            title="Select This Trial Samples",
+            object_name="modbusRepeatabilityTrialSampleSelectionTable",
+            plot_layout=self._repeatability_plot_layout,
+            show_plot_layout=True,
+            parent=dialog,
+        )
+        if selection.exec() != QDialog.DialogCode.Accepted:
+            self._log("Repeatability capture canceled before trial sample selection.")
+            return None
+        return (
+            tuple(
+                name
+                for name in selection.selected_names()
+                if name != flow_rate_parameter
+            ),
+            selection.plot_layout(),
+        )
+
+    def _repeatability_progress(self, message: object) -> None:
+        if isinstance(message, dict) and message.get("kind") == "repeatability_flow_sample":
+            captured_at = message.get("captured_at")
+            values = message.get("values")
+            if (
+                isinstance(captured_at, datetime)
+                and isinstance(values, dict)
+                and self.repeatabilityDialog is not None
+                and isValid(self.repeatabilityDialog)
+            ):
+                self.repeatabilityDialog.add_flow_plot_sample(captured_at, values)
+            return
+        text = str(message)
         if self.repeatabilityDialog is not None and isValid(self.repeatabilityDialog):
-            self.repeatabilityDialog.statusLabel.setText(message)
-            self.repeatabilityDialog.update_capture_progress(message)
-        self._log(f"Repeatability: {message}")
+            self.repeatabilityDialog.statusLabel.setText(text)
+            if not _is_repeatability_snapshot_read_status(text):
+                self.repeatabilityDialog.update_capture_progress(text)
+        self._log(f"Repeatability: {text}")
 
     def _save_repeatability_trial(self) -> None:
         dialog = self._ensure_repeatability_dialog()
@@ -5581,11 +7593,15 @@ class ModbusModuleWindow(QDialog):
         dialog.set_registers(
             registers,
             selected_names=self._repeatability_snapshot_variable_names,
+            sample_selected_names=self._repeatability_sample_variable_names,
         )
         if self._saved_repeatability_configuration:
             dialog.apply_configuration(self._saved_repeatability_configuration)
             self._repeatability_snapshot_variable_names = (
                 dialog.selected_snapshot_variable_names()
+            )
+            self._repeatability_sample_variable_names = (
+                dialog.selected_sample_variable_names()
             )
 
     def _repeatability_capture_finished(self, result: object) -> None:
@@ -5890,6 +7906,15 @@ class ModbusModuleWindow(QDialog):
         self._set_map_text(row, 9, value, editable=False)
         self.variableMapTable.viewport().update()
 
+    def _register_unit(self, variable_name: str) -> str:
+        try:
+            return self.runtime.register_map.by_name(variable_name).unit or ""
+        except KeyError:
+            return ""
+
+    def _register_units(self, variable_names: tuple[str, ...]) -> dict[str, str]:
+        return {name: self._register_unit(name) for name in _unique_names(variable_names)}
+
     def _run_task(
         self,
         label: str,
@@ -6193,6 +8218,15 @@ class ModbusModuleWindow(QDialog):
             and isValid(self.zeroCalibrationDialog)
         ):
             self.zeroCalibrationDialog.set_error(message)
+        if label == "Variable sampling":
+            self._variable_sampling_cancel_event = None
+        if (
+            label == "Variable sampling"
+            and self.variableSamplingDialog is not None
+            and isValid(self.variableSamplingDialog)
+        ):
+            self.variableSamplingDialog.set_error(message)
+            self.variableSamplingDialog.set_ready(connected=self.runtime.status.connected)
         if (
             label in {"K factor", "K factor write"}
             and self.kFactorDialog is not None
@@ -6312,6 +8346,12 @@ class ModbusModuleWindow(QDialog):
             and self.repeatabilityDialog.statusLabel.text() != "Running..."
         ):
             self.repeatabilityDialog.set_ready(connected=connected and enabled)
+        if (
+            self.variableSamplingDialog is not None
+            and isValid(self.variableSamplingDialog)
+            and self._variable_sampling_cancel_event is None
+        ):
+            self.variableSamplingDialog.set_ready(connected=connected and enabled)
         self._refresh_variable_map_edit_state()
 
     def _refresh_variable_map_edit_state(self) -> None:
@@ -6576,8 +8616,9 @@ def _device_analysis_preview_metrics_from_selection(
     average_error = (max(measurement_errors) + min(measurement_errors)) / 2.0
     intermediate_k_values: list[float] = []
     for row in flow_rows:
-        adjusted_error = float(row["measurement_error_percent"]) - average_error
-        denominator = 1.0 + adjusted_error / 100.0
+        measurement_error = float(row["measurement_error_percent"])
+        adjusted_error = measurement_error - average_error
+        denominator = 1.0 + measurement_error / 100.0
         if denominator == 0:
             raise ValueError("Final K calculation produced a zero denominator.")
         row["adjusted_error_percent"] = adjusted_error
@@ -6639,6 +8680,138 @@ def _format_datetime(value: datetime | None) -> str:
     return value.astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _unique_names(names: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(name for name in names if name))
+
+
+def _normalize_plot_layout(value: object) -> str:
+    text = str(value or PLOT_LAYOUT_OVERLAY)
+    return text if text in PLOT_LAYOUTS else PLOT_LAYOUT_OVERLAY
+
+
+def _plot_layout_label(value: object) -> str:
+    layout = _normalize_plot_layout(value)
+    if layout == PLOT_LAYOUT_SEPARATE:
+        return "One plot per variable"
+    return "Overlay variables"
+
+
+def _normalize_plot_alignment(value: object) -> str:
+    text = str(value or PLOT_ALIGNMENT_FIRST_SAMPLE)
+    return text if text in PLOT_ALIGNMENTS else PLOT_ALIGNMENT_FIRST_SAMPLE
+
+
+def _plot_alignment_label(value: object) -> str:
+    alignment = _normalize_plot_alignment(value)
+    if alignment == PLOT_ALIGNMENT_PREFLOW_SAMPLE:
+        return "Pre-flow sample"
+    return "First sample"
+
+
+def _flow_alignment_timestamp(
+    series: ModbusFlowSampleSeries,
+    alignment: str,
+) -> datetime | None:
+    points = series.points
+    if not points:
+        return None
+    if _normalize_plot_alignment(alignment) != PLOT_ALIGNMENT_PREFLOW_SAMPLE:
+        return points[0].captured_at
+    flow_values = series.values_for(series.flow_rate_parameter)
+    previous_timestamp = points[0].captured_at
+    for point, flow_value in zip(points, flow_values):
+        if flow_value is not None and abs(flow_value) > 0.0:
+            return previous_timestamp
+        previous_timestamp = point.captured_at
+    return points[0].captured_at
+
+
+def _variable_label(name: str, unit: str = "") -> str:
+    return f"{name} ({unit})" if unit else name
+
+
+def _object_name_token(value: str) -> str:
+    return "".join(character if character.isalnum() else "_" for character in value)
+
+
+def _optional_float(value: object) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _format_plot_point_data(data: dict[str, object]) -> str:
+    label = str(data.get("label") or "")
+    variable = str(data.get("variable") or "")
+    unit = str(data.get("unit") or "")
+    value = data.get("value")
+    elapsed = _optional_float(data.get("elapsed_s"))
+    sample_index = data.get("sample_index")
+    captured_at = data.get("captured_at")
+    parts: list[str] = []
+    if label:
+        parts.append(label)
+    if variable:
+        parts.append(variable)
+    if sample_index not in (None, ""):
+        parts.append(f"sample #{sample_index}")
+    if elapsed is not None:
+        parts.append(f"t={elapsed:.6g} s")
+    if isinstance(captured_at, datetime):
+        parts.append(f"time={_format_datetime(captured_at)}")
+    if value not in (None, ""):
+        suffix = f" {unit}" if unit else ""
+        parts.append(f"value={_format_value(value)}{suffix}")
+    return " | ".join(parts) if parts else "none"
+
+
+def _is_repeatability_snapshot_read_status(message: str) -> bool:
+    return message in {
+        "Reading selected variables before this trial...",
+        "Selected variables read. Start this trial when the device flow is ready.",
+    }
+
+
+def _plot_colors() -> tuple[str, ...]:
+    return (
+        "#1f77b4",
+        "#d62728",
+        "#2ca02c",
+        "#9467bd",
+        "#ff7f0e",
+        "#17becf",
+        "#8c564b",
+        "#e377c2",
+        "#7f7f7f",
+    )
+
+
+def _series_variable_names(
+    series_items: tuple[tuple[str, ModbusFlowSampleSeries], ...],
+) -> tuple[str, ...]:
+    names: list[str] = []
+    for _label, series in series_items:
+        if series.variable_names:
+            names.extend(series.variable_names)
+        elif series.flow_rate_parameter:
+            names.append(series.flow_rate_parameter)
+    return _unique_names(tuple(names))
+
+
+def _series_units(
+    series_items: tuple[tuple[str, ModbusFlowSampleSeries], ...],
+) -> dict[str, str]:
+    units: dict[str, str] = {}
+    for _label, series in series_items:
+        units.update(series.units)
+        if series.flow_rate_parameter and series.unit:
+            units.setdefault(series.flow_rate_parameter, series.unit)
+    return units
+
+
 def _qt_datetime_from_datetime(value: datetime) -> QDateTime:
     if value.tzinfo is None:
         value = value.replace(tzinfo=UTC)
@@ -6679,6 +8852,156 @@ def _format_history_value(name: str, value: object) -> str:
     return _format_value(value)
 
 
+def _format_history_value_with_unit(
+    name: str,
+    value: object,
+    metrics: dict[str, object],
+) -> str:
+    if _history_metric_is_variable_list(name):
+        variable_names = _format_history_variable_names(value, metrics)
+        if variable_names:
+            return variable_names
+    text = _format_history_value(name, value)
+    unit = _history_metric_unit(name, metrics)
+    if not text or not unit or _history_value_already_has_unit(text, unit):
+        return text
+    if _history_metric_is_variable_selector(name):
+        return f"{text} ({unit})"
+    return f"{text} {unit}"
+
+
+def _history_metric_unit(name: str, metrics: dict[str, object]) -> str:
+    lower = name.lower()
+    if lower.endswith("_percent") or lower in {
+        "percent_error",
+        "average_error",
+        "average_error_percent",
+        "mean_percent_error",
+        "max_abs_percent_error",
+        "repeatability_stddev_percent",
+        "max_repeatability_stddev_percent",
+        "adjusted_error_percent",
+        "measurement_error_percent",
+    }:
+        return ""
+    if lower.endswith("_count") or lower in {
+        "trial_count",
+        "selected_trial_count",
+        "selected_flow_point_count",
+        "trial_index",
+        "flow_sample_count",
+    }:
+        return ""
+    if lower.endswith("_id") or lower in {
+        "attempt_id",
+        "session_id",
+        "run_id",
+        "write_status",
+        "write_verified",
+        "flow_rate_source",
+        "completed",
+    }:
+        return ""
+    if lower.endswith("_s"):
+        return "s"
+    unit_by_variable = _history_register_units(metrics)
+    explicit_variable = str(metrics.get(name) or "")
+    if explicit_variable in unit_by_variable:
+        return unit_by_variable[explicit_variable]
+    variable_name = _history_metric_variable_name(name, metrics)
+    if variable_name:
+        return unit_by_variable.get(variable_name, "")
+    if name in unit_by_variable:
+        return unit_by_variable[name]
+    return ""
+
+
+def _history_metric_variable_name(
+    name: str,
+    metrics: dict[str, object],
+) -> str:
+    lower = name.lower()
+    if _is_k_metric_name(name):
+        return str(metrics.get("k_factor_parameter") or "k_factor")
+    if lower in {
+        "flow_point",
+        "instant_flow",
+        "mean_flow",
+        "v1",
+        "v_mean",
+    }:
+        return str(metrics.get("flow_rate_parameter") or "mass_rate")
+    if lower in {
+        "mass_acc_before",
+        "mass_acc_after",
+        "measured_mass_delta",
+        "standard_mass",
+    }:
+        return str(metrics.get("flow_acc_parameter") or "mass_acc")
+    if lower.endswith("_before") or lower.endswith("_after") or lower.endswith("_change"):
+        return name.rsplit("_", 1)[0]
+    return name
+
+
+def _history_metric_is_variable_selector(name: str) -> bool:
+    return name.lower() in {
+        "flow_rate_parameter",
+        "flow_acc_parameter",
+        "k_factor_parameter",
+        "zero_offset_parameter",
+    }
+
+
+def _history_metric_is_variable_list(name: str) -> bool:
+    lower = name.lower()
+    return lower in {
+        "trial_sample_variable_names",
+        "sample_variable_names",
+        "snapshot_variable_names",
+    } or lower.endswith("_variable_names")
+
+
+def _format_history_variable_names(
+    value: object,
+    metrics: dict[str, object],
+) -> str:
+    if isinstance(value, str):
+        names = [item.strip() for item in value.split(",") if item.strip()]
+    elif isinstance(value, (list, tuple)):
+        names = [str(item).strip() for item in value if str(item).strip()]
+    else:
+        return ""
+    units = _history_register_units(metrics)
+    return ", ".join(
+        f"{name} ({units[name]})" if units.get(name) else name for name in names
+    )
+
+
+def _history_register_units(metrics: dict[str, object]) -> dict[str, str]:
+    snapshot = metrics.get("register_map_snapshot")
+    units: dict[str, str] = {}
+    if isinstance(snapshot, dict):
+        registers = snapshot.get("registers")
+        if isinstance(registers, list):
+            for register in registers:
+                if not isinstance(register, dict):
+                    continue
+                name = str(register.get("name") or "")
+                unit = str(register.get("unit") or "")
+                if name and unit:
+                    units[name] = unit
+    flow_units = metrics.get("units")
+    if isinstance(flow_units, dict):
+        for name, unit in flow_units.items():
+            if str(name) and str(unit):
+                units.setdefault(str(name), str(unit))
+    return units
+
+
+def _history_value_already_has_unit(text: str, unit: str) -> bool:
+    return text == unit or text.endswith(f" {unit}") or text.endswith(f"({unit})")
+
+
 def _is_k_metric_name(name: str) -> bool:
     lower = name.lower()
     return (
@@ -6706,6 +9029,7 @@ def _operation_label(value: str) -> str:
     labels = {
         "zero_calibration": "Zero Calibration",
         "k_factor_calibration": "K Factor",
+        "modbus_variable_sampling": "Variable Sampling",
         "manual_error_repeatability": "Repeatability",
         "manual_error_repeatability_final_k": "Repeatability Final K",
         "manual_error_repeatability_trial": "Repeatability Trial",
@@ -6716,7 +9040,7 @@ def _operation_label(value: str) -> str:
 def _metric_value(metrics: dict[str, object], key: str) -> str:
     if key not in metrics:
         return ""
-    return _format_history_value(key, metrics[key])
+    return _format_history_value_with_unit(key, metrics[key], metrics)
 
 
 def _metric_pair(metrics: dict[str, object], before_key: str, after_key: str) -> str:
@@ -6747,6 +9071,19 @@ def _history_parameter_summary(entry: ModbusCalibrationHistoryEntry) -> str:
             values.append(f"write={_metric_value(metrics, 'write_status')}")
         if "write_verified" in metrics:
             values.append(f"verified={_metric_value(metrics, 'write_verified')}")
+        return ", ".join(values)
+    if entry.operation == "modbus_variable_sampling":
+        values = []
+        sample_count = _metric_value(metrics, "sample_count")
+        if sample_count:
+            values.append(f"samples={sample_count}")
+        names = metrics.get("variable_names")
+        if isinstance(names, list):
+            label = ", ".join(str(name) for name in names[:3])
+            if label:
+                if len(names) > 3:
+                    label += ", ..."
+                values.append(f"variables={label}")
         return ", ".join(values)
     if entry.operation == "k_factor_calibration_capture":
         values = []
@@ -6806,6 +9143,56 @@ def _history_parameter_summary(entry: ModbusCalibrationHistoryEntry) -> str:
     return ""
 
 
+def _history_flow_sample_artifacts(
+    entry: ModbusCalibrationHistoryEntry,
+) -> tuple[tuple[str, str], ...]:
+    values: list[tuple[str, str]] = []
+    artifact_id = entry.metrics.get("flow_samples_artifact_id")
+    if isinstance(artifact_id, str) and artifact_id.strip():
+        values.append((artifact_id.strip(), _history_flow_sample_label(entry, None)))
+    trials = entry.metrics.get("trials")
+    if isinstance(trials, list):
+        for trial in trials:
+            if not isinstance(trial, dict):
+                continue
+            trial_artifact_id = trial.get("flow_samples_artifact_id")
+            if isinstance(trial_artifact_id, str) and trial_artifact_id.strip():
+                values.append(
+                    (
+                        trial_artifact_id.strip(),
+                        _history_flow_sample_label(entry, trial),
+                    )
+                )
+    unique: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for artifact_id, label in values:
+        if artifact_id in seen:
+            continue
+        seen.add(artifact_id)
+        unique.append((artifact_id, label))
+    return tuple(unique)
+
+
+def _history_flow_sample_label(
+    entry: ModbusCalibrationHistoryEntry,
+    trial: dict[str, object] | None,
+) -> str:
+    if trial is None:
+        flow_point = entry.metrics.get("flow_point")
+        trial_index = entry.metrics.get("trial_index")
+    else:
+        flow_point = trial.get("flow_point")
+        trial_index = trial.get("trial_index")
+    values: list[str] = []
+    if flow_point not in (None, ""):
+        values.append(f"flow {_format_value(flow_point)}")
+    if trial_index not in (None, ""):
+        values.append(f"trial {_format_value(trial_index)}")
+    if not values:
+        values.append(_operation_label(entry.operation))
+    return " ".join(values)
+
+
 def _history_detail_text(entry: ModbusCalibrationHistoryEntry) -> str:
     notes = _history_entry_notes(entry)
     lines = [
@@ -6835,8 +9222,20 @@ def _history_detail_text(entry: ModbusCalibrationHistoryEntry) -> str:
                 "",
                 "Pre-calibration Snapshot",
                 *(
-                    f"{name}: {_format_value(value)}"
+                    f"{name}: {_format_history_value_with_unit(name, value, entry.metrics)}"
                     for name, value in snapshot.items()
+                ),
+            )
+        )
+    post_snapshot = entry.metrics.get("post_snapshot")
+    if isinstance(post_snapshot, dict) and post_snapshot:
+        lines.extend(
+            (
+                "",
+                "Post-test Snapshot",
+                *(
+                    f"{name}: {_format_history_value_with_unit(name, value, entry.metrics)}"
+                    for name, value in post_snapshot.items()
                 ),
             )
         )
@@ -6894,12 +9293,18 @@ def _history_result_lines(metrics: dict[str, object]) -> list[str]:
         ("corrected_k_factor", "corrected_k_factor"),
         ("measured_mass_delta", "measured_mass_delta"),
         ("flow_rate_source", "flow_rate_source"),
+        ("poll_interval_s", "poll_interval_s"),
+        ("sample_count", "sample_count"),
+        ("sample_variable_names", "sample_variable_names"),
         ("original_k_factor", "original_k_factor"),
         ("average_error", "average_error"),
         ("new_k_factor", "new_k_factor"),
         ("delta_k_factor", "delta_k_factor"),
         ("selected_trial_count", "selected_trial_count"),
         ("trial_count", "trial_count"),
+        ("flow_sample_count", "flow_sample_count"),
+        ("flow_samples_artifact_id", "flow_samples_artifact_id"),
+        ("trial_sample_variable_names", "trial_sample_variable_names"),
         ("mean_percent_error", "mean_percent_error"),
         ("max_abs_percent_error", "max_abs_percent_error"),
         (
@@ -6910,12 +9315,25 @@ def _history_result_lines(metrics: dict[str, object]) -> list[str]:
         value = _metric_value(metrics, key)
         if value:
             rows.append(f"{label}: {value}")
+    if metrics.get("new_k_factor") is not None and isinstance(
+        metrics.get("flow_points"),
+        list,
+    ):
+        rows.append(
+            "new_k_formula: intermediate_k = original_k / "
+            "(1 + measurement_error_percent / 100); "
+            "new_k = (max(intermediate_k_values) + min(intermediate_k_values)) / 2"
+        )
     flow_points = metrics.get("flow_points")
     if isinstance(flow_points, list):
         for point in flow_points:
             if not isinstance(point, dict):
                 continue
-            flow_point = _format_value(point.get("flow_point", ""))
+            flow_point = _format_history_value_with_unit(
+                "flow_point",
+                point.get("flow_point", ""),
+                metrics,
+            )
             stddev = _format_value(point.get("repeatability_stddev_percent", ""))
             trial_errors = point.get("trial_errors", point.get("trial_errors_percent"))
             values = [
@@ -6926,7 +9344,11 @@ def _history_result_lines(metrics: dict[str, object]) -> list[str]:
                 ("adjusted_error_percent", "adjusted_error_percent"),
                 ("intermediate_k_factor", "intermediate_k_factor"),
             ):
-                point_value = _format_history_value(key, point.get(key, ""))
+                point_value = _format_history_value_with_unit(
+                    key,
+                    point.get(key, ""),
+                    metrics,
+                )
                 if point_value:
                     values.append(f"{label}={point_value}")
             rows.append(
@@ -6942,17 +9364,54 @@ def _history_result_lines(metrics: dict[str, object]) -> list[str]:
         for trial in trials:
             if not isinstance(trial, dict):
                 continue
-            flow_point = _format_value(trial.get("flow_point", ""))
+            flow_point = _format_history_value_with_unit(
+                "flow_point",
+                trial.get("flow_point", ""),
+                metrics,
+            )
             trial_index = _format_value(trial.get("trial_index", ""))
+            measured_mass_delta = _format_history_value_with_unit(
+                "measured_mass_delta",
+                trial.get("measured_mass_delta", ""),
+                metrics,
+            )
+            instant_flow = _format_history_value_with_unit(
+                "instant_flow",
+                trial.get("instant_flow", ""),
+                metrics,
+            )
+            mean_flow = _format_history_value_with_unit(
+                "mean_flow",
+                trial.get("mean_flow", ""),
+                metrics,
+            )
+            standard_mass = _format_history_value_with_unit(
+                "standard_mass",
+                trial.get("standard_mass", ""),
+                metrics,
+            )
+            sample_variables = _format_history_value_with_unit(
+                "trial_sample_variable_names",
+                trial.get("trial_sample_variable_names", ""),
+                metrics,
+            )
             rows.append(
                 "trial "
                 f"{flow_point}/{trial_index}: "
-                f"delta_m={_format_value(trial.get('measured_mass_delta', ''))}, "
-                f"v1={_format_value(trial.get('instant_flow', ''))}, "
-                f"v_mean={_format_value(trial.get('mean_flow', ''))}, "
+                "delta_m="
+                f"{measured_mass_delta}, "
+                "v1="
+                f"{instant_flow}, "
+                "v_mean="
+                f"{mean_flow}, "
                 f"source={_format_value(trial.get('flow_rate_source', ''))}, "
-                f"standard_mass={_format_value(trial.get('standard_mass', ''))}, "
-                f"error={_format_value(trial.get('percent_error', ''))}%"
+                "standard_mass="
+                f"{standard_mass}, "
+                f"error={_format_value(trial.get('percent_error', ''))}%, "
+                f"flow_samples={_format_value(trial.get('flow_sample_count', ''))}, "
+                f"sample_variables={sample_variables}, "
+                "flow_samples_artifact="
+                f"{_format_value(trial.get('flow_samples_artifact_id', ''))}"
             )
     return rows
 
@@ -6981,7 +9440,12 @@ def _history_extra_metric_lines(metrics: dict[str, object]) -> list[str]:
         "max_repeatability_stddev_percent",
         "flow_points",
         "trials",
+        "flow_samples_artifact_id",
+        "flow_sample_count",
+        "trial_sample_variable_names",
         "pre_snapshot",
+        "post_snapshot",
+        "register_map_snapshot",
         "device_model",
         "tube_model",
         "transmitter_model",
@@ -6990,9 +9454,14 @@ def _history_extra_metric_lines(metrics: dict[str, object]) -> list[str]:
     }
     rows: list[str] = []
     for name, value in _flatten_metrics(metrics):
-        if name in handled or name.startswith("pre_snapshot."):
+        if (
+            name in handled
+            or name.startswith("pre_snapshot.")
+            or name.startswith("post_snapshot.")
+            or name.startswith("register_map_snapshot.")
+        ):
             continue
-        rows.append(f"{name}: {_format_history_value(name, value)}")
+        rows.append(f"{name}: {_format_history_value_with_unit(name, value, metrics)}")
     return rows
 
 

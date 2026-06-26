@@ -13,7 +13,7 @@ T = TypeVar("T")
 class WorkerSignals(QObject):
     """Signals emitted by a background workflow task."""
 
-    progress = Signal(str)
+    progress = Signal(object)
     finished = Signal(object)
     failed = Signal(str)
 

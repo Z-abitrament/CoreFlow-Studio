@@ -136,6 +136,9 @@ class FlowSegmentCaptureConfig:
     cancel_message: str = "Flow segment capture canceled."
     cancel_requested: Callable[[], bool] | None = None
     flow_rate_source: str = "device"
+    sample_callback: Callable[[datetime, float], None] | None = None
+    sample_variables: tuple[str, ...] = ()
+    multi_sample_callback: Callable[[datetime, dict[str, object]], None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -858,12 +861,15 @@ def capture_flow_segment(
     poll_count = 0
     start_flow = 0.0
     started_at: datetime | None = None
+    segment_samples: list[tuple[datetime, float]] = []
     for _ in range(config.max_wait_start_polls):
         _raise_if_flow_segment_canceled(config)
-        start_flow = _read_float_parameter(device, config.flow_rate_parameter)
+        captured_at, values = _read_flow_segment_sample(device, config)
+        start_flow = float(values[config.flow_rate_parameter])
+        _emit_flow_sample(config, captured_at, values)
         poll_count += 1
         if abs(start_flow) > config.nonzero_threshold:
-            started_at = datetime.now(UTC)
+            started_at = captured_at
             break
         _sleep_flow_segment(config.poll_interval_s, config)
     if started_at is None:
@@ -871,27 +877,33 @@ def capture_flow_segment(
             f"Flow segment did not start on {config.flow_rate_parameter}."
         )
 
-    if config.post_start_sample_s:
-        _sleep_flow_segment(config.post_start_sample_s, config)
-    _raise_if_flow_segment_canceled(config)
-    instant_flow = _read_float_parameter(device, config.flow_rate_parameter)
-    poll_count += 1
-    instant_flow_at = datetime.now(UTC)
-
-    stop_flow = instant_flow
+    segment_samples.append((started_at, start_flow))
+    instant_flow = start_flow
+    instant_flow_at = started_at
+    stop_flow = start_flow
     stopped = False
     for _ in range(config.max_wait_stop_polls):
         _raise_if_flow_segment_canceled(config)
-        stop_flow = _read_float_parameter(device, config.flow_rate_parameter)
+        _sleep_flow_segment(config.poll_interval_s, config)
+        captured_at, values = _read_flow_segment_sample(device, config)
+        stop_flow = float(values[config.flow_rate_parameter])
+        _emit_flow_sample(config, captured_at, values)
         poll_count += 1
+        segment_samples.append((captured_at, stop_flow))
         if abs(stop_flow) <= config.nonzero_threshold:
             stopped = True
             break
-        _sleep_flow_segment(config.poll_interval_s, config)
     if not stopped:
         raise TimeoutError(
             f"Flow segment did not stop on {config.flow_rate_parameter}."
         )
+
+    instant_flow_at, instant_flow = _select_instant_flow_sample(
+        segment_samples,
+        started_at=started_at,
+        offset_s=config.post_start_sample_s,
+        nonzero_threshold=config.nonzero_threshold,
+    )
 
     if config.post_stop_delay_s:
         _sleep_flow_segment(config.post_stop_delay_s, config)
@@ -910,9 +922,68 @@ def capture_flow_segment(
     )
 
 
+def _select_instant_flow_sample(
+    samples: list[tuple[datetime, float]],
+    *,
+    started_at: datetime,
+    offset_s: float,
+    nonzero_threshold: float,
+) -> tuple[datetime, float]:
+    if not samples:
+        raise ValueError("Flow segment has no samples.")
+    nonzero_samples = [
+        sample for sample in samples if abs(sample[1]) > nonzero_threshold
+    ]
+    candidates = nonzero_samples or samples
+    target_at = started_at.timestamp() + offset_s
+    for sample in candidates:
+        if sample[0].timestamp() >= target_at:
+            return sample
+    return candidates[-1]
+
+
 def _raise_if_flow_segment_canceled(config: FlowSegmentCaptureConfig) -> None:
     if config.cancel_requested is not None and config.cancel_requested():
         raise RuntimeError(config.cancel_message)
+
+
+def _read_flow_segment_sample(
+    device: FlowmeterDevice,
+    config: FlowSegmentCaptureConfig,
+) -> tuple[datetime, dict[str, object]]:
+    variable_names = _unique_names(
+        (config.flow_rate_parameter, *config.sample_variables)
+    )
+    if len(variable_names) <= 1:
+        captured_at = datetime.now(UTC)
+        return captured_at, {
+            config.flow_rate_parameter: _read_float_parameter(
+                device,
+                config.flow_rate_parameter,
+            )
+        }
+    parameters = _read_named_configuration(device, variable_names, merge_adjacent=True)
+    captured_at = datetime.now(UTC)
+    values: dict[str, object] = {
+        parameter.name: parameter.value
+        for parameter in parameters
+    }
+    if config.flow_rate_parameter not in values:
+        raise ValueError(f"Missing required parameter: {config.flow_rate_parameter}")
+    values[config.flow_rate_parameter] = float(values[config.flow_rate_parameter])
+    return captured_at, values
+
+
+def _emit_flow_sample(
+    config: FlowSegmentCaptureConfig,
+    captured_at: datetime,
+    values: dict[str, object],
+) -> None:
+    value = float(values[config.flow_rate_parameter])
+    if config.sample_callback is not None:
+        config.sample_callback(captured_at, value)
+    if config.multi_sample_callback is not None:
+        config.multi_sample_callback(captured_at, dict(values))
 
 
 def _sleep_flow_segment(seconds: float, config: FlowSegmentCaptureConfig) -> None:
@@ -1013,10 +1084,15 @@ def _pre_calibration_snapshot(
 def _read_named_configuration(
     device: FlowmeterDevice,
     names: tuple[str, ...],
+    *,
+    merge_adjacent: bool = False,
 ) -> tuple[ConfigurationParameter, ...]:
     reader = getattr(device, "read_configuration_parameters", None)
     if callable(reader):
-        return reader(names)
+        try:
+            return reader(names, merge_adjacent=merge_adjacent)
+        except TypeError:
+            return reader(names)
     parameters = device.read_configuration()
     allowed = set(names)
     return tuple(parameter for parameter in parameters if parameter.name in allowed)
@@ -1034,6 +1110,10 @@ def _parameter_value(
 
 def _read_float_parameter(device: FlowmeterDevice, name: str) -> float:
     return float(_parameter_value(_read_named_configuration(device, (name,)), name))
+
+
+def _unique_names(names: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(name for name in names if name))
 
 
 def _json_metric_value(value: object) -> object:

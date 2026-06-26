@@ -28,6 +28,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print packaged-build version metadata and exit.",
     )
     parser.add_argument(
+        "--make-update-package",
+        type=Path,
+        default=None,
+        help="Create a full update zip and latest.json from a packaged dist folder.",
+    )
+    parser.add_argument(
+        "--update-output-dir",
+        type=Path,
+        default=None,
+        help="Output directory for --make-update-package.",
+    )
+    parser.add_argument(
+        "--update-base-url",
+        default="",
+        help="Base GitHub Release asset URL for generated update manifests.",
+    )
+    parser.add_argument(
         "--ui",
         action="store_true",
         help="Launch the Qt desktop UI.",
@@ -179,6 +196,12 @@ def main(argv: list[str] | None = None) -> int:
             f"CoreFlow Studio {info.version} "
             f"commit={info.commit} channel={info.build_channel}"
         )
+    elif args.make_update_package is not None:
+        return make_update_package_cli(
+            args.make_update_package,
+            output_dir=args.update_output_dir,
+            base_url=args.update_base_url,
+        )
     elif args.write_register_map_template is not None:
         from coreflow.hardware import (
             build_placeholder_register_map,
@@ -224,6 +247,7 @@ def should_launch_packaged_ui_by_default(args: argparse.Namespace) -> bool:
         (
             args.version,
             args.build_info,
+            args.make_update_package is not None,
             args.simulator_smoke,
             args.write_register_map_template is not None,
             args.write_replay_template is not None,
@@ -296,6 +320,28 @@ def write_startup_exception(
         if not formatted_traceback.endswith("\n"):
             handle.write("\n")
     return log_path
+
+
+def make_update_package_cli(
+    dist_dir: Path,
+    *,
+    output_dir: Path | None,
+    base_url: str,
+) -> int:
+    from coreflow.build_info import current_build_info
+    from coreflow.app.updates import create_full_update_package
+
+    info = current_build_info()
+    resolved_output_dir = output_dir or dist_dir.parent / "updates"
+    zip_path, manifest_path = create_full_update_package(
+        dist_dir=dist_dir,
+        output_dir=resolved_output_dir,
+        version=info.version,
+        base_url=base_url,
+    )
+    print(f"Wrote update package: {zip_path}")
+    print(f"Wrote update manifest: {manifest_path}")
+    return 0
 
 
 def startup_log_path(data_root: Path | None = None) -> Path:
