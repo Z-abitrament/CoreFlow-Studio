@@ -94,6 +94,12 @@ flowchart TD
     K4 -->|否| K5[保存 calculation attempt]
     K4 -->|是| K6[受保护写入、读回和 audit record]
 
+    G --> VS[Variable Sampling]
+    VS --> VS1[操作者选择变量、轮询间隔、绘图布局和备注]
+    VS1 --> VS2[轮询所选变量直到 Stop]
+    VS2 --> VS3[更新实时曲线和主变量表数值]
+    VS3 --> VS4[保存变量采样 CSV artifact 和测试记录]
+
     G --> R[Error and repeatability trial]
     R --> R1[捕获一个流量段]
     R1 --> R2[操作者输入 standard mass 和备注]
@@ -104,6 +110,7 @@ flowchart TD
     R4 -->|否| R5[保存 summary run、analysis 和 attempt]
 
     Z4 --> T[Test Records]
+    VS4 --> T
     K5 --> T
     K6 --> T
     R3 --> T
@@ -119,7 +126,21 @@ flowchart TD
 
 ## 变量读取与轮询
 
-原先的 `Sample Variables` 菜单操作不再暴露给操作者。操作者仍然可以使用每一行的 `Read` 按钮读取单个变量，也可以用 `Start Polling` 轮询勾选的变量。
+操作者仍然可以使用每一行的 `Read` 按钮读取单个变量，也可以用 `Start Polling` 轮询勾选的变量并刷新主表。`Operations > Variable Sampling` 会打开一个专门的操作，用于轮询用户指定的变量、实时画图并记录。
+
+Variable Sampling 操作允许操作者选择任意已配置 Modbus 变量、轮询间隔、绘图布局和操作备注。`Save Config` 会把当前选择的实时变量、轮询间隔和绘图布局保存到当前设备档案，下次打开同一设备时自动恢复；它不单独保存采样数据。点击 `Start` 后会打开独立的非模态实时 time-value 图，按设置轮询所选变量直到操作者点击 `Stop`，并用最后保存的样本刷新主变量表的 `Value` 列。每个采样周期保存为宽表 CSV raw artifact 的一行：
+
+```text
+captured_at,elapsed_s,sample_index,<selected variable columns...>
+```
+
+采样数据在操作停止或达到最大样本数后自动保存，不需要额外点击保存。保存的 artifact 使用 `curve_type=variable_samples`，对寄存器表中带单位的变量记录单位，并通过 `flow_samples_artifact_id` 引用，因此 Test Records 里的 `View Flow Plot`、`View Flow Data` 和 `Compare Flow Plots` 可以复用误差和重复性测试样本的多变量曲线/表格查看器。
+
+测试记录 operation name：
+
+```text
+modbus_variable_sampling
+```
 
 工作流操作仍会在内部读取配置变量，并把与该操作相关的原始 Modbus 轮询曲线保存为 artifact。
 
@@ -164,7 +185,7 @@ zero_calibration
 1. 捕获可选的 pre-calibration snapshot variables。
 2. 读取初始 mass accumulator 和当前 K factor。
 3. 等待非零流量段开始。
-4. 在配置的 post-start sample delay 之后记录 instant-flow sample。
+4. 按配置的 instant-flow offset，从已经采到的实时流量样点中选取 instant-flow sample。
 5. 等待流量回到零。
 6. 在配置的 post-stop delay 之后读取最终 mass accumulator。
 
@@ -189,7 +210,7 @@ k_factor_calibration
 
 `Repeatability` 会打开独立弹窗。主操作弹窗只保留每个 trial 需要输入的 `Standard Mass` 和计算控制。`Standard Mass` 输入框不显示上下箭头，后缀显示 `g`，其数值作为该 trial 的标准称质量参与误差计算。
 
-变量、模式、目标流量点、轮询间隔、是否保存测试记录，以及 pre-test snapshot 选择，都在第一次 trial 之前通过 `Configuration...` 弹窗编辑。一旦某个 trial 被捕获，该次操作的这些 operation-level 设置会锁定。
+变量、模式、目标流量点、轮询间隔、instant-flow offset、是否保存测试记录、是否记录所有流量采样点、默认 trial 采样变量，以及前/后 trial 共用的一套 snapshot 选择，都在第一次 trial 之前通过 `Configuration...` 弹窗编辑。一旦某个 trial 被捕获，该次操作的这些 operation-level 设置会锁定。
 
 已实现模式：
 
@@ -200,22 +221,27 @@ Advanced mode 预留。
 
 保存的 repeatability 配置绑定到当前选中的设备档案 `Device ID`。没有全局 repeatability 配置兜底。选择另一个设备档案会加载该设备自己的 repeatability 配置；如果当前操作已经捕获 trial，则保持该操作已锁定的配置。
 
-每个 trial 捕获一个流量段，使用已选择的 flow-rate 和 flow-accumulator 变量。每次 trial 开始时，运行时会读取操作者选择的 pre-trial 变量以及配置的 K Factor 变量，提示操作者所选变量已经读取，然后等待非零流量段。点击 `Capture Trial` 后，Repeatability 操作弹窗会打开独立进度提示，显示正在获取数据；捕获完成后显示完成，2 秒后自动关闭，也可由操作者手动关闭。运行时记录：
+每个 trial 捕获一个流量段，使用已选择的 flow-rate 和 flow-accumulator 变量。每次 trial 开始时，运行时会读取操作者选择的 snapshot 变量以及配置的 K Factor 变量，并在操作状态中更新当前进度，然后等待非零流量段；这个预读取过程不再弹出读取完成提示。如果启用记录所有流量采样点，点击 `Capture Trial` 后会先让操作者确认本次 trial 的采样/绘图变量，并选择实时图是把变量叠加在同一张图里，还是每个变量单独一张图；确认后会打开独立的非模态时间-数值曲线弹窗，随已采集的 trial 样点按所选布局实时更新，且不阻塞 Repeatability 操作弹窗。flow-rate 变量始终采集，因为它用于判断流量段起停；操作者可为本次 trial 增减要同步采集和显示的额外变量。每个采样周期内，运行时会通过配置的读取路径读取 flow-rate 和额外变量，设备适配器支持时会合并相邻寄存器读取；如果所选变量读取耗时超过配置的轮询间隔，下一轮会立即开始，不丢弃已经采到的样点。流量开始后不会为了 `v1` 额外暂停轮询；运行时会按配置的 instant-flow offset，从已采到的实时样点中选择 `v1`，如果流量段短于该 offset，则使用最后一个非零样点。同一批样点会在 capture 完成时写入宽表 CSV raw artifact，trial 历史会保存该 sample artifact ID、sample count 和采样变量名。流量段和结束累积量读取完成后，运行时会用同一套 snapshot 变量再读取一次，作为 post-trial snapshot。运行时记录：
 
 - target flow point
 - trial index
 - pre-trial selected-variable snapshot 和 snapshot timestamp
+- post-trial selected-variable snapshot 和 snapshot timestamp
 - configured K Factor variable name
 - 流量段开始前自动读取的 original K factor value
 - mass accumulator before/after
 - measured mass delta
 - 操作者输入的 standard mass
-- 配置的 post-start sample delay 后的 instant flow
+- 按配置 instant-flow offset 从实时样点中选取的 instant flow
 - 捕获流量段的 mean flow
 - percent error
+- capture-click timestamp
 - flow segment timestamps：start、instant sample、end
 - trial status，目前默认为 `accepted`
 - raw Modbus polling artifact ID
+- 启用所有流量采样点记录时的 trial sample CSV artifact ID、sample count 和采样变量名
+
+每个 trial 在测试记录表中的时间是操作者点击 `Capture Trial` 的时刻；不是流量段 start、instant sample、end，也不是后续点击 `Calculate Trial Error` 计算并保存误差的时刻。误差计算/保存完成时间会作为 `calculated_at` 保留在详情指标中。
 
 trial percent error 计算为：
 
@@ -227,7 +253,7 @@ e = (measured_mass_delta - standard_mass) / standard_mass * 100%
 
 - `measured_mass_delta = mass_acc_after - mass_acc_before`
 - `standard_mass` 是操作者为该 trial 输入的标准称质量。
-- `v1` 是配置的 post-start sample delay 后捕获的瞬时流量样本。
+- `v1` 是按配置 instant-flow offset 从实时流量样点中选取的瞬时流量样本；如果流量段短于该 offset，则使用最后一个非零样点。
 - `v_mean = measured_mass_delta / flow_segment_duration_s`。
 - `original_k` 在每个 trial 开始时自动从配置的 K Factor 变量读取。
 
@@ -288,7 +314,7 @@ average_error = (max(measurement_error_1,
 
 adjusted_error_j = measurement_error_j - average_error
 
-intermediate_k_j = original_k / (1 + adjusted_error_j / 100)
+intermediate_k_j = original_k / (1 + measurement_error_j / 100)
 
 new_k = (max(intermediate_k_1,
              intermediate_k_2,
@@ -298,7 +324,7 @@ new_k = (max(intermediate_k_1,
              intermediate_k_3)) / 2
 ```
 
-`original_k` 在每个 trial 开始时自动从配置的 K Factor 变量读取；操作者不在弹窗中手动输入该值。最终 K 计算要求 9 次 selected trials 来自同一个 operation，使用相同的 flow-rate、flow-accumulator 和 K Factor 变量，并共享相同 original K 值。重复点击该操作会覆盖同一 operation 的上一条 final-K record，但所有 trial records 都保持不变。
+`adjusted_error_j` 仍会保存和显示，供复核使用，但 `intermediate_k_j` 以及最终 `new_k` 使用 `measurement_error_j` 计算。`original_k` 在每个 trial 开始时自动从配置的 K Factor 变量读取；操作者不在弹窗中手动输入该值。最终 K 计算要求 9 次 selected trials 来自同一个 operation，使用相同的 flow-rate、flow-accumulator 和 K Factor 变量，并共享相同 original K 值。重复点击该操作会覆盖同一 operation 的上一条 final-K record，但所有 trial records 都保持不变。
 
 生成 final-K preview 后，`Write New K...` 会变为可用。这是一个显式写入动作，不属于计算动作本身。UI 会显示确认弹窗，包含当前 Device ID、K Factor 变量、original K、new K 和 delta。如果操作者确认，运行时只会通过 `WriteGuardService` 写入新 K，随后读取同一个 K Factor 变量并验证 readback 是否匹配请求值，同时记录 audit log，并把 final-K 测试记录更新为包含 `write_requested`、`write_status`、`write_verified`、`readback_k_factor` 和 `audit_id`。取消确认弹窗会保留 preview，但不会写入设备。
 
@@ -328,6 +354,12 @@ UI 暴露两个记录窗口：
 - `Current Device Test Records` 使用当前选中或已连接的 device ID 作为锁定筛选条件。
 - `All Test Records` 打开全局记录浏览器，显示本程序测试过的所有设备。
 
+记录表和详情窗会为已知单位的值显示单位。单位来源是保存该 operation
+时的 register-map snapshot 或保存的 sample metadata；派生 trial 值会根据当时配置的
+flow-rate、accumulated-mass 和 K-factor 变量解析单位，因此历史记录不会被之后的变量映射修改影响。
+
+如果 repeatability trial 保存了 trial-sample CSV artifact，记录浏览器会对该选中 trial 启用 `View Flow Plot` 和 `View Flow Data`。`View Flow Data` 会用表格显示已保存样点，包含采集时间、相对时间、sample index、flow 以及本次 trial 同步采集的额外变量。表格里的采集时间按本机界面时区显示；保存的 CSV artifact 仍保留 UTC ISO 格式的原始 `captured_at` 时间戳，用于追溯。选择多条 trial 记录，或选择包含多条已保存 trial artifact 的 repeatability summary 时，会启用 `Compare Flow Plots`；点击后会先打开 trial 选择弹窗，由操作者勾选具体要比较的 trial artifact。比较图默认将所选 trial 的第一个采样点对齐为 0 秒；操作者也可以在图窗中把对齐方式切换为“有流量前的那个样点”，也就是第一个非零 flow-rate 样点前一帧。图窗内有变量选择表、图布局选择和对齐方式选择，可只看 flow，也可只看某个额外变量，或同时显示多个变量；显示方式可以在“多个变量叠加到同一张图”和“每个变量单独一张图”之间切换。当叠加模式中刚好选择两个变量时，第一个变量使用左侧 Y 轴，第二个变量使用右侧 Y 轴，便于在同一图中比较多个 trial 的两个不同量纲变量。
+
 `Current Device Analysis` 是围绕当前选中或已连接 Device ID 的只读分析操作。它汇总测试记录数量、测试会话数量、operation 数量、trial 状态数量、accepted trial 的 mean/stddev/max absolute error、每个流量点的 accepted-trial summary、最近一次 final-K preview、最近一次简单 K 结果、最近一次零点校准结果，以及例如“没有 final-K preview”或“某流量点 accepted trial 少于三次”这样的注意事项。该窗口不编码合格阈值，也不会写入从机设备；它用于在导出或离线深度分析前快速查看某个设备的历史趋势。
 
 记录表展示 timestamp、operation、run ID 或 attempt ID、parameter summary 和 operator notes。详情窗展示：
@@ -339,9 +371,9 @@ UI 暴露两个记录窗口：
 - raw artifact references
 - remaining metrics
 
-当存在 run 时，notes 会保存在 run session 上。JSON 导出会写出一个可移植 package，其中包含 device records、run sessions、workflow steps、analysis results、artifact metadata、operation attempts 和 trial records。
+当存在 run 时，notes 会保存在 run session 上。JSON 导出会写出一个可移植 package，其中包含 device records、run sessions、workflow steps、analysis results、artifact metadata 和文件内容、Modbus test sessions、operation attempts 和 trial records。repeatability 的 trial-sample CSV artifact 也会随包导出，因此导入到另一台电脑后仍可打开已保存的流量和额外变量曲线。
 
-导入保持兼容旧的 run/analysis package 结构：完全重复的 run 会跳过；run ID 冲突但内容不同的导入记录会重命名。
+导入保持兼容旧的 run/analysis package 结构：旧包如果只包含 artifact metadata 而没有 artifact 文件内容，记录仍可导入，但打开曲线时会提示对应文件不可用；完全重复的 run 会跳过；run ID 冲突但内容不同的导入记录会重命名。
 
 Excel 导出预留给后续版本。
 

@@ -238,6 +238,9 @@ Fields:
 - Instant flow.
 - Flow segment timestamps.
 - Raw Modbus polling artifact ID.
+- Optional flow-rate sample CSV artifact ID when all-flow-sample recording is
+  enabled.
+- Optional flow-rate sample count.
 - Device metadata snapshot.
 - Notes.
 
@@ -258,7 +261,7 @@ include:
 - per-flow-point adjusted error, calculated as `measurement_error -
   average_error`.
 - per-flow-point intermediate K, calculated as `original_k / (1 +
-  adjusted_error_percent / 100)`.
+  measurement_error_percent / 100)`.
 - final `new_k_factor`, calculated as `(max(intermediate_k_values) +
   min(intermediate_k_values)) / 2`.
 - the original K factor value and K factor variable name used by the selected
@@ -377,14 +380,18 @@ Full backup and restore tools are future work.
 Standalone Modbus test records can also be moved between PCs with a
 module-specific JSON package. That package stores completed Modbus run
 metadata, workflow steps, analysis metrics, notes, device metadata, artifact
-metadata, operation attempts, and repeatability trial records for zero
-calibration, K factor calibration, and repeatability records. Import remains
+metadata and file content, operation attempts, and repeatability trial records
+for zero calibration, K factor calibration, and repeatability records.
+Repeatability trial-sample CSV artifacts are included so saved flow and
+extra-variable curves remain viewable after import on another PC. Import remains
 compatible with the earlier run/analysis package shape: it skips identical run
 IDs and preserves conflicting imported runs under a new imported run ID so
-independent test PCs do not overwrite each other's local history. The package
-metadata records the selected operation filter and optional started-at time
-range used for export. Excel export is reserved for a later reporting/export
-pass; JSON remains the portable interchange format for now.
+independent test PCs do not overwrite each other's local history. Older packages
+that contain artifact metadata but no embedded file content can still be
+imported, but missing artifact files remain unavailable. The package metadata
+records the selected operation filter and optional started-at time range used
+for export. Excel export is reserved for a later reporting/export pass; JSON
+remains the portable interchange format for now.
 
 ## Known Unknowns
 - Final report file format.

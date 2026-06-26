@@ -1,7 +1,10 @@
 # M12 Verification
 
 ## Scope
-M12 implements the first Windows distributable-folder packaging path. It does not produce a signed installer, MSI, auto-updater, code signing certificate flow, or production deployment policy.
+M12 implements the first Windows distributable-folder packaging path. It does not
+produce a signed installer, MSI, code signing certificate flow, or production
+deployment policy. A GitHub Release style update manifest and in-app updater
+foundation is now available for lab use.
 
 ## Implemented
 - PyInstaller packaging configuration at `packaging/windows/coreflow_studio.spec`.
@@ -16,6 +19,10 @@ M12 implements the first Windows distributable-folder packaging path. It does no
 - Headless packaged-app simulator smoke command via `python -m coreflow --simulator-smoke`.
 - Packaged `CoreFlowStudio.exe` opens the Qt desktop UI without a console window.
 - Packaged `CoreFlowStudioConsole.exe` keeps console diagnostics available for build info, simulator smoke, and register-map template generation.
+- Packaged `CoreFlowStudioConsole.exe` can generate a full update zip and
+  `latest.json` manifest for upload to GitHub Release.
+- The desktop UI exposes `Help > Check for Updates...` so target-PC operators
+  can check, download, verify, and apply updates from inside the app.
 - Packaged UI startup failures are logged to `<data-root>\logs\startup.log` before the process exits.
 - English and Chinese user manuals are included in the distribution folder.
 - Packaged build filters external Anaconda ICU DLLs that can break PySide6 QtWidgets loading on Windows.
@@ -31,6 +38,7 @@ powershell -ExecutionPolicy Bypass -File .\packaging\windows\verify_package.ps1
 .\dist\CoreFlowStudio\CoreFlowStudio.exe
 .\dist\CoreFlowStudio\CoreFlowStudioConsole.exe --build-info
 .\dist\CoreFlowStudio\CoreFlowStudioConsole.exe --write-register-map-template .\dist\CoreFlowStudio\placeholder_modbus.json
+.\dist\CoreFlowStudio\CoreFlowStudioConsole.exe --make-update-package .\dist\CoreFlowStudio --update-output-dir .\dist\updates
 .\dist\CoreFlowStudio\CoreFlowStudioConsole.exe --simulator-smoke --data-root .\dist\CoreFlowStudio\smoke-data
 ```
 
@@ -41,6 +49,8 @@ powershell -ExecutionPolicy Bypass -File .\packaging\windows\verify_package.ps1
 - Windowed packaged executable started without a console window.
 - Console packaged executable printed build info.
 - Console packaged executable wrote a placeholder register-map JSON file.
+- Console packaged executable can write an update package zip plus
+  `latest.json` manifest for GitHub Release assets.
 - Console packaged executable ran simulator-backed calibration preview, factory test, experiment, and export generation through the headless smoke command.
 - Distribution includes `USER_MANUAL.en.md` and `USER_MANUAL.zh-CN.md`.
 

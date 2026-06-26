@@ -127,6 +127,8 @@ Goal: Verify manual Modbus calibration workflows.
 Scenarios:
 
 - Run zero calibration against a fake or simulator device with configurable start coil/parameter, before/after `zero_offset`, before/after `delta_t`, and completion polling.
+- Confirm `Variable Sampling` lets the operator choose configured Modbus variables, poll interval, plot layout, and notes; persists the selected variables, interval, and plot layout per Device ID with `Save Config`; updates a non-modal live plot while polling until `Stop`; writes a wide CSV raw artifact with sampled variable units where known; refreshes the Live Variables table with the latest values; stores a `modbus_variable_sampling` test record with sample count and sample artifact ID; and allows the saved samples to be reopened from Test Records as a plot or table, with table capture times displayed in local UI time while raw CSV `captured_at` timestamps remain UTC.
+- Confirm the Zero Cal dialog can persist and reload selected pre-calibration snapshot variables per Device ID, with no global zero-calibration configuration fallback.
 - Confirm zero calibration writes only through `WriteGuardService` in an explicit write-capable state and creates an audit record.
 - Run simple K factor calibration from selected pre-operation variables, one reusable non-zero-to-zero flow segment, accumulated-mass before/after values, standard mass, and current K factor.
 - Confirm the K Factor dialog can persist and reload selected variables, polling interval, and pre-operation snapshot selections without persisting write-to-device intent.
@@ -140,14 +142,19 @@ Scenarios:
   persist and reload operation notes per Device ID, the main operation dialog
   displays the saved notes, and each calculated trial record stores the same
   notes.
-- Confirm each repeatability trial reads the selected pre-trial variables automatically, tells the operator when the trial can start, leaves a pending capture after `Capture Trial`, then calculates and stores the trial only after the operator enters `Standard Mass` and clicks `Calculate Trial Error`.
-- Confirm each repeatability trial Test Records timestamp is the `Calculate Trial Error` calculation/save time, not the captured flow-segment start or end time.
+- Confirm each repeatability trial reads the selected pre-trial variables automatically, tells the operator when the trial can start, continuously polls through the configured instant-flow offset after flow starts, selects `v1` from the captured real-time samples instead of performing an extra post-start read, leaves a pending capture after `Capture Trial`, then calculates and stores the trial only after the operator enters `Standard Mass` and clicks `Calculate Trial Error`.
+- Confirm each repeatability trial Test Records timestamp is the `Capture Trial` click time, not the captured flow-segment start/end time or the later `Calculate Trial Error` calculation/save time; confirm the calculation/save time remains traceable as detail metrics.
+- Confirm the Repeatability configuration dialog exposes `Record all flow samples` plus default trial-sample variables, persists them per Device ID, and when enabled asks the operator to confirm this trial's sample/plot variables and plot layout before each `Capture Trial`; accepting opens a separate non-modal time-value plot that updates from live flow-rate and operator-selected extra-variable samples without blocking the repeatability operation dialog, supports both overlay and one-plot-per-variable display, while canceling leaves the trial uncaptured.
+- Confirm live and reopened repeatability sample plots allow the operator to click a plotted sample point and view the exact trial label, variable, sample index, relative time, capture time, value, and unit.
+- Confirm the same `Record all flow samples` option writes each trial's selected sample variables to a wide CSV raw artifact and stores the sample artifact ID, sample count, and sampled variable names in the trial history details.
+- Confirm saved repeatability trial sample artifacts can be reopened from Test Records as both plots and tabular sample data, and that comparing multiple trials first lets the operator choose the specific trial artifacts to compare, then lets the operator choose whether each selected trial is aligned at its first sample or at the sample immediately before the first nonzero flow-rate sample while allowing selected variables to be shown either overlaid in one relative-time plot or separated into one plot per variable; when overlaying exactly two variables, confirm the first selected variable uses the left Y axis and the second selected variable uses the right Y axis.
+- Confirm Test Records table summaries and detail panes display units for values whose units are known from the saved operation register-map snapshot or saved sample metadata, including configured flow-rate, accumulated-mass, K-factor, snapshot, duration, and sampled-variable-list fields.
 - Confirm each repeatability trial record includes flow start, instant-sample, and end timestamps plus the raw Modbus polling artifact reference.
 - Confirm Three Flow Ranges mode does not write a final summary merely because 9 trials exist; `Calculate Repeatability` must use an operator-selected consecutive three-trial window for one flow point.
 - Confirm Three Flow Ranges `Calculate Repeatability` saves the selected-window error/repeatability calculation as a test record with the operation notes and a timestamp matching the repeatability calculation/save time, and Single Flow Range refreshes and saves the current error/repeatability summary after every `Calculate Trial Error` with the same notes and timestamp semantics.
 - Confirm additional repeatability trials can be appended as soon as any flow point has 3 calculated trials; `Add Trial` opens a flow-point selector that defaults to the most recently completed eligible flow point, preserves earlier trial records, and allows extra trials to be selected as part of a later consecutive three-trial repeatability window.
 - Confirm the selected flow-point `mean` shown in `Selected Trials And K Preview` is the arithmetic mean of that flow point's three selected trial percent errors, and is distinct from the final-K `average_error`.
-- Confirm `Calculate Final K` requires three selected flow points and 9 selected trials, calculates per-flow-point measurement errors, calculates `average_error = (max(measurement_errors) + min(measurement_errors)) / 2`, calculates adjusted errors, intermediate K values, final `new_k = (max(intermediate_k_values) + min(intermediate_k_values)) / 2`, and `delta_k = new_k - original_k`, writes the final-K preview with sufficient K-value precision for manual device entry, preserves operation notes, shows those notes in Test Records table/detail views, and overwrites the previous final-K preview for the same operation when repeated.
+- Confirm `Calculate Final K` requires three selected flow points and 9 selected trials, calculates per-flow-point measurement errors, calculates `average_error = (max(measurement_errors) + min(measurement_errors)) / 2`, calculates adjusted errors for review, calculates intermediate K values using `measurement_error` in `intermediate_k = original_k / (1 + measurement_error / 100)`, calculates final `new_k = (max(intermediate_k_values) + min(intermediate_k_values)) / 2`, and `delta_k = new_k - original_k`, writes the final-K preview with sufficient K-value precision for manual device entry, preserves operation notes, shows those notes in Test Records table/detail views, and overwrites the previous final-K preview for the same operation when repeated.
 - Confirm `Write New K...` is available only after a final-K preview exists, shows an operator confirmation with Device ID, K factor variable, original K, new K, and delta, writes only through the write guard when confirmed, reads back the K factor variable, records `write_status`, `write_verified`, `readback_k_factor`, and `audit_id`, and leaves the preview unchanged when canceled.
 - Confirm `Current Device Analysis` opens as a single-purpose 9-trial calculation dialog for the selected Device ID, does not show a device-history text summary or per-flow summary table, and does not write to the device.
 - Confirm the device-analysis trial picker shows each accepted trial as a selectable row with Attempt ID, Run ID, old K, error, raw artifact, and comparison values; starts with no trial rows selected; orders rows by trial start time with the most recent trial first; lets the operator reorder columns by dragging table headers; lets the operator choose exactly 9 rows covering exactly three flow points with three consecutive trial indexes per point; saves checkbox-selected comparison-variable display preferences from a popup that closes after `Save`; rejects the 9-trial selection when original K, `zero_offset`, or `low_threshold` do not match; `Select And Calculate...` calculates and previews per-flow `adjusted_error`, per-flow repeatability, and old/new K without saving; and `Save` records the generated text report as `manual_error_repeatability_final_k` with `analysis_source=current_device_analysis`, uses the report save time as the Test Records timestamp while retaining selected-trial time range metrics, refreshes any open Test Records windows, and can be found with operation filter `Repeatability Final K` and status filter `Calculated`.
@@ -218,9 +225,11 @@ Scenarios:
   device metadata snapshots.
 - Export standalone Modbus test records to a portable JSON package with
   optional operation and started-at time-range filters, include operation
-  attempts, trial records, and artifact metadata, import it into another local
-  repository, preserve notes and metrics, skip duplicate runs, and rename
-  conflicting imported run IDs without overwriting local records.
+  attempts, trial records, artifact metadata, and embedded artifact file
+  content including repeatability trial-sample CSV curves, import it into
+  another local repository, preserve notes, metrics, and viewable flow/extra
+  variable plots, skip duplicate runs, and rename conflicting imported run IDs
+  without overwriting local records.
 
 ### Safety And Write-Guard Tests
 ID: TP-SAFE-001
@@ -354,9 +363,16 @@ Scenarios:
 - Confirm the main packaged executable opens the UI without a console window.
 - Confirm the console diagnostics executable prints version and build metadata.
 - Confirm the console diagnostics executable can write the placeholder Modbus register-map template.
+- Confirm the console diagnostics executable can generate a full GitHub Release
+  update package and `latest.json` manifest from a packaged distribution folder,
+  excluding runtime data folders.
 - Run the console diagnostics executable's headless simulator smoke command with an explicit data root.
 - Run the console diagnostics executable with `--ui`, capture stdout/stderr, and confirm the UI stays alive through startup without missing-module errors.
 - Run the windowed UI executable and confirm it stays alive through startup.
+- Open `Help > Check for Updates...` from the packaged UI, enter a reachable
+  `latest.json` URL, check for an update, download it, verify SHA-256, and
+  confirm `Update and Restart` starts the external updater without requiring the
+  operator to run PowerShell commands.
 - Force or mock a packaged UI startup failure and confirm the failure is appended to `<data-root>\logs\startup.log`.
 - Confirm the simulator smoke command performs connection, live read, calibration preview, factory test, experiment, and export generation.
 - Confirm runtime data is stored under `%LOCALAPPDATA%\CoreFlow Studio` by default or `COREFLOW_DATA_ROOT` when configured.

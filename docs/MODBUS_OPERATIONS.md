@@ -134,6 +134,12 @@ flowchart TD
     K4 -->|No| K5[Store calculation attempt]
     K4 -->|Yes| K6[Guarded write, readback, and audit record]
 
+    G --> VS[Variable Sampling]
+    VS --> VS1[Operator selects variables, interval, plot layout, and notes]
+    VS1 --> VS2[Poll selected variables until Stop]
+    VS2 --> VS3[Update live plot and main value table]
+    VS3 --> VS4[Store variable-sample CSV artifact and test record]
+
     G --> R[Error and repeatability trial]
     R --> R1[Capture one flow segment]
     R1 --> R2[Operator enters standard mass and notes]
@@ -144,6 +150,7 @@ flowchart TD
     R4 -->|No| R5[Store summary run, analysis, and attempt]
 
     Z4 --> T[Test Records]
+    VS4 --> T
     K5 --> T
     K6 --> T
     R3 --> T
@@ -159,15 +166,46 @@ flowchart TD
 
 ## Variable Reads And Polling
 
-The former `Sample Variables` menu operation is no longer exposed in the
-operator menu. Operators can still read a single row with the row `Read` button
-or poll selected rows with `Start Polling`. Workflow operations continue to read
-configured variables internally and store operation-specific raw Modbus polling
-curves as artifacts.
+Operators can read a single row with the row `Read` button or poll selected rows
+with `Start Polling` for a live table refresh. `Operations > Variable Sampling`
+opens a dedicated operation for selected-variable polling, live plotting, and
+recording.
+
+The Variable Sampling operation lets the operator choose any configured Modbus
+variables, a polling interval, plot layout, and operation notes. `Save Config`
+stores the current live-variable selection, polling interval, and plot layout for
+the current device profile so the same defaults are restored next time; it does
+not separately save sample data. `Start` opens a non-modal live time-value plot,
+polls the selected variables until `Stop`, updates the main `Value` column with
+the latest saved values, and records a test-history operation. Each sample cycle
+is stored as one row in a wide CSV raw artifact:
+
+```text
+captured_at,elapsed_s,sample_index,<selected variable columns...>
+```
+
+Sample data is saved automatically when the operation stops or reaches its
+maximum sample count. The saved artifact uses `curve_type=variable_samples`,
+stores units for variables that define a unit in the register map, and is referenced by
+`flow_samples_artifact_id` so the Test Records `View Flow Plot`, `View Flow Data`,
+and `Compare Flow Plots` controls can reuse the same multi-variable viewer used by
+repeatability trial samples.
+
+Test-record operation name:
+
+```text
+modbus_variable_sampling
+```
+
+Workflow operations continue to read configured variables internally and store
+operation-specific raw Modbus polling curves as artifacts.
 
 ## Zero Calibration
 
 `Zero Cal` opens a dialog with selectable pre-calibration snapshot variables.
+The selected snapshot variables can be saved with `Save Config`; saved zero
+calibration configuration is scoped to the current Device ID under the selected
+device profile, matching the repeatability configuration behavior.
 When the operator clicks `Start`:
 
 1. The UI records the selected snapshot variables and current device metadata.
@@ -212,7 +250,8 @@ When the operator clicks `Start`, the runtime captures one flow segment:
 1. Capture optional pre-calibration snapshot variables.
 2. Read the initial mass accumulator and current K factor.
 3. Wait for a nonzero flow-rate segment.
-4. Record the instant-flow sample after the configured post-start sample delay.
+4. Select the instant-flow sample from captured flow samples at the configured
+   post-start offset.
 5. Wait for the flow rate to return to zero.
 6. Read the final mass accumulator after the configured post-stop delay.
 
@@ -241,9 +280,11 @@ k_factor_calibration
 
 `Repeatability` opens a dedicated dialog. The operation dialog keeps only the
 per-trial `Standard Mass` entry and calculation controls visible. Variables,
-mode, target-flow points, polling interval, test-record saving, and pre-test
-snapshot selection are edited from the `Configuration...` dialog before the
-first trial; once a trial is captured, those operation-level settings are
+mode, target-flow points, polling interval, instant-flow offset,
+test-record saving,
+all-flow-sample recording, default trial sample variables, and the shared
+pre/post trial snapshot selection are
+edited from the `Configuration...` dialog before the first trial; once a trial is captured, those operation-level settings are
 locked for that operation. The implemented modes are:
 
 The configuration dialog also includes operator notes for the current
@@ -265,33 +306,61 @@ Advanced mode is reserved.
 
 Each trial captures one flow segment using the selected flow-rate and
 flow-accumulator variables. At the start of each trial, the runtime reads the
-operator-selected pre-trial variables plus the configured K Factor variable,
-tells the operator that the selected variables have been read, and then waits
-for the non-zero flow segment. During `Capture Trial`, the repeatability dialog
-opens a small progress popup that reports data acquisition status. When capture
-finishes, the popup shows completion, closes automatically after 2 seconds, and
-can also be closed manually by the operator. The runtime records:
+operator-selected snapshot variables plus the configured K Factor variable and
+updates the operation status while it waits for the non-zero flow segment. If
+`Record all flow samples` is enabled in the configuration dialog, `Capture
+Trial` first asks the operator to confirm this trial's sample/plot variables.
+The same prompt lets the operator choose whether the live plot overlays the
+selected variables in one chart or shows one chart per variable. After the
+operator confirms, a separate non-modal plot window opens and updates
+time-value curves from the captured trial samples using the selected layout.
+Operators can click sample points on the live or reopened plots to inspect the
+specific trial label, variable, sample index, relative time, capture time, and
+value at that point.
+The flow-rate variable is
+always included because it drives segment start/stop detection; the operator may
+add or remove extra variables for that trial. During each sampling cycle the runtime reads
+the flow-rate variable and the selected extra variables through the configured
+read path, using adjacent-register merge where the device adapter supports it.
+If the selected variables take longer than the configured poll interval to read,
+the next cycle starts immediately; samples are not discarded. After flow first
+exceeds the nonzero threshold, polling continues without an extra post-start
+pause; `v1` is selected from the already captured trial samples at the
+configured instant-flow offset after flow start, or from the last nonzero sample
+if the segment is shorter than the offset. The plot window
+does not block the repeatability operation dialog. The same captured sample
+points are also written to a wide CSV raw artifact when capture completes, and
+the trial history stores the sample artifact ID, sample count, and sampled
+variable names.
+After the flow segment and ending accumulator read, the runtime reads the same
+snapshot variables again as the post-trial snapshot.
+The runtime records:
 
 - target flow point
 - trial index
 - pre-trial selected-variable snapshot and snapshot timestamp
+- post-trial selected-variable snapshot and snapshot timestamp
 - configured K Factor variable name
 - original K factor value automatically read before the flow segment
 - mass accumulator before and after the segment
 - measured mass delta
 - standard mass entered by the operator
-- instant flow after the configured post-start sample delay
+- instant flow selected from the captured samples at the configured
+  instant-flow offset after flow start
 - mean flow across the captured segment
 - percent error
+- capture-click timestamp
 - flow segment timestamps: start, instant sample, and end
 - trial status, currently `accepted` by default
 - raw Modbus polling artifact ID
+- trial sample CSV artifact ID, sample count, and sampled variable names when
+  all-flow-sample recording is enabled
 
 The Test Records timestamp for each trial is the time the operator clicks
-`Calculate Trial Error` and the percent error is calculated and saved. It is not
-the flow-segment start, instant-sample, or end timestamp. Those flow-segment
-timestamps remain stored in the trial metrics and raw polling artifact for
-traceability.
+`Capture Trial`. It is not the flow-segment start, instant-sample, end, or trial
+error calculation/save timestamp. The calculation/save timestamp remains stored
+as `calculated_at`, and the flow-segment timestamps remain stored in the trial
+metrics and raw polling artifact for traceability.
 
 Trial percent error is:
 
@@ -304,8 +373,9 @@ Where:
 - `measured_mass_delta = mass_acc_after - mass_acc_before`
 - `standard_mass` is the standard-scale mass entered by the operator for that
   trial.
-- `v1` is the instant-flow sample captured after the configured post-start
-  sample delay.
+- `v1` is selected from the captured real-time flow samples at the configured
+  instant-flow offset after flow start; if the flow segment is shorter than
+  that offset, the last nonzero sample is used.
 - `v_mean = measured_mass_delta / flow_segment_duration_s`.
 - `original_k` is read automatically from the configured K Factor variable at
   the start of each trial.
@@ -398,7 +468,7 @@ average_error = (max(measurement_error_1,
 
 adjusted_error_j = measurement_error_j - average_error
 
-intermediate_k_j = original_k / (1 + adjusted_error_j / 100)
+intermediate_k_j = original_k / (1 + measurement_error_j / 100)
 
 new_k = (max(intermediate_k_1,
              intermediate_k_2,
@@ -410,17 +480,17 @@ new_k = (max(intermediate_k_1,
 delta_k = new_k - original_k
 ```
 
-`original_k` is read automatically from the configured K Factor variable during
+`adjusted_error_j` remains stored and displayed for review, but
+`intermediate_k_j` and the resulting `new_k` are calculated from
+`measurement_error_j`. `original_k` is read automatically from the configured K
+Factor variable during
 each trial; the operator does not type this value into the dialog. Final K
 calculation requires all 9 selected trials to come from the same operation, use
 the same flow-rate and flow-accumulator variables, use the same K Factor
 variable, and share the same original K value. Repeating this action overwrites
 the previous final-K record for the same operation, while all trial records
-remain intact. If the three flow-point errors are symmetric around the computed
-`average_error`, the calculated `new_k` can equal `original_k`; this means the
-formula found no K adjustment after centering the errors, not that the
-calculation was skipped. K values, intermediate K values, and `delta_k` are
-displayed with enough decimal precision for manual entry into a slave device.
+remain intact. K values, intermediate K values, and `delta_k` are displayed
+with enough decimal precision for manual entry into a slave device.
 The final-K preview record also carries the same operation notes.
 
 After a final-K preview exists, `Write New K...` becomes available. This is an
@@ -464,6 +534,34 @@ The UI exposes two record windows:
   locked as a filter.
 - `All Test Records` opens the global record browser for every device tested
   with this program.
+
+The record table and detail pane display units for values whose units are known
+from the saved operation register-map snapshot or saved sample metadata. Derived
+trial values use the configured flow-rate, accumulated-mass, and K-factor
+variables to resolve their units, so historical records remain tied to the
+variable map that was active when the operation was written.
+
+If a repeatability trial has a saved trial-sample CSV artifact, the record
+browser enables `View Flow Plot` and `View Flow Data` for that selected trial.
+`View Flow Data` opens the saved samples in a table with capture time, elapsed
+time, sample index, flow, and any extra sampled variables. The table's capture
+time column is formatted in local UI time; the saved CSV artifact keeps raw
+`captured_at` timestamps in UTC ISO format for traceability. Selecting multiple
+trial records, or a repeatability summary that contains multiple saved trial
+artifacts, enables `Compare Flow Plots`; that action first opens a trial picker
+so the operator can choose exactly which saved trial artifacts to compare. The
+comparison plot shows the chosen trials on a shared relative-time axis where the
+first sample of each trial is aligned to 0 seconds by default. The plot window
+includes a variable selector so the operator can show only flow, only another
+sampled variable, or multiple variables together. It also includes plot-layout
+and alignment selectors: layout switches between overlaying selected variables
+in one chart and showing one chart per variable, and alignment switches between
+the first sample and the sample immediately before the first nonzero flow-rate
+sample. When overlay mode shows exactly two variables, the first selected
+variable uses the left Y axis and the second selected variable uses the right Y
+axis, so multiple trials can be compared without forcing unlike variables onto
+one scale. Clicking a plotted sample point shows the exact trial, variable,
+sample index, relative time, capture time, value, and unit for that point.
 
 The `Current Device Analysis` operation opens a single-purpose calculation
 dialog for the selected or connected Device ID. The dialog does not show a
@@ -532,9 +630,13 @@ operator notes. The detail pane shows:
 
 Notes are stored on the run session when a run exists. JSON export writes a
 portable package that includes device records, run sessions, workflow steps,
-analysis results, artifact metadata, Modbus test sessions, operation attempts,
-and trial records. Import remains compatible with older package shapes: missing
-Modbus test sessions are backfilled from the referenced attempts/trials. When
+analysis results, artifact metadata and file content, Modbus test sessions,
+operation attempts, and trial records. This includes repeatability
+trial-sample CSV artifacts, so saved flow and extra-variable curves can be
+opened after import on another PC. Import remains compatible with older package
+shapes that only contain artifact metadata: missing artifact file content is
+left unavailable and reported when a plot is opened. Missing Modbus test
+sessions are backfilled from the referenced attempts/trials. When
 the import is launched from `Current Device Test Records`, imported run,
 session, attempt, and trial Device IDs are retargeted to the current Device ID
 while preserving the original Device ID in metadata.
