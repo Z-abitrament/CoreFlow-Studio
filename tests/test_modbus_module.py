@@ -5274,6 +5274,7 @@ def test_modbus_module_window_sends_raw_frame_with_auto_crc(qtbot, tmp_path) -> 
     )
 
     assert window.rawFrameAutoCrcCheckBox.isChecked()
+    transports[0].raw_response = bytes.fromhex("01 03 04 00 01 00 02 2A 32")
     window.rawFrameLineEdit.setText("01 03 00 00 00 02")
     _click(qtbot, window.sendRawFrameButton)
 
@@ -5281,7 +5282,8 @@ def test_modbus_module_window_sends_raw_frame_with_auto_crc(qtbot, tmp_path) -> 
     assert transports[0].raw_frames == [bytes.fromhex("01 03 00 00 00 02 C4 0B")]
     log = window.logTextEdit.toPlainText()
     assert " | TX | raw_frame | 01 03 00 00 00 02 C4 0B" in log
-    assert "Raw frame sent" in log
+    assert " | RX | raw_frame | 01 03 04 00 01 00 02 2A 32" in log
+    assert "Raw frame sent" not in log
 
 
 def test_modbus_module_window_sends_raw_frame_without_auto_crc(qtbot, tmp_path) -> None:
@@ -5312,6 +5314,8 @@ def test_modbus_module_window_sends_raw_frame_without_auto_crc(qtbot, tmp_path) 
     assert transports[0].raw_frames == [bytes.fromhex("01 03 00 00 00 02 99 88")]
     log = window.logTextEdit.toPlainText()
     assert " | TX | raw_frame | 01 03 00 00 00 02 99 88" in log
+    assert " | RX | raw_frame | no response" in log
+    assert "Raw frame sent" not in log
 
 
 def test_modbus_module_window_rejects_invalid_raw_frame_input(qtbot, tmp_path) -> None:

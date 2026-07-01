@@ -4596,7 +4596,11 @@ class _FrameLoggingTransport:
         text = _bytes_to_hex(frame)
         self._logger("TX", "raw_frame", text)
         response = self._transport.send_raw_frame(frame)
-        if not response.ok:
+        if response.ok and response.values:
+            self._logger("RX", "raw_frame", _bytes_to_hex(bytes(response.values)))
+        elif response.ok:
+            self._logger("RX", "raw_frame", "no response")
+        else:
             self._logger("RX", "raw_frame", response.error or "ERROR")
         return response
 

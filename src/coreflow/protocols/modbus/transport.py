@@ -212,7 +212,11 @@ class PymodbusSerialTransport:
             return TransportResponse(
                 error=f"Raw frame write incomplete: wrote {written} of {expected} byte(s)."
             )
-        return TransportResponse(values=[])
+        try:
+            response = self._client.recv(None)
+        except (OSError, SerialException, ModbusException) as exc:
+            return TransportResponse(error=str(exc))
+        return TransportResponse(values=list(response))
 
     def _open_error(self) -> str:
         return self._last_error or _format_open_error(self._config, None)

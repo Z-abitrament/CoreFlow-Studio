@@ -71,8 +71,10 @@ class _DisconnectedClient:
 class _RawSendClient:
     connected = True
 
-    def __init__(self) -> None:
+    def __init__(self, response: bytes = b"") -> None:
         self.sent: list[bytes] = []
+        self.response = response
+        self.recv_sizes: list[int | None] = []
 
     def connect(self) -> bool:
         return True
@@ -83,6 +85,10 @@ class _RawSendClient:
     def send(self, request: bytes) -> int:
         self.sent.append(bytes(request))
         return len(request)
+
+    def recv(self, size: int | None) -> bytes:
+        self.recv_sizes.append(size)
+        return self.response
 
 
 class _FailingOpenClient:
@@ -128,15 +134,17 @@ def test_pymodbus_transport_reconnects_before_request_when_client_closed() -> No
     assert client.read_count == 1
 
 
-def test_pymodbus_transport_sends_raw_frame_bytes() -> None:
+def test_pymodbus_transport_sends_raw_frame_bytes_and_reads_response() -> None:
     transport = PymodbusSerialTransport(SerialConfig(port="COM1", unit_id=1))
-    client = _RawSendClient()
+    client = _RawSendClient(bytes.fromhex("01 03 04 00 01 00 02 2A 32"))
     transport._client = client
 
     response = transport.send_raw_frame(bytes.fromhex("01 03 00 00 00 02 C4 0B"))
 
     assert response.ok
     assert client.sent == [bytes.fromhex("01 03 00 00 00 02 C4 0B")]
+    assert client.recv_sizes == [None]
+    assert response.values == list(bytes.fromhex("01 03 04 00 01 00 02 2A 32"))
 
 
 def test_pymodbus_transport_reports_serial_open_details() -> None:

@@ -181,7 +181,7 @@ def test_make_update_package_cli_writes_release_assets(tmp_path, capsys) -> None
                 "--update-output-dir",
                 str(output_dir),
                 "--update-base-url",
-                "https://github.com/acme/CoreFlowStudio/releases/download/v0.6.2",
+                "https://github.com/acme/CoreFlowStudio/releases/download/v0.6.3",
             ]
         )
         == 0
@@ -190,10 +190,10 @@ def test_make_update_package_cli_writes_release_assets(tmp_path, capsys) -> None
     captured = capsys.readouterr()
     assert "Wrote full update package:" in captured.out
     assert "Wrote update manifest:" in captured.out
-    assert (output_dir / "CoreFlowStudio-0.6.2-full.zip").exists()
+    assert (output_dir / "CoreFlowStudio-0.6.3-full.zip").exists()
     manifest = (output_dir / "latest.json").read_text(encoding="utf-8")
-    assert '"latest_version": "0.6.2"' in manifest
-    assert "CoreFlowStudio-0.6.2-full.zip" in manifest
+    assert '"latest_version": "0.6.3"' in manifest
+    assert "CoreFlowStudio-0.6.3-full.zip" in manifest
 
 
 def test_windows_packaging_files_are_present() -> None:

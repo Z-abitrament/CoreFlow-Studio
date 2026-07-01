@@ -7793,10 +7793,7 @@ class ModbusModuleWindow(QDialog):
         )
 
     def _raw_frame_finished(self, result: object) -> None:
-        if isinstance(result, bytes):
-            self._log(f"Raw frame sent: {_format_hex_bytes(result)}")
-            return
-        self._log(f"Raw frame sent: {result}")
+        return
 
     def _row_for_operation_button(self, button: QPushButton) -> int | None:
         for row in range(self.variableMapTable.rowCount()):
