@@ -817,6 +817,26 @@ class ModbusModuleRuntime:
         self._profile_id = None
         return self.status
 
+    def send_raw_frame(
+        self,
+        frame: bytes,
+        *,
+        append_crc: bool = True,
+    ) -> bytes:
+        device = self._require_device()
+        transport = getattr(device, "_transport", None)
+        sender = getattr(transport, "send_raw_frame", None)
+        if not callable(sender):
+            raise RuntimeError("The active Modbus transport does not support raw frames.")
+        outbound = bytes(frame)
+        if append_crc:
+            crc = _modbus_crc(list(outbound))
+            outbound = outbound + bytes((crc & 0xFF, (crc >> 8) & 0xFF))
+        response = sender(outbound)
+        if not response.ok:
+            raise RuntimeError(response.error or "Raw frame send failed.")
+        return outbound
+
     def sample_variables(
         self,
         variable_names: tuple[str, ...] = (
@@ -4572,6 +4592,14 @@ class _FrameLoggingTransport:
             self._logger("RX", "write_coil", response.error or "ERROR")
         return response
 
+    def send_raw_frame(self, frame: bytes) -> TransportResponse:
+        text = _bytes_to_hex(frame)
+        self._logger("TX", "raw_frame", text)
+        response = self._transport.send_raw_frame(frame)
+        if not response.ok:
+            self._logger("RX", "raw_frame", response.error or "ERROR")
+        return response
+
 
 def _read_function_code(kind: RegisterKind) -> int:
     if kind is RegisterKind.COIL:
@@ -4609,6 +4637,10 @@ def _hex_frame(payload: list[int]) -> str:
     frame = [value & 0xFF for value in payload]
     crc = _modbus_crc(frame)
     frame.extend([crc & 0xFF, (crc >> 8) & 0xFF])
+    return " ".join(f"{value:02X}" for value in frame)
+
+
+def _bytes_to_hex(frame: bytes) -> str:
     return " ".join(f"{value:02X}" for value in frame)
 
 
@@ -4787,6 +4819,10 @@ def _repeatability_simple_metrics(
         "flow_points": [
             {
                 "flow_point": point.flow_point,
+                "mean_percent_error": sum(
+                    trial.percent_error for trial in point.trials
+                )
+                / len(point.trials),
                 "repeatability_stddev_percent": point.repeatability_stddev_percent,
                 "trial_errors": [
                     trial.percent_error
@@ -4798,6 +4834,9 @@ def _repeatability_simple_metrics(
     }
     for point in result.analysis.flow_points:
         label = _flow_point_metric_label(point.flow_point)
+        metrics[f"{label}_mean_percent_error"] = (
+            sum(trial.percent_error for trial in point.trials) / len(point.trials)
+        )
         metrics[f"{label}_repeatability_stddev_percent"] = (
             point.repeatability_stddev_percent
         )

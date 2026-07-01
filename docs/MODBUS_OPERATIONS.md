@@ -505,7 +505,10 @@ leaves the preview saved but does not write the device.
 
 Repeatability per flow point is the sample standard deviation of the trial
 percent errors. The summary also stores mean percent error, maximum absolute
-percent error, trial count, per-flow summaries, and trial details.
+percent error, trial count, per-flow summaries, and trial details. A saved
+`manual_error_repeatability` record shows `mean_error` in the history table
+parameter summary, and each saved flow-point detail includes
+`mean_percent_error` for the selected trial window.
 
 Test-record operation names:
 

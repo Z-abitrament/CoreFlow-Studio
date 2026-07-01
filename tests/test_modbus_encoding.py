@@ -44,6 +44,24 @@ def test_encode_scaled_uint16_register() -> None:
     assert encode_registers(register, 12.34) == [1234]
 
 
+def test_16_bit_registers_ignore_byte_order() -> None:
+    uint_register = _register(
+        ModbusDataType.UINT16,
+        word_count=1,
+        byte_order=ByteOrder.LITTLE,
+    )
+    int_register = _register(
+        ModbusDataType.INT16,
+        word_count=1,
+        byte_order=ByteOrder.LITTLE,
+    )
+
+    assert decode_registers(uint_register, [0x0001]) == 1
+    assert encode_registers(uint_register, 1) == [0x0001]
+    assert decode_registers(int_register, [0xFFFE]) == -2
+    assert encode_registers(int_register, -2) == [0xFFFE]
+
+
 def test_decode_and_encode_little_word_order_int32() -> None:
     register = _register(
         ModbusDataType.INT32,

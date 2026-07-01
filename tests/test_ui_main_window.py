@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QSplitter
+from PySide6.QtWidgets import QTextEdit, QSplitter
 
 from coreflow.app import CoreFlowRuntime
 from coreflow.ui import MainWindow
@@ -74,10 +74,16 @@ def test_main_window_embeds_modbus_module_from_menu(qtbot, tmp_path) -> None:
     assert modbus_window.menuBar.objectName() == "modbusMenuBar"
     assert modbus_window.kFactorInputsGroup.isHidden()
     assert not hasattr(modbus_window, "variableTable")
-    assert modbus_window.frameTable.objectName() == "modbusFrameTable"
+    assert not hasattr(modbus_window, "frameTable")
+    assert modbus_window.logTextEdit.objectName() == "modbusLogTextEdit"
+    assert isinstance(modbus_window.logTextEdit, QTextEdit)
     assert modbus_window.openConnectionButton.text() == "Connection..."
     assert modbus_window.variableMapTable.minimumHeight() <= 160
-    assert modbus_window.findChild(QSplitter, "modbusBodySplitter") is not None
+    body_splitter = modbus_window.findChild(QSplitter, "modbusBodySplitter")
+    assert body_splitter is not None
+    assert body_splitter.orientation() == Qt.Orientation.Horizontal
+    assert body_splitter.widget(0) is modbus_window.variableMapTable.parentWidget()
+    assert body_splitter.widget(1) is modbus_window.logTextEdit.parentWidget()
     assert modbus_window.variableMapTable.rowCount() == 8
     assert modbus_window.variableMapTable.columnCount() == 12
     assert not modbus_window.variableMapTable.verticalHeader().isVisible()

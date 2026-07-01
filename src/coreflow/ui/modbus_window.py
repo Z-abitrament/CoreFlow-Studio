@@ -5370,6 +5370,20 @@ class ModbusModuleWindow(QDialog):
             QSizePolicy.Policy.Expanding,
         )
         mapping_layout.addWidget(self.variableMapTable)
+        raw_frame_row = QHBoxLayout()
+        raw_frame_row.addWidget(QLabel("Raw Frame"))
+        self.rawFrameLineEdit = QLineEdit(mapping)
+        self.rawFrameLineEdit.setObjectName("modbusRawFrameLineEdit")
+        self.rawFrameLineEdit.setPlaceholderText("Hex bytes, e.g. 01 03 00 00 00 02")
+        self.rawFrameAutoCrcCheckBox = QCheckBox("Auto CRC16", mapping)
+        self.rawFrameAutoCrcCheckBox.setObjectName("modbusRawFrameAutoCrcCheckBox")
+        self.rawFrameAutoCrcCheckBox.setChecked(True)
+        self.sendRawFrameButton = QPushButton("Send", mapping)
+        self.sendRawFrameButton.setObjectName("modbusSendRawFrameButton")
+        raw_frame_row.addWidget(self.rawFrameLineEdit, 1)
+        raw_frame_row.addWidget(self.rawFrameAutoCrcCheckBox)
+        raw_frame_row.addWidget(self.sendRawFrameButton)
+        mapping_layout.addLayout(raw_frame_row)
         mapping_actions = QHBoxLayout()
         self.addVariableButton = QPushButton("Add Variable", mapping)
         self.addVariableButton.setObjectName("modbusAddVariableButton")
@@ -5388,13 +5402,9 @@ class ModbusModuleWindow(QDialog):
         mapping_actions.addStretch(1)
         mapping_actions.addWidget(self.pollingButton)
         mapping_layout.addLayout(mapping_actions)
-        body_splitter = QSplitter(Qt.Orientation.Vertical)
+        body_splitter = QSplitter(Qt.Orientation.Horizontal)
         body_splitter.setObjectName("modbusBodySplitter")
         body_splitter.addWidget(mapping)
-        bottom_panel = QWidget()
-        bottom_layout = QVBoxLayout(bottom_panel)
-        bottom_layout.setContentsMargins(0, 0, 0, 0)
-        bottom_layout.setSpacing(10)
         self._populate_variable_map()
 
         k_factor = QGroupBox("K Factor Inputs")
@@ -5415,28 +5425,20 @@ class ModbusModuleWindow(QDialog):
         k_factor.hide()
         self.kFactorInputsGroup = k_factor
 
-        self.frameTable = QTableWidget(0, 4)
-        self.frameTable.setObjectName("modbusFrameTable")
-        self.frameTable.setHorizontalHeaderLabels(["Time", "Direction", "Operation", "Data"])
-        self.frameTable.verticalHeader().setVisible(False)
-        self.frameTable.setAlternatingRowColors(True)
-        self.frameTable.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        self.frameTable.setColumnWidth(0, 80)
-        self.frameTable.setColumnWidth(1, 70)
-        self.frameTable.setColumnWidth(2, 120)
-        self.frameTable.setColumnWidth(3, 720)
-        self.frameTable.setMinimumHeight(150)
-        bottom_layout.addWidget(self.frameTable, 1)
-
-        self.logTextEdit = QTextEdit()
+        traffic_log = QGroupBox("Modbus Traffic Log")
+        traffic_log_layout = QVBoxLayout(traffic_log)
+        self.logTextEdit = QTextEdit(traffic_log)
         self.logTextEdit.setObjectName("modbusLogTextEdit")
         self.logTextEdit.setReadOnly(True)
-        self.logTextEdit.setMinimumHeight(80)
-        bottom_layout.addWidget(self.logTextEdit, 1)
-        body_splitter.addWidget(bottom_panel)
+        self.logTextEdit.setAcceptRichText(False)
+        self.logTextEdit.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self.logTextEdit.setMinimumWidth(320)
+        self.logTextEdit.setMinimumHeight(120)
+        traffic_log_layout.addWidget(self.logTextEdit)
+        body_splitter.addWidget(traffic_log)
         body_splitter.setStretchFactor(0, 3)
         body_splitter.setStretchFactor(1, 2)
-        body_splitter.setSizes([420, 300])
+        body_splitter.setSizes([680, 420])
         root.addWidget(body_splitter, 1)
 
     def _connect_signals(self) -> None:
@@ -5454,6 +5456,7 @@ class ModbusModuleWindow(QDialog):
         self.resetVariableMapButton.clicked.connect(self._populate_variable_map)
         self.saveVariableMapButton.clicked.connect(self._save_variable_map)
         self.pollingButton.clicked.connect(self._toggle_polling)
+        self.sendRawFrameButton.clicked.connect(self._send_raw_frame)
         self.disconnectButton.clicked.connect(self._disconnect)
         self.deviceModelLineEdit.textChanged.connect(self._sync_operation_metadata)
         self.tubeModelLineEdit.textChanged.connect(self._sync_operation_metadata)
@@ -7773,6 +7776,28 @@ class ModbusModuleWindow(QDialog):
             return
         self._write_variable_row(row)
 
+    def _send_raw_frame(self) -> None:
+        try:
+            frame = _parse_hex_frame(self.rawFrameLineEdit.text())
+        except ValueError as exc:
+            self._log(f"Raw frame failed: {exc}")
+            return
+        self._run_task(
+            "Raw frame",
+            lambda: self.runtime.send_raw_frame(
+                frame,
+                append_crc=self.rawFrameAutoCrcCheckBox.isChecked(),
+            ),
+            self._raw_frame_finished,
+            requires_connection=True,
+        )
+
+    def _raw_frame_finished(self, result: object) -> None:
+        if isinstance(result, bytes):
+            self._log(f"Raw frame sent: {_format_hex_bytes(result)}")
+            return
+        self._log(f"Raw frame sent: {result}")
+
     def _row_for_operation_button(self, button: QPushButton) -> int | None:
         for row in range(self.variableMapTable.rowCount()):
             operations = self.variableMapTable.cellWidget(row, 11)
@@ -8248,7 +8273,6 @@ class ModbusModuleWindow(QDialog):
         return (
             isValid(self)
             and isValid(self.logTextEdit)
-            and isValid(self.frameTable)
         )
 
     def _set_connected_controls(self, connected: bool) -> None:
@@ -8302,6 +8326,9 @@ class ModbusModuleWindow(QDialog):
         self.resetVariableMapButton.setEnabled(enabled and not connected)
         self.saveVariableMapButton.setEnabled(enabled and not connected)
         self.pollingButton.setEnabled(enabled and connected)
+        self.rawFrameLineEdit.setEnabled(enabled)
+        self.rawFrameAutoCrcCheckBox.setEnabled(enabled)
+        self.sendRawFrameButton.setEnabled(enabled and connected)
         for widget in (
             self.deviceModelLineEdit,
             self.tubeModelLineEdit,
@@ -8413,19 +8440,8 @@ class ModbusModuleWindow(QDialog):
     def _append_modbus_frame(self, direction: str, operation: str, data: str) -> None:
         if not self._can_update_ui():
             return
-        row = self.frameTable.rowCount()
-        self.frameTable.insertRow(row)
-        values = (
-            datetime.now().strftime("%H:%M:%S"),
-            direction,
-            operation,
-            data,
-        )
-        for column, value in enumerate(values):
-            item = QTableWidgetItem(value)
-            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-            self.frameTable.setItem(row, column, item)
-        self.frameTable.scrollToBottom()
+        stamp = datetime.now().strftime("%H:%M:%S")
+        self.logTextEdit.append(f"{stamp} | {direction} | {operation} | {data}")
 
     def _log(self, message: str) -> None:
         stamp = datetime.now().strftime("%H:%M:%S")
@@ -9114,12 +9130,12 @@ def _history_parameter_summary(entry: ModbusCalibrationHistoryEntry) -> str:
         values = []
         if trial_count:
             values.append(f"trials={trial_count}")
-        max_error = _metric_value(metrics, "max_abs_percent_error")
-        if max_error:
-            values.append(f"max_error={max_error}%")
+        mean_error = _metric_value(metrics, "mean_percent_error")
+        if mean_error:
+            values.append(f"mean_error={mean_error}%")
         repeatability = _metric_value(metrics, "max_repeatability_stddev_percent")
         if repeatability:
-            values.append(f"max_repeatability={repeatability}%")
+            values.append(f"repeatability={repeatability}%")
         return ", ".join(values)
     if entry.operation == "manual_error_repeatability_trial":
         values = []
@@ -9340,6 +9356,7 @@ def _history_result_lines(metrics: dict[str, object]) -> list[str]:
                 f"repeatability_stddev_percent={stddev}",
             ]
             for label, key in (
+                ("mean_percent_error", "mean_percent_error"),
                 ("measurement_error_percent", "measurement_error_percent"),
                 ("adjusted_error_percent", "adjusted_error_percent"),
                 ("intermediate_k_factor", "intermediate_k_factor"),
@@ -9488,6 +9505,41 @@ def _format_port(port: SerialPortInfo) -> str:
     if not details:
         return port.port
     return f"{port.port} - {' / '.join(details)}"
+
+
+def _parse_hex_frame(text: str) -> bytes:
+    normalized = (
+        text.strip()
+        .replace(",", " ")
+        .replace(";", " ")
+        .replace(":", " ")
+        .replace("-", " ")
+    )
+    if not normalized:
+        raise ValueError("enter at least one hex byte.")
+    tokens = normalized.split()
+    if len(tokens) == 1:
+        compact = tokens[0].removeprefix("0x").removeprefix("0X")
+        if not compact:
+            raise ValueError("enter at least one hex byte.")
+        if len(compact) % 2:
+            raise ValueError("hex byte count must be even.")
+        tokens = [compact[index : index + 2] for index in range(0, len(compact), 2)]
+    values: list[int] = []
+    for token in tokens:
+        value_text = token.removeprefix("0x").removeprefix("0X")
+        if not value_text or len(value_text) > 2:
+            raise ValueError(f"invalid hex byte: {token}")
+        try:
+            value = int(value_text, 16)
+        except ValueError as exc:
+            raise ValueError(f"invalid hex byte: {token}") from exc
+        values.append(value)
+    return bytes(values)
+
+
+def _format_hex_bytes(frame: bytes) -> str:
+    return " ".join(f"{value:02X}" for value in frame)
 
 
 def _order_to_modbus_orders(order: str) -> tuple[WordOrder, ByteOrder]:

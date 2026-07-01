@@ -53,6 +53,8 @@ class ModbusTransport(Protocol):
         unit_id: int,
     ) -> TransportResponse: ...
 
+    def send_raw_frame(self, frame: bytes) -> TransportResponse: ...
+
 
 class PymodbusSerialTransport:
     """pyserial/pymodbus-backed Modbus RTU transport."""
@@ -197,6 +199,20 @@ class PymodbusSerialTransport:
         if hasattr(response, "isError") and response.isError():
             return TransportResponse(error=str(response))
         return TransportResponse(values=[1 if value else 0])
+
+    def send_raw_frame(self, frame: bytes) -> TransportResponse:
+        if not self._ensure_connected():
+            return TransportResponse(error=self._open_error())
+        try:
+            written = self._client.send(bytes(frame))
+        except (OSError, SerialException, ModbusException) as exc:
+            return TransportResponse(error=str(exc))
+        expected = len(frame)
+        if written != expected:
+            return TransportResponse(
+                error=f"Raw frame write incomplete: wrote {written} of {expected} byte(s)."
+            )
+        return TransportResponse(values=[])
 
     def _open_error(self) -> str:
         return self._last_error or _format_open_error(self._config, None)

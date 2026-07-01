@@ -19,7 +19,9 @@ from PySide6.QtWidgets import (
     QLabel,
     QMessageBox,
     QSizePolicy,
+    QSplitter,
     QTableWidgetSelectionRange,
+    QTextEdit,
 )
 
 from coreflow.analysis.calibration import RepeatabilityTrial
@@ -869,6 +871,47 @@ def test_modbus_module_runtime_saves_repeatability_flow_summary_notes(
     assert records[0].metrics["mode"] == "single_point"
     assert records[0].metrics["flow_point_count"] == 1.0
     assert records[0].metrics["trial_count"] == 3.0
+    assert records[0].metrics["mean_percent_error"] == pytest.approx(0.0)
+    assert records[0].metrics["flow_point_250_mean_percent_error"] == pytest.approx(0.0)
+    assert records[0].metrics["flow_points"][0]["mean_percent_error"] == pytest.approx(
+        0.0
+    )
+
+
+def test_repeatability_history_summary_shows_selected_mean_error() -> None:
+    entry = ModbusCalibrationHistoryEntry(
+        run_id="RUN-REP-SUMMARY",
+        operation="manual_error_repeatability",
+        status="passed",
+        started_at=datetime(2026, 6, 15, 8, 0, tzinfo=UTC),
+        ended_at=datetime(2026, 6, 15, 8, 1, tzinfo=UTC),
+        device_id="CFM-REP-SUMMARY",
+        operator="pytest",
+        metrics={
+            "trial_count": 3.0,
+            "mean_percent_error": 0.5,
+            "max_abs_percent_error": 2.0,
+            "max_repeatability_stddev_percent": 1.5,
+            "flow_points": [
+                {
+                    "flow_point": 250.0,
+                    "mean_percent_error": 0.5,
+                    "repeatability_stddev_percent": 1.5,
+                    "trial_errors": [0.0, 2.0, -0.5],
+                }
+            ],
+        },
+    )
+
+    summary = modbus_window_module._history_parameter_summary(entry)
+    detail = modbus_window_module._history_detail_text(entry)
+
+    assert "mean_error=0.5%" in summary
+    assert "repeatability=1.5%" in summary
+    assert "max_error=" not in summary
+    assert "mean_percent_error: 0.5" in detail
+    assert "flow_point 250" in detail
+    assert "mean_percent_error=0.5" in detail
 
 
 def test_modbus_module_runtime_uses_capture_click_time_for_trial_records(
@@ -2365,7 +2408,14 @@ def test_modbus_module_window_uses_own_connection_state(qtbot, tmp_path) -> None
     assert not hasattr(window, "sampleVariablesButton")
     assert not hasattr(window, "variableTable")
     assert window.kFactorInputsGroup.isHidden()
-    assert window.frameTable.objectName() == "modbusFrameTable"
+    assert not hasattr(window, "frameTable")
+    assert window.logTextEdit.objectName() == "modbusLogTextEdit"
+    assert isinstance(window.logTextEdit, QTextEdit)
+    body_splitter = window.findChild(QSplitter, "modbusBodySplitter")
+    assert body_splitter is not None
+    assert body_splitter.orientation() == Qt.Orientation.Horizontal
+    assert body_splitter.widget(0) is window.variableMapTable.parentWidget()
+    assert body_splitter.widget(1) is window.logTextEdit.parentWidget()
     assert not hasattr(window, "exportCalibrationHistoryAction")
     assert not hasattr(window, "importCalibrationHistoryAction")
     _click(qtbot, dialog.connectButton)
@@ -2485,9 +2535,11 @@ def test_modbus_module_window_uses_own_connection_state(qtbot, tmp_path) -> None
     assert not hasattr(window.repeatabilityDialog, "pcMassDeltaSpinBox")
 
     assert window.statusValueLabel.text() == "Connected CFM-UI-001"
-    assert window.frameTable.rowCount() >= 14
-    assert _table_text(window.frameTable, 0, 1) in {"TX", "RX"}
     log = window.logTextEdit.toPlainText()
+    frame_lines = [line for line in log.splitlines() if " | " in line]
+    assert len(frame_lines) >= 14
+    assert any(" | TX | " in line for line in frame_lines)
+    assert any(" | RX | " in line for line in frame_lines)
     assert "Zero calibration completed" in log
     assert repository.count_rows("run_sessions") == 1
     window.calibrationHistoryAction.trigger()
@@ -4393,7 +4445,7 @@ def test_modbus_calibration_history_dialog_plots_saved_trial_flow_samples(
         for column in range(dialog._flow_sample_table_dialog.sampleTable.columnCount())
     ]
     assert table_headers == [
-        "captured_at",
+        "captured_at_local",
         "elapsed_s",
         "sample_index",
         "mass_rate",
@@ -4957,22 +5009,11 @@ def test_modbus_module_window_supports_custom_row_read_write_and_polling(qtbot, 
     assert runtime.register_map.by_name("custom_value").byte_order.value == "little"
     assert repository.get_device("CFM-UI-001") is not None
 
-    transports[0].registers[106] = encode_registers(
-        ModbusRegister(
-            name="custom_value",
-            kind=RegisterKind.HOLDING,
-            address=106,
-            word_count=1,
-            data_type=ModbusDataType.UINT16,
-            writable=True,
-            byte_order=runtime.register_map.by_name("custom_value").byte_order,
-        ),
-        513,
-    )
+    transports[0].registers[106] = [0x0001]
     read_button = window.variableMapTable.cellWidget(custom_row, 11).layout().itemAt(0).widget()
     _click(qtbot, read_button)
     qtbot.waitUntil(
-        lambda: _table_text(window.variableMapTable, custom_row, 9) == "513",
+        lambda: _table_text(window.variableMapTable, custom_row, 9) == "1",
         timeout=5000,
     )
 
@@ -5210,6 +5251,121 @@ def test_modbus_module_window_recovers_after_slow_partial_sample(qtbot, tmp_path
 
     assert window.sampleVariablesAction.isEnabled()
     assert not hasattr(window, "variableTable")
+
+
+def test_modbus_module_window_sends_raw_frame_with_auto_crc(qtbot, tmp_path) -> None:
+    repository = _repository(tmp_path)
+    transports = []
+    runtime = ModbusModuleRuntime(
+        repository,
+        transport_factory=placeholder_transport_factory(transports),
+        zero_calibration_wait_s=0.0,
+    )
+    scanner = SerialPortScanner(provider=lambda: (SerialPortInfo(port="COM9"),))
+    window = ModbusModuleWindow(repository, runtime=runtime, port_scanner=scanner)
+    qtbot.addWidget(window)
+    window.show()
+    dialog = _open_connection_dialog(qtbot, window)
+    _wait_for_scanned_ports(qtbot, dialog, 1)
+    _click(qtbot, dialog.connectButton)
+    qtbot.waitUntil(
+        lambda: window.statusValueLabel.text() == "Connected CFM-UI-001",
+        timeout=5000,
+    )
+
+    assert window.rawFrameAutoCrcCheckBox.isChecked()
+    window.rawFrameLineEdit.setText("01 03 00 00 00 02")
+    _click(qtbot, window.sendRawFrameButton)
+
+    qtbot.waitUntil(lambda: len(transports[0].raw_frames) == 1, timeout=5000)
+    assert transports[0].raw_frames == [bytes.fromhex("01 03 00 00 00 02 C4 0B")]
+    log = window.logTextEdit.toPlainText()
+    assert " | TX | raw_frame | 01 03 00 00 00 02 C4 0B" in log
+    assert "Raw frame sent" in log
+
+
+def test_modbus_module_window_sends_raw_frame_without_auto_crc(qtbot, tmp_path) -> None:
+    repository = _repository(tmp_path)
+    transports = []
+    runtime = ModbusModuleRuntime(
+        repository,
+        transport_factory=placeholder_transport_factory(transports),
+        zero_calibration_wait_s=0.0,
+    )
+    scanner = SerialPortScanner(provider=lambda: (SerialPortInfo(port="COM9"),))
+    window = ModbusModuleWindow(repository, runtime=runtime, port_scanner=scanner)
+    qtbot.addWidget(window)
+    window.show()
+    dialog = _open_connection_dialog(qtbot, window)
+    _wait_for_scanned_ports(qtbot, dialog, 1)
+    _click(qtbot, dialog.connectButton)
+    qtbot.waitUntil(
+        lambda: window.statusValueLabel.text() == "Connected CFM-UI-001",
+        timeout=5000,
+    )
+
+    window.rawFrameAutoCrcCheckBox.setChecked(False)
+    window.rawFrameLineEdit.setText("01 03 00 00 00 02 99 88")
+    _click(qtbot, window.sendRawFrameButton)
+
+    qtbot.waitUntil(lambda: len(transports[0].raw_frames) == 1, timeout=5000)
+    assert transports[0].raw_frames == [bytes.fromhex("01 03 00 00 00 02 99 88")]
+    log = window.logTextEdit.toPlainText()
+    assert " | TX | raw_frame | 01 03 00 00 00 02 99 88" in log
+
+
+def test_modbus_module_window_rejects_invalid_raw_frame_input(qtbot, tmp_path) -> None:
+    repository = _repository(tmp_path)
+    transports = []
+    runtime = ModbusModuleRuntime(
+        repository,
+        transport_factory=placeholder_transport_factory(transports),
+        zero_calibration_wait_s=0.0,
+    )
+    scanner = SerialPortScanner(provider=lambda: (SerialPortInfo(port="COM9"),))
+    window = ModbusModuleWindow(repository, runtime=runtime, port_scanner=scanner)
+    qtbot.addWidget(window)
+    window.show()
+    dialog = _open_connection_dialog(qtbot, window)
+    _wait_for_scanned_ports(qtbot, dialog, 1)
+    _click(qtbot, dialog.connectButton)
+    qtbot.waitUntil(
+        lambda: window.statusValueLabel.text() == "Connected CFM-UI-001",
+        timeout=5000,
+    )
+
+    window.rawFrameLineEdit.setText("01 0Z")
+    _click(qtbot, window.sendRawFrameButton)
+
+    assert transports[0].raw_frames == []
+    assert "Raw frame failed: invalid hex byte: 0Z" in window.logTextEdit.toPlainText()
+
+
+def test_modbus_module_window_rejects_empty_prefixed_raw_frame(qtbot, tmp_path) -> None:
+    repository = _repository(tmp_path)
+    transports = []
+    runtime = ModbusModuleRuntime(
+        repository,
+        transport_factory=placeholder_transport_factory(transports),
+        zero_calibration_wait_s=0.0,
+    )
+    scanner = SerialPortScanner(provider=lambda: (SerialPortInfo(port="COM9"),))
+    window = ModbusModuleWindow(repository, runtime=runtime, port_scanner=scanner)
+    qtbot.addWidget(window)
+    window.show()
+    dialog = _open_connection_dialog(qtbot, window)
+    _wait_for_scanned_ports(qtbot, dialog, 1)
+    _click(qtbot, dialog.connectButton)
+    qtbot.waitUntil(
+        lambda: window.statusValueLabel.text() == "Connected CFM-UI-001",
+        timeout=5000,
+    )
+
+    window.rawFrameLineEdit.setText("0x")
+    _click(qtbot, window.sendRawFrameButton)
+
+    assert transports[0].raw_frames == []
+    assert "Raw frame failed: enter at least one hex byte." in window.logTextEdit.toPlainText()
 
 
 def test_modbus_module_window_saves_variable_sampling_configuration(qtbot, tmp_path) -> None:

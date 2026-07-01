@@ -68,6 +68,23 @@ class _DisconnectedClient:
         return _RegisterPayloadResponse()
 
 
+class _RawSendClient:
+    connected = True
+
+    def __init__(self) -> None:
+        self.sent: list[bytes] = []
+
+    def connect(self) -> bool:
+        return True
+
+    def close(self) -> None:
+        self.connected = False
+
+    def send(self, request: bytes) -> int:
+        self.sent.append(bytes(request))
+        return len(request)
+
+
 class _FailingOpenClient:
     connected = False
 
@@ -109,6 +126,17 @@ def test_pymodbus_transport_reconnects_before_request_when_client_closed() -> No
     assert response.values == [0x1234]
     assert client.connect_count == 1
     assert client.read_count == 1
+
+
+def test_pymodbus_transport_sends_raw_frame_bytes() -> None:
+    transport = PymodbusSerialTransport(SerialConfig(port="COM1", unit_id=1))
+    client = _RawSendClient()
+    transport._client = client
+
+    response = transport.send_raw_frame(bytes.fromhex("01 03 00 00 00 02 C4 0B"))
+
+    assert response.ok
+    assert client.sent == [bytes.fromhex("01 03 00 00 00 02 C4 0B")]
 
 
 def test_pymodbus_transport_reports_serial_open_details() -> None:

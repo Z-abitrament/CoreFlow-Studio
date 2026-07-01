@@ -23,6 +23,7 @@ class FakeModbusTransport:
     reads: list[tuple[RegisterKind, int, int, int]] = field(default_factory=list)
     writes: list[tuple[int, list[int], int]] = field(default_factory=list)
     coil_writes: list[tuple[int, bool, int]] = field(default_factory=list)
+    raw_frames: list[bytes] = field(default_factory=list)
 
     def connect(self) -> bool:
         self.connected = True
@@ -74,6 +75,10 @@ class FakeModbusTransport:
         self.coil_writes.append((address, value, unit_id))
         self.registers[address] = [0]
         return TransportResponse(values=[0])
+
+    def send_raw_frame(self, frame: bytes) -> TransportResponse:
+        self.raw_frames.append(bytes(frame))
+        return TransportResponse(values=[])
 
 
 def placeholder_fake_transport() -> FakeModbusTransport:

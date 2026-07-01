@@ -328,7 +328,7 @@ new_k = (max(intermediate_k_1,
 
 生成 final-K preview 后，`Write New K...` 会变为可用。这是一个显式写入动作，不属于计算动作本身。UI 会显示确认弹窗，包含当前 Device ID、K Factor 变量、original K、new K 和 delta。如果操作者确认，运行时只会通过 `WriteGuardService` 写入新 K，随后读取同一个 K Factor 变量并验证 readback 是否匹配请求值，同时记录 audit log，并把 final-K 测试记录更新为包含 `write_requested`、`write_status`、`write_verified`、`readback_k_factor` 和 `audit_id`。取消确认弹窗会保留 preview，但不会写入设备。
 
-每个流量点的 repeatability 是 trial percent errors 的样本标准差。summary 还保存 mean percent error、maximum absolute percent error、trial count、per-flow summaries 和 trial details。
+每个流量点的 repeatability 是 trial percent errors 的样本标准差。summary 还保存 mean percent error、maximum absolute percent error、trial count、per-flow summaries 和 trial details。已保存的 `manual_error_repeatability` 记录会在历史记录表的 parameter summary 中显示 `mean_error`，并在每个已保存流量点详情里列出所选 trial 窗口的 `mean_percent_error`。
 
 测试记录 operation names：
 
