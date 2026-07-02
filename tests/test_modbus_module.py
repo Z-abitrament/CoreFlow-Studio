@@ -397,6 +397,83 @@ def test_modbus_module_runtime_runs_without_simulator(tmp_path) -> None:
     assert zero_run.configuration_snapshot["device_model"] == "CFM-100"
 
 
+def test_modbus_module_runtime_returns_raw_frame_response_bytes(tmp_path) -> None:
+    repository = _repository(tmp_path)
+    transports = []
+    frames: list[tuple[str, str, str]] = []
+    runtime = ModbusModuleRuntime(
+        repository,
+        transport_factory=placeholder_transport_factory(transports),
+        zero_calibration_wait_s=0.0,
+    )
+    runtime.set_frame_logger(
+        lambda direction, operation, data: frames.append((direction, operation, data))
+    )
+    _select_runtime_profile(runtime, device_id="CFM-TEST-001")
+    runtime.connect(ModbusConnectionSettings(port="COM9", unit_id=7))
+    transports[0].registers[0x0000] = [0x0001, 0x0002]
+    transports[0].raw_response = bytes.fromhex("07")
+
+    response = runtime.send_raw_frame(bytes.fromhex("07 03 00 00 00 02"), append_crc=True)
+
+    assert transports[0].raw_frames == []
+    assert transports[0].reads == [(RegisterKind.HOLDING, 0x0000, 2, 7)]
+    assert response == bytes.fromhex("07 03 04 00 01 00 02 4C 32")
+    assert ("TX", "raw_frame", "07 03 00 00 00 02 C4 6D") in frames
+    assert ("RX", "raw_frame", "07 03 04 00 01 00 02 4C 32") in frames
+
+
+def test_modbus_module_runtime_routes_standard_raw_read_around_raw_recv(tmp_path) -> None:
+    repository = _repository(tmp_path)
+    transports = []
+    frames: list[tuple[str, str, str]] = []
+    runtime = ModbusModuleRuntime(
+        repository,
+        transport_factory=placeholder_transport_factory(transports),
+        zero_calibration_wait_s=0.0,
+    )
+    runtime.set_frame_logger(
+        lambda direction, operation, data: frames.append((direction, operation, data))
+    )
+    _select_runtime_profile(runtime, device_id="CFM-TEST-001")
+    runtime.connect(ModbusConnectionSettings(port="COM9", unit_id=1))
+    transports[0].registers[0x003D] = [0x3BE1, 0x72D8]
+    transports[0].raw_response = bytes.fromhex("01")
+
+    response = runtime.send_raw_frame(bytes.fromhex("01 03 00 3D 00 02"), append_crc=True)
+
+    assert transports[0].raw_frames == []
+    assert transports[0].reads == [(RegisterKind.HOLDING, 0x003D, 2, 1)]
+    assert response == bytes.fromhex("01 03 04 3B E1 72 D8 83 DB")
+    assert ("TX", "raw_frame", "01 03 00 3D 00 02 55 C7") in frames
+    assert ("RX", "raw_frame", "01 03 04 3B E1 72 D8 83 DB") in frames
+
+
+def test_modbus_module_runtime_routes_standard_raw_single_write_around_raw_send(tmp_path) -> None:
+    repository = _repository(tmp_path)
+    transports = []
+    frames: list[tuple[str, str, str]] = []
+    runtime = ModbusModuleRuntime(
+        repository,
+        transport_factory=placeholder_transport_factory(transports),
+        zero_calibration_wait_s=0.0,
+    )
+    runtime.set_frame_logger(
+        lambda direction, operation, data: frames.append((direction, operation, data))
+    )
+    _select_runtime_profile(runtime, device_id="CFM-TEST-001")
+    runtime.connect(ModbusConnectionSettings(port="COM9", unit_id=1))
+    transports[0].raw_response = bytes.fromhex("01")
+
+    response = runtime.send_raw_frame(bytes.fromhex("01 06 00 3D 12 34"), append_crc=True)
+
+    assert transports[0].raw_frames == []
+    assert transports[0].writes == [(0x003D, [0x1234], 1)]
+    assert response == bytes.fromhex("01 06 00 3D 12 34 15 71")
+    assert ("TX", "raw_frame", "01 06 00 3D 12 34 15 71") in frames
+    assert ("RX", "raw_frame", "01 06 00 3D 12 34 15 71") in frames
+
+
 def test_modbus_module_runtime_requires_stable_device_profile_id(tmp_path) -> None:
     repository = _repository(tmp_path)
     runtime = ModbusModuleRuntime(
@@ -5274,12 +5351,18 @@ def test_modbus_module_window_sends_raw_frame_with_auto_crc(qtbot, tmp_path) -> 
     )
 
     assert window.rawFrameAutoCrcCheckBox.isChecked()
-    transports[0].raw_response = bytes.fromhex("01 03 04 00 01 00 02 2A 32")
+    transports[0].registers[0x0000] = [0x0001, 0x0002]
+    transports[0].raw_response = bytes.fromhex("01")
     window.rawFrameLineEdit.setText("01 03 00 00 00 02")
     _click(qtbot, window.sendRawFrameButton)
 
-    qtbot.waitUntil(lambda: len(transports[0].raw_frames) == 1, timeout=5000)
-    assert transports[0].raw_frames == [bytes.fromhex("01 03 00 00 00 02 C4 0B")]
+    qtbot.waitUntil(
+        lambda: " | RX | raw_frame | 01 03 04 00 01 00 02 2A 32"
+        in window.logTextEdit.toPlainText(),
+        timeout=5000,
+    )
+    assert transports[0].raw_frames == []
+    assert transports[0].reads == [(RegisterKind.HOLDING, 0x0000, 2, 1)]
     log = window.logTextEdit.toPlainText()
     assert " | TX | raw_frame | 01 03 00 00 00 02 C4 0B" in log
     assert " | RX | raw_frame | 01 03 04 00 01 00 02 2A 32" in log

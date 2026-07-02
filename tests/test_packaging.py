@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from coreflow import __version__
 from coreflow.__main__ import build_parser, main, should_launch_packaged_ui_by_default
 from coreflow.app.paths import default_user_data_root
 from coreflow.build_info import current_build_info
@@ -131,6 +132,12 @@ def test_packaged_no_argument_launches_ui_by_default(monkeypatch, tmp_path) -> N
         )
         is False
     )
+    assert (
+        should_launch_packaged_ui_by_default(
+            parser.parse_args(["--modbus-raw", "01 03 00 00 00 02"])
+        )
+        is False
+    )
     assert main(["--data-root", str(tmp_path)]) == 0
     assert calls == [tmp_path]
 
@@ -165,6 +172,49 @@ def test_replay_template_and_smoke_cli_run_workflow(tmp_path, capsys) -> None:
     assert (data_root / "coreflow.sqlite").exists()
 
 
+def test_modbus_raw_cli_prints_response(monkeypatch, capsys) -> None:
+    class FakeClient:
+        def __init__(self, **kwargs) -> None:
+            assert kwargs["port"] == "COM9"
+            assert kwargs["unit_id"] == 1
+            assert kwargs["baudrate"] == 19200
+            assert kwargs["parity"] == "N"
+            assert kwargs["stop_bits"] == 1
+            assert kwargs["read_timeout_s"] == 3.0
+            assert kwargs["retry_count"] == 3
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def send_raw_frame(self, frame, *, append_crc: bool = False):
+            assert frame == "01 03 00 3D 00 02"
+            assert append_crc is True
+            return bytes.fromhex("01 03 04 3B E1 72 D8 83 DB")
+
+    monkeypatch.setattr("coreflow.modbus_api.ModbusRawClient", FakeClient)
+
+    assert (
+        main(
+            [
+                "--modbus-raw",
+                "01 03 00 3D 00 02",
+                "--modbus-port",
+                "COM9",
+                "--modbus-unit",
+                "1",
+                "--modbus-auto-crc",
+            ]
+        )
+        == 0
+    )
+
+    captured = capsys.readouterr()
+    assert captured.out.strip() == "01 03 04 3B E1 72 D8 83 DB"
+
+
 def test_make_update_package_cli_writes_release_assets(tmp_path, capsys) -> None:
     dist_dir = tmp_path / "CoreFlowStudio"
     (dist_dir / "_internal").mkdir(parents=True)
@@ -181,7 +231,7 @@ def test_make_update_package_cli_writes_release_assets(tmp_path, capsys) -> None
                 "--update-output-dir",
                 str(output_dir),
                 "--update-base-url",
-                "https://github.com/acme/CoreFlowStudio/releases/download/v0.6.3",
+                f"https://github.com/acme/CoreFlowStudio/releases/download/v{__version__}",
             ]
         )
         == 0
@@ -190,10 +240,10 @@ def test_make_update_package_cli_writes_release_assets(tmp_path, capsys) -> None
     captured = capsys.readouterr()
     assert "Wrote full update package:" in captured.out
     assert "Wrote update manifest:" in captured.out
-    assert (output_dir / "CoreFlowStudio-0.6.3-full.zip").exists()
+    assert (output_dir / f"CoreFlowStudio-{__version__}-full.zip").exists()
     manifest = (output_dir / "latest.json").read_text(encoding="utf-8")
-    assert '"latest_version": "0.6.3"' in manifest
-    assert "CoreFlowStudio-0.6.3-full.zip" in manifest
+    assert f'"latest_version": "{__version__}"' in manifest
+    assert f"CoreFlowStudio-{__version__}-full.zip" in manifest
 
 
 def test_windows_packaging_files_are_present() -> None:
@@ -280,6 +330,7 @@ def test_windows_packaging_files_are_present() -> None:
     assert "CoreFlowStudioConsole.exe --simulator-smoke" in readme_text
     assert "CoreFlowStudioConsole.exe --write-replay-template" in readme_text
     assert "CoreFlowStudioConsole.exe --replay-smoke" in readme_text
+    assert "CoreFlowStudioConsole.exe --modbus-raw" in readme_text
     assert "CoreFlowStudioConsole.exe --ui" in readme_text
     assert "--make-update-package" in readme_text
     assert "--previous-update-version" in readme_text

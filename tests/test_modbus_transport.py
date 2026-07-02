@@ -39,7 +39,8 @@ class _ClientWithEmptyBits:
 
 
 class _RegisterPayloadResponse:
-    registers = [0x1234]
+    def __init__(self, registers: list[int] | None = None) -> None:
+        self.registers = registers or [0x1234]
 
     def isError(self) -> bool:  # noqa: N802 - pymodbus API
         return False
@@ -88,6 +89,29 @@ class _RawSendClient:
 
     def recv(self, size: int | None) -> bytes:
         self.recv_sizes.append(size)
+        response = self.response
+        self.response = b""
+        return response
+
+
+class _HighLevelRawClient(_RawSendClient):
+    def __init__(self, response: _RegisterPayloadResponse) -> None:
+        super().__init__()
+        self.response = response
+        self.holding_reads: list[tuple[int, int, int]] = []
+        self.single_writes: list[tuple[int, int, int]] = []
+        self.multi_writes: list[tuple[int, list[int], int]] = []
+
+    def read_holding_registers(self, address: int, *, count: int, device_id: int):
+        self.holding_reads.append((address, count, device_id))
+        return self.response
+
+    def write_register(self, address: int, value: int, *, device_id: int):
+        self.single_writes.append((address, value, device_id))
+        return self.response
+
+    def write_registers(self, address: int, values: list[int], *, device_id: int):
+        self.multi_writes.append((address, list(values), device_id))
         return self.response
 
 
@@ -134,17 +158,71 @@ def test_pymodbus_transport_reconnects_before_request_when_client_closed() -> No
     assert client.read_count == 1
 
 
-def test_pymodbus_transport_sends_raw_frame_bytes_and_reads_response() -> None:
+def test_pymodbus_transport_routes_standard_raw_read_frame_through_high_level_client() -> None:
     transport = PymodbusSerialTransport(SerialConfig(port="COM1", unit_id=1))
-    client = _RawSendClient(bytes.fromhex("01 03 04 00 01 00 02 2A 32"))
+    client = _HighLevelRawClient(_RegisterPayloadResponse([0x3BE1, 0x72D8]))
+    transport._client = client
+
+    response = transport.send_raw_frame(bytes.fromhex("01 03 00 3D 00 02 55 C7"))
+
+    assert response.ok
+    assert client.sent == []
+    assert client.holding_reads == [(0x003D, 2, 1)]
+    assert response.values == list(bytes.fromhex("01 03 04 3B E1 72 D8 83 DB"))
+
+
+def test_pymodbus_transport_routes_standard_raw_single_write_through_high_level_client() -> None:
+    transport = PymodbusSerialTransport(SerialConfig(port="COM1", unit_id=1))
+    client = _HighLevelRawClient(_RegisterPayloadResponse())
+    transport._client = client
+
+    response = transport.send_raw_frame(bytes.fromhex("01 06 00 3D 12 34 15 71"))
+
+    assert response.ok
+    assert client.sent == []
+    assert client.single_writes == [(0x003D, 0x1234, 1)]
+    assert response.values == list(bytes.fromhex("01 06 00 3D 12 34 15 71"))
+
+
+def test_pymodbus_transport_routes_standard_raw_multi_write_through_high_level_client() -> None:
+    transport = PymodbusSerialTransport(SerialConfig(port="COM1", unit_id=1))
+    client = _HighLevelRawClient(_RegisterPayloadResponse())
+    transport._client = client
+
+    response = transport.send_raw_frame(
+        bytes.fromhex("01 10 00 3D 00 02 04 3B E1 72 D8 48 CA")
+    )
+
+    assert response.ok
+    assert client.sent == []
+    assert client.multi_writes == [(0x003D, [0x3BE1, 0x72D8], 1)]
+    assert response.values == list(bytes.fromhex("01 10 00 3D 00 02 D0 04"))
+
+
+def test_pymodbus_transport_falls_back_to_raw_send_for_nonstandard_frame() -> None:
+    transport = PymodbusSerialTransport(SerialConfig(port="COM1", unit_id=1))
+    client = _RawSendClient(bytes.fromhex("01 41 99 88 77 32 10"))
+    transport._client = client
+
+    response = transport.send_raw_frame(bytes.fromhex("01 41 00 00 C0 01"))
+
+    assert response.ok
+    assert client.sent == [bytes.fromhex("01 41 00 00 C0 01")]
+    assert response.values == list(bytes.fromhex("01 41 99 88 77 32 10"))
+
+
+def test_pymodbus_transport_standard_raw_read_uses_high_level_client_not_raw_recv() -> None:
+    transport = PymodbusSerialTransport(SerialConfig(port="COM1", unit_id=1))
+    client = _HighLevelRawClient(_RegisterPayloadResponse([0x0001, 0x0002]))
     transport._client = client
 
     response = transport.send_raw_frame(bytes.fromhex("01 03 00 00 00 02 C4 0B"))
 
     assert response.ok
-    assert client.sent == [bytes.fromhex("01 03 00 00 00 02 C4 0B")]
-    assert client.recv_sizes == [None]
     assert response.values == list(bytes.fromhex("01 03 04 00 01 00 02 2A 32"))
+    assert client.sent == []
+    assert client.recv_sizes == []
+    assert client.holding_reads == [(0, 2, 1)]
 
 
 def test_pymodbus_transport_reports_serial_open_details() -> None:

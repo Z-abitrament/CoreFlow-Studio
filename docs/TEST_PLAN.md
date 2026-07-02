@@ -80,6 +80,12 @@ Scenarios:
 - Read holding/input registers through fake or loopback target.
 - Read configured coil and discrete-input values through fake or loopback target.
 - Write a configured coil through the guarded device path for zero-calibration start behavior.
+- Send standard Modbus raw frames through the public Python API and confirm
+  they reuse the high-level read/write transport path instead of the low-level
+  raw receive path.
+- Send one raw frame through `CoreFlowStudioConsole.exe --modbus-raw` or the
+  equivalent source CLI path and confirm the response is printed as uppercase
+  hexadecimal bytes.
 - Decode configured data types and scaling.
 - Handle timeout and retry.
 - Reject writes to read-only register definitions.

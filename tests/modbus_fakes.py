@@ -77,6 +77,27 @@ class FakeModbusTransport:
         self.registers[address] = [0]
         return TransportResponse(values=[0])
 
+    def write_single_register(
+        self,
+        address: int,
+        value: int,
+        unit_id: int,
+    ) -> TransportResponse:
+        self.writes.append((address, [value], unit_id))
+        self.registers[address] = [value]
+        return TransportResponse(values=[value])
+
+    def write_coils(
+        self,
+        address: int,
+        values: list[bool],
+        unit_id: int,
+    ) -> TransportResponse:
+        encoded = [1 if value else 0 for value in values]
+        self.writes.append((address, encoded, unit_id))
+        self.registers[address] = encoded
+        return TransportResponse(values=encoded)
+
     def send_raw_frame(self, frame: bytes) -> TransportResponse:
         self.raw_frames.append(bytes(frame))
         return TransportResponse(values=list(self.raw_response))

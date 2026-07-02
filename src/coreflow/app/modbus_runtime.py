@@ -835,7 +835,7 @@ class ModbusModuleRuntime:
         response = sender(outbound)
         if not response.ok:
             raise RuntimeError(response.error or "Raw frame send failed.")
-        return outbound
+        return bytes(response.values or [])
 
     def sample_variables(
         self,
@@ -4595,7 +4595,9 @@ class _FrameLoggingTransport:
     def send_raw_frame(self, frame: bytes) -> TransportResponse:
         text = _bytes_to_hex(frame)
         self._logger("TX", "raw_frame", text)
-        response = self._transport.send_raw_frame(frame)
+        response = self._send_standard_raw_frame(frame)
+        if response is None:
+            response = self._transport.send_raw_frame(frame)
         if response.ok and response.values:
             self._logger("RX", "raw_frame", _bytes_to_hex(bytes(response.values)))
         elif response.ok:
@@ -4603,6 +4605,96 @@ class _FrameLoggingTransport:
         else:
             self._logger("RX", "raw_frame", response.error or "ERROR")
         return response
+
+    def _send_standard_raw_frame(self, frame: bytes) -> TransportResponse | None:
+        if not _valid_modbus_crc(frame):
+            return None
+        unit_id = frame[0]
+        function = frame[1]
+        if function in (0x01, 0x02, 0x03, 0x04):
+            if len(frame) != 8:
+                return None
+            address = _read_u16(frame, 2)
+            count = _read_u16(frame, 4)
+            kind = _raw_read_kind(function)
+            response = self._transport.read_registers(kind, address, count, unit_id)
+            if not response.ok:
+                return response
+            payload = (
+                _bits_to_response_bytes(response.values or [], count)
+                if kind in (RegisterKind.COIL, RegisterKind.DISCRETE_INPUT)
+                else _words_to_bytes(response.values or [])
+            )
+            return TransportResponse(
+                values=list(_raw_frame_bytes([unit_id, function, len(payload), *payload]))
+            )
+        if function == 0x05:
+            if len(frame) != 8:
+                return None
+            address = _read_u16(frame, 2)
+            raw_value = _read_u16(frame, 4)
+            if raw_value not in (0x0000, 0xFF00):
+                return None
+            response = self._transport.write_coil(address, raw_value == 0xFF00, unit_id)
+            if not response.ok:
+                return response
+            return TransportResponse(values=list(_raw_frame_bytes(list(frame[:6]))))
+        if function == 0x06:
+            if len(frame) != 8:
+                return None
+            address = _read_u16(frame, 2)
+            value = _read_u16(frame, 4)
+            writer = getattr(self._transport, "write_single_register", None)
+            if not callable(writer):
+                return None
+            response = writer(address, value, unit_id)
+            if not response.ok:
+                return response
+            return TransportResponse(values=list(_raw_frame_bytes(list(frame[:6]))))
+        if function == 0x0F:
+            if len(frame) < 9:
+                return None
+            address = _read_u16(frame, 2)
+            count = _read_u16(frame, 4)
+            byte_count = frame[6]
+            if len(frame) != 9 + byte_count:
+                return None
+            writer = getattr(self._transport, "write_coils", None)
+            if not callable(writer):
+                return None
+            response = writer(
+                address,
+                _decode_bit_values(frame[7 : 7 + byte_count], count),
+                unit_id,
+            )
+            if not response.ok:
+                return response
+            return TransportResponse(
+                values=list(
+                    _raw_frame_bytes([unit_id, function, *_u16(address), *_u16(count)])
+                )
+            )
+        if function == 0x10:
+            if len(frame) < 9:
+                return None
+            address = _read_u16(frame, 2)
+            count = _read_u16(frame, 4)
+            byte_count = frame[6]
+            if len(frame) != 9 + byte_count or byte_count != count * 2:
+                return None
+            values = [
+                _read_u16(frame, offset)
+                for offset in range(7, 7 + byte_count, 2)
+            ]
+            response = self._transport.write_registers(address, values, unit_id)
+            if not response.ok:
+                return response
+            return TransportResponse(
+                values=list(
+                    _raw_frame_bytes([unit_id, function, *_u16(address), *_u16(count)])
+                )
+            )
+        return None
 
 
 def _read_function_code(kind: RegisterKind) -> int:
@@ -4635,6 +4727,46 @@ def _bits_to_response_bytes(values: list[int], count: int) -> list[int]:
         if value:
             payload[index // 8] |= 1 << (index % 8)
     return payload
+
+
+def _decode_bit_values(payload: bytes | bytearray, count: int) -> list[bool]:
+    values: list[bool] = []
+    for byte in payload:
+        for bit_index in range(8):
+            values.append(bool(byte & (1 << bit_index)))
+            if len(values) == count:
+                return values
+    return values
+
+
+def _raw_read_kind(function: int) -> RegisterKind:
+    if function == 0x01:
+        return RegisterKind.COIL
+    if function == 0x02:
+        return RegisterKind.DISCRETE_INPUT
+    if function == 0x03:
+        return RegisterKind.HOLDING
+    if function == 0x04:
+        return RegisterKind.INPUT
+    raise ValueError(f"Unsupported raw read function: {function}")
+
+
+def _read_u16(frame: bytes | bytearray, offset: int) -> int:
+    return (frame[offset] << 8) | frame[offset + 1]
+
+
+def _raw_frame_bytes(payload: list[int]) -> bytes:
+    frame = bytes(value & 0xFF for value in payload)
+    crc = _modbus_crc(list(frame))
+    return frame + bytes((crc & 0xFF, (crc >> 8) & 0xFF))
+
+
+def _valid_modbus_crc(frame: bytes) -> bool:
+    if len(frame) < 4:
+        return False
+    expected = _modbus_crc(list(frame[:-2]))
+    actual = frame[-2] | (frame[-1] << 8)
+    return expected == actual
 
 
 def _hex_frame(payload: list[int]) -> str:

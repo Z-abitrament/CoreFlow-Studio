@@ -99,6 +99,58 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run a headless replay-backed simulator workflow smoke check and exit.",
     )
     parser.add_argument(
+        "--modbus-raw",
+        default=None,
+        help="Send one Modbus RTU raw frame and print the RX bytes as hex.",
+    )
+    parser.add_argument(
+        "--modbus-port",
+        default="COM1",
+        help="COM port for --modbus-raw.",
+    )
+    parser.add_argument(
+        "--modbus-unit",
+        type=int,
+        default=1,
+        help="Default Modbus unit ID for --modbus-raw connection settings.",
+    )
+    parser.add_argument(
+        "--modbus-baudrate",
+        type=int,
+        default=19200,
+        help="Baud rate for --modbus-raw.",
+    )
+    parser.add_argument(
+        "--modbus-parity",
+        default="N",
+        choices=("N", "E", "O"),
+        help="Serial parity for --modbus-raw.",
+    )
+    parser.add_argument(
+        "--modbus-stop-bits",
+        type=int,
+        default=1,
+        choices=(1, 2),
+        help="Serial stop bits for --modbus-raw.",
+    )
+    parser.add_argument(
+        "--modbus-timeout",
+        type=float,
+        default=3.0,
+        help="Read timeout in seconds for --modbus-raw.",
+    )
+    parser.add_argument(
+        "--modbus-retries",
+        type=int,
+        default=3,
+        help="Retry count for standard Modbus operations in --modbus-raw.",
+    )
+    parser.add_argument(
+        "--modbus-auto-crc",
+        action="store_true",
+        help="Append Modbus CRC16 to --modbus-raw before sending.",
+    )
+    parser.add_argument(
         "--asio-list-devices",
         action="store_true",
         help="List ASIO driver registrations and audio devices for IIS diagnostics.",
@@ -244,6 +296,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_simulator_smoke(data_root=args.data_root)
     elif args.replay_smoke is not None:
         return run_replay_smoke(args.replay_smoke, data_root=args.data_root)
+    elif args.modbus_raw is not None:
+        return run_modbus_raw_cli(args)
     elif args.asio_list_devices:
         return list_asio_devices(backend_name=args.asio_backend)
     elif args.asio_probe_native:
@@ -272,6 +326,7 @@ def should_launch_packaged_ui_by_default(args: argparse.Namespace) -> bool:
             args.write_register_map_template is not None,
             args.write_replay_template is not None,
             args.replay_smoke is not None,
+            args.modbus_raw is not None,
             args.asio_list_devices,
             args.asio_probe_native,
             args.asio_loopback_smoke,
@@ -432,6 +487,36 @@ def run_replay_smoke(replay_path: Path, data_root: Path | None = None) -> int:
         f"experiment_run={experiment_run_id} "
         f"source={replay_path}"
     )
+    return 0
+
+
+def run_modbus_raw_cli(args: argparse.Namespace) -> int:
+    """Send one Modbus RTU raw frame from command-line arguments."""
+
+    from coreflow.modbus_api import (
+        ModbusCommunicationError,
+        ModbusRawClient,
+        bytes_to_hex,
+    )
+
+    try:
+        with ModbusRawClient(
+            port=args.modbus_port,
+            unit_id=args.modbus_unit,
+            baudrate=args.modbus_baudrate,
+            parity=args.modbus_parity,
+            stop_bits=args.modbus_stop_bits,
+            read_timeout_s=args.modbus_timeout,
+            retry_count=args.modbus_retries,
+        ) as client:
+            response = client.send_raw_frame(
+                args.modbus_raw,
+                append_crc=args.modbus_auto_crc,
+            )
+    except (ModbusCommunicationError, ValueError) as exc:
+        print(f"Modbus raw frame failed: {exc}", file=sys.stderr)
+        return 2
+    print(bytes_to_hex(response))
     return 0
 
 

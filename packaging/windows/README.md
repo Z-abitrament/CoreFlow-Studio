@@ -123,6 +123,7 @@ Manual smoke commands are:
 .\dist\CoreFlowStudio\CoreFlowStudioConsole.exe --write-replay-template .\dist\CoreFlowStudio\replay_template.csv
 .\dist\CoreFlowStudio\CoreFlowStudioConsole.exe --simulator-smoke --data-root .\dist\CoreFlowStudio\smoke-data
 .\dist\CoreFlowStudio\CoreFlowStudioConsole.exe --replay-smoke .\dist\CoreFlowStudio\replay_template.csv --data-root .\dist\CoreFlowStudio\replay-smoke-data
+.\dist\CoreFlowStudio\CoreFlowStudioConsole.exe --modbus-raw "01 03 00 3D 00 02" --modbus-port COM9 --modbus-unit 1 --modbus-auto-crc
 ```
 
 Opening `CoreFlowStudio.exe` with no command-line arguments starts the Qt desktop UI without a console window. Use `CoreFlowStudioConsole.exe` for command-line diagnostics, build metadata, protocol templates, and headless simulator verification.
@@ -130,6 +131,11 @@ Opening `CoreFlowStudio.exe` with no command-line arguments starts the Qt deskto
 The `--simulator-smoke` command runs the simulator path headlessly: add a device, connect it, read live values, run calibration preview, run factory test, run an experiment, and generate an export package. In the UI, the same simulator workflows should be available from the main window.
 
 The `--write-replay-template` command writes a deterministic CSV replay file. The `--replay-smoke` command loads that CSV as a read-only simulated device and runs a replay-backed experiment workflow.
+
+The `--modbus-raw` command sends one local Modbus RTU frame and prints the RX
+bytes as uppercase hex. It uses the same standard raw-frame routing as the
+Python `coreflow.modbus_api.ModbusRawClient` API. Use `--modbus-auto-crc` when
+the input frame omits the CRC bytes.
 
 ## Troubleshooting Startup
 If `CoreFlowStudio.exe` exits or reports an error before the window appears, run the console UI path from PowerShell:

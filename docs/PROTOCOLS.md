@@ -12,6 +12,8 @@ The first concrete hardware communication path is Modbus RTU over USB-to-serial.
 - Configurable Modbus unit IDs.
 - Configurable register maps.
 - Modbus master operation for configured variable reads and guarded calibration writes.
+- Scriptable Modbus raw-frame access through `coreflow.modbus_api.ModbusRawClient`
+  and `CoreFlowStudioConsole.exe --modbus-raw` for local lab automation.
 
 ### Future Modbus Listener Diagnostics
 - Modbus listener or sniffer mode using com0com plus hub4com virtual serial ports.
@@ -144,6 +146,24 @@ Write-capable workflows should use these states:
 - `rejected`: record validation failure, permission failure, or operator denial.
 
 Protocol adapters must only receive write requests after application-level validation has succeeded. They still must enforce register-map permissions and type/range validation as a final local check.
+
+The scriptable raw-frame API is a diagnostics and integration surface. It can
+send Modbus write function codes when a caller explicitly supplies such a
+frame, but it does not replace guarded calibration workflows or audited
+parameter-write operations.
+
+## Scriptable Modbus API
+External Python tools can import `coreflow.modbus_api.ModbusRawClient` to open a
+local Modbus RTU serial connection and send one or more raw frames without
+driving the Qt window. The packaged console executable exposes the same path via
+`--modbus-raw` for non-Python callers.
+
+Standard function codes `01`, `02`, `03`, `04`, `05`, `06`, `0F`, and `10` are
+routed through the same high-level communication methods used by the Modbus
+Module read/write controls, then returned as raw response bytes. Non-standard
+or invalid-CRC frames fall back to the low-level raw send path for diagnostics.
+
+See `docs/MODBUS_API.md` for caller examples and CLI options.
 
 ## Diagnostics
 Protocol adapters must expose:
