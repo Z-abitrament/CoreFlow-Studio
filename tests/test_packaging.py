@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from coreflow import __version__
@@ -90,6 +91,28 @@ def test_build_info_uses_environment_stamp(monkeypatch, capsys) -> None:
     captured = capsys.readouterr()
     assert "commit=abc1234" in captured.out
     assert "channel=pytest" in captured.out
+
+
+def test_api_manifest_cli_prints_machine_readable_contract(capsys) -> None:
+    assert main(["--api-manifest"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schema_version"] == 1
+    assert payload["application"]["name"] == "CoreFlow Studio"
+    assert payload["application"]["package"] == "coreflow"
+    assert payload["application"]["version"] == __version__
+
+    raw_frame = next(
+        capability
+        for capability in payload["capabilities"]
+        if capability["id"] == "modbus.raw_frame"
+    )
+    assert raw_frame["python_api"]["import"] == "coreflow.modbus_api.ModbusRawClient"
+    assert "python -m coreflow --modbus-raw" in raw_frame["cli"]["source_command"]
+    assert "CoreFlowStudioConsole.exe --modbus-raw" in raw_frame["cli"][
+        "packaged_command"
+    ]
+    assert "guarded calibration workflows" in " ".join(raw_frame["safety"])
 
 
 def test_packaged_no_argument_launches_ui_by_default(monkeypatch, tmp_path) -> None:
@@ -213,6 +236,92 @@ def test_modbus_raw_cli_prints_response(monkeypatch, capsys) -> None:
 
     captured = capsys.readouterr()
     assert captured.out.strip() == "01 03 04 3B E1 72 D8 83 DB"
+
+
+def test_modbus_raw_json_output_prints_parseable_success(monkeypatch, capsys) -> None:
+    class FakeClient:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def send_raw_frame(self, frame, *, append_crc: bool = False):
+            assert frame == "01 03 00 3D 00 02"
+            assert append_crc is True
+            return bytes.fromhex("01 03 04 3B E1 72 D8 83 DB")
+
+    monkeypatch.setattr("coreflow.modbus_api.ModbusRawClient", FakeClient)
+
+    assert (
+        main(
+            [
+                "--modbus-raw",
+                "01 03 00 3D 00 02",
+                "--modbus-port",
+                "COM9",
+                "--modbus-unit",
+                "1",
+                "--modbus-auto-crc",
+                "--modbus-json",
+            ]
+        )
+        == 0
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "ok": True,
+        "capability": "modbus.raw_frame",
+        "request": {
+            "frame": "01 03 00 3D 00 02",
+            "append_crc": True,
+            "port": "COM9",
+            "unit_id": 1,
+        },
+        "response_hex": "01 03 04 3B E1 72 D8 83 DB",
+    }
+
+
+def test_modbus_raw_json_output_prints_parseable_error(monkeypatch, capsys) -> None:
+    from coreflow.modbus_api import ModbusCommunicationError
+
+    class FailingClient:
+        def __init__(self, **kwargs) -> None:
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        def send_raw_frame(self, frame, *, append_crc: bool = False):
+            raise ModbusCommunicationError("COM9 denied")
+
+    monkeypatch.setattr("coreflow.modbus_api.ModbusRawClient", FailingClient)
+
+    assert (
+        main(
+            [
+                "--modbus-raw",
+                "01 03 00 3D 00 02",
+                "--modbus-port",
+                "COM9",
+                "--modbus-json",
+            ]
+        )
+        == 2
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is False
+    assert payload["capability"] == "modbus.raw_frame"
+    assert payload["error"] == "COM9 denied"
+    assert payload["request"]["port"] == "COM9"
 
 
 def test_make_update_package_cli_writes_release_assets(tmp_path, capsys) -> None:

@@ -86,6 +86,13 @@ Scenarios:
 - Send one raw frame through `CoreFlowStudioConsole.exe --modbus-raw` or the
   equivalent source CLI path and confirm the response is printed as uppercase
   hexadecimal bytes.
+- Print the local API manifest through `--api-manifest` and confirm the JSON
+  advertises `modbus.raw_frame`, the Python import path, the source CLI command,
+  the packaged console command, output modes, and safety notes.
+- Send one fake-backed raw frame with `--modbus-json` and confirm success output
+  is parseable JSON with `ok: true`, `capability: "modbus.raw_frame"`, request
+  fields, and uppercase `response_hex`; confirm a communication failure prints
+  parseable `ok: false` JSON and exits with code `2`.
 - Decode configured data types and scaling.
 - Handle timeout and retry.
 - Reject writes to read-only register definitions.

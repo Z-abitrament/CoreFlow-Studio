@@ -14,6 +14,9 @@ The first concrete hardware communication path is Modbus RTU over USB-to-serial.
 - Modbus master operation for configured variable reads and guarded calibration writes.
 - Scriptable Modbus raw-frame access through `coreflow.modbus_api.ModbusRawClient`
   and `CoreFlowStudioConsole.exe --modbus-raw` for local lab automation.
+- Machine-readable local API discovery through `--api-manifest`, with JSON
+  raw-frame output available through `--modbus-json` for wrappers that should
+  not scrape human-readable text.
 
 ### Future Modbus Listener Diagnostics
 - Modbus listener or sniffer mode using com0com plus hub4com virtual serial ports.
@@ -157,6 +160,13 @@ External Python tools can import `coreflow.modbus_api.ModbusRawClient` to open a
 local Modbus RTU serial connection and send one or more raw frames without
 driving the Qt window. The packaged console executable exposes the same path via
 `--modbus-raw` for non-Python callers.
+
+`python -m coreflow --api-manifest` and
+`CoreFlowStudioConsole.exe --api-manifest` print the local API contract as JSON.
+The manifest advertises `modbus.raw_frame`, its Python import path, CLI command
+forms, arguments, output modes, safety notes, and limitations. `--modbus-json`
+prints raw-frame success and failure results as JSON while preserving the
+existing exit codes.
 
 Standard function codes `01`, `02`, `03`, `04`, `05`, `06`, `0F`, and `10` are
 routed through the same high-level communication methods used by the Modbus

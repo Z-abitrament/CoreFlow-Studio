@@ -48,5 +48,50 @@ Useful options:
 
 The CLI exits with code `0` on success and `2` when the port cannot be opened, the frame is invalid, or the Modbus request fails.
 
+For script and tool wrappers, add `--modbus-json` to receive a parseable result:
+
+```powershell
+.\CoreFlowStudioConsole.exe --modbus-raw "01 03 00 3D 00 02" --modbus-port COM9 --modbus-unit 1 --modbus-auto-crc --modbus-json
+```
+
+Success output includes `ok: true`, `capability: "modbus.raw_frame"`, the
+request fields, and `response_hex`:
+
+```json
+{
+  "ok": true,
+  "capability": "modbus.raw_frame",
+  "request": {
+    "frame": "01 03 00 3D 00 02",
+    "append_crc": true,
+    "port": "COM9",
+    "unit_id": 1
+  },
+  "response_hex": "01 03 04 3B E1 72 D8 83 DB"
+}
+```
+
+Failures in JSON mode print `ok: false`, the same capability ID, request
+fields, and an `error` string. The exit code remains `2`.
+
+## API Manifest
+CoreFlow Studio exposes a local machine-readable manifest for future scripts,
+Codex tools, or other wrappers:
+
+```powershell
+python -m coreflow --api-manifest
+```
+
+The packaged console executable supports the same flag:
+
+```powershell
+.\CoreFlowStudioConsole.exe --api-manifest
+```
+
+The manifest is JSON with `schema_version`, application metadata, and a
+`capabilities` list. The first capability is `modbus.raw_frame`, which
+describes the Python import path, source and packaged CLI commands, supported
+arguments, output modes, examples, safety notes, and limitations.
+
 ## Safety
 This API can transmit Modbus write function codes when the caller sends them. It is intended for explicit engineering scripts, not unattended production calibration writes. Higher-level calibration workflows and audited parameter writes remain in the main application workflow layer.

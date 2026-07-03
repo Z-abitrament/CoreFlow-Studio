@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import traceback
@@ -26,6 +27,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--build-info",
         action="store_true",
         help="Print packaged-build version metadata and exit.",
+    )
+    parser.add_argument(
+        "--api-manifest",
+        action="store_true",
+        help="Print the machine-readable local CoreFlow API manifest and exit.",
     )
     parser.add_argument(
         "--make-update-package",
@@ -151,6 +157,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Append Modbus CRC16 to --modbus-raw before sending.",
     )
     parser.add_argument(
+        "--modbus-json",
+        action="store_true",
+        help="Print --modbus-raw result as machine-readable JSON.",
+    )
+    parser.add_argument(
         "--asio-list-devices",
         action="store_true",
         help="List ASIO driver registrations and audio devices for IIS diagnostics.",
@@ -257,6 +268,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.version:
         print(f"CoreFlow Studio {__version__}")
+    elif args.api_manifest:
+        from coreflow.app.api_manifest import build_api_manifest
+
+        print(json.dumps(build_api_manifest(), indent=2, sort_keys=True))
     elif args.build_info:
         from coreflow.build_info import current_build_info
 
@@ -320,6 +335,7 @@ def should_launch_packaged_ui_by_default(args: argparse.Namespace) -> bool:
     return not any(
         (
             args.version,
+            args.api_manifest,
             args.build_info,
             args.make_update_package is not None,
             args.simulator_smoke,
@@ -499,6 +515,12 @@ def run_modbus_raw_cli(args: argparse.Namespace) -> int:
         bytes_to_hex,
     )
 
+    request_payload = {
+        "frame": args.modbus_raw,
+        "append_crc": args.modbus_auto_crc,
+        "port": args.modbus_port,
+        "unit_id": args.modbus_unit,
+    }
     try:
         with ModbusRawClient(
             port=args.modbus_port,
@@ -514,9 +536,36 @@ def run_modbus_raw_cli(args: argparse.Namespace) -> int:
                 append_crc=args.modbus_auto_crc,
             )
     except (ModbusCommunicationError, ValueError) as exc:
-        print(f"Modbus raw frame failed: {exc}", file=sys.stderr)
+        if args.modbus_json:
+            print(
+                json.dumps(
+                    {
+                        "ok": False,
+                        "capability": "modbus.raw_frame",
+                        "request": request_payload,
+                        "error": str(exc),
+                    },
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(f"Modbus raw frame failed: {exc}", file=sys.stderr)
         return 2
-    print(bytes_to_hex(response))
+    response_hex = bytes_to_hex(response)
+    if args.modbus_json:
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "capability": "modbus.raw_frame",
+                    "request": request_payload,
+                    "response_hex": response_hex,
+                },
+                sort_keys=True,
+            )
+        )
+    else:
+        print(response_hex)
     return 0
 
 
