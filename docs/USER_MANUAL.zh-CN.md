@@ -97,13 +97,13 @@ artifacts/runs/<year>/<month>/<run_id>/
 ## Pulse Counter Module
 打开 `Modules > Pulse Counter Module`。该模块与 Modbus 连接相互独立，不会打开或重新配置 Modbus 串口。
 
-- 输入稳定的 `Device ID`，配置脉冲通道、边沿、单脉冲值、单位和固定切换频率，然后点击 `Save Config`。Pulse 配置只跟当前 Device ID 绑定。
-- 输入 Device ID 后点击 `Load Config` 可恢复该设备保存过的 Pulse 配置。
+- 点击 `Configure...` 打开配置弹窗，输入稳定的 `Device ID`，配置脉冲通道、边沿、单脉冲值、单位和固定切换频率，然后点击 `Apply` 或 `Save Config`。Pulse 配置只跟当前 Device ID 绑定。
+- 在配置弹窗输入 Device ID 后点击 `Load Config` 可恢复该设备保存过的 Pulse 配置。
 - 输入或浏览 DSView/libsigrok4DSL 导出的 CSV 文件，点击 `Analyze CSV`。当前第一版只支持离线 CSV 分析，不会打开 DSLogic 硬件，也不会实时采集。
 - 分析会提取配置边沿的脉冲，把脉冲数换算为测量质量，按固定切换频率窗口聚合速率，并显示速率随时间变化曲线。靠近窗口边界的脉冲会在摘要中单独计数，因为不同频率段接触处可能存在归属误差。
 - 输入 `Standard Mass`、流量点和 trial 序号后点击 `Calculate Trial`。测量质量来自脉冲数据：`pulse_count * pulse_value`。保存的试验误差为 `(measured_mass - standard_mass) / standard_mass * 100%`。已保存的 trial 会显示在 `Trial Records` 表中。
 - 点击 `Calculate Repeatability...` 后，由操作者选择一个流量点以及该流量点下连续 3 次 trial。程序只对这个用户选中的窗口计算并保存 `pulse_repeatability` 记录，包含平均误差和重复性标准差；不会因为已经存在 3 次 trial 就自动计算重复性。
-- Pulse 记录与 Modbus 一样挂在稳定 Device ID 下，但 Pulse 模块保留自己的历史表。该模块不会写入发射机参数。
+- CSV Analysis 与 Trial Calculation 在同一行显示，速率曲线和 Trial Records 区域可拖动调整高度。Pulse 记录与 Modbus 一样挂在稳定 Device ID 下，历史记录统一从 `History > Device History` 查看。该模块不会写入发射机参数。
 
 ## Device History
 当同一台物理设备同时有 Modbus 和 Pulse 记录时，打开 `History > Device History`。

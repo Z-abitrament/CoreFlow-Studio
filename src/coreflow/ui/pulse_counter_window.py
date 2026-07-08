@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pyqtgraph as pg
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -17,6 +18,8 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QPushButton,
+    QSizePolicy,
+    QSplitter,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -48,6 +51,13 @@ class PulseCounterWindow(QDialog):
             self.setWindowFlags(Qt.WindowType.Widget)
         self.runtime = PulseCounterRuntime(repository, operator=operator)
         self._analysis: PulseAnalysisResult | None = None
+        self._profile_device_id = ""
+        self._profile_channel = "0"
+        self._profile_edge = "rising"
+        self._profile_pulse_value = 0.05
+        self._profile_unit = "g"
+        self._profile_switch_frequency_hz = 100.0
+        self.profileDialog: PulseProfileDialog | None = None
         self.setWindowTitle("Pulse Counter Module")
         self.resize(980, 680)
         self.setMinimumSize(840, 560)
@@ -60,61 +70,50 @@ class PulseCounterWindow(QDialog):
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(10)
 
-        root.addWidget(self._profile_group())
-        root.addWidget(self._csv_group())
-        root.addWidget(self._trial_group())
+        root.addWidget(self._profile_bar())
+        self.mainSplitter = QSplitter()
+        self.mainSplitter.setObjectName("pulseMainSplitter")
+        self.mainSplitter.setOrientation(Qt.Orientation.Vertical)
+        self.mainSplitter.setChildrenCollapsible(False)
+
+        self.analysisTrialSplitter = QSplitter()
+        self.analysisTrialSplitter.setObjectName("pulseAnalysisTrialSplitter")
+        self.analysisTrialSplitter.setOrientation(Qt.Orientation.Horizontal)
+        self.analysisTrialSplitter.setChildrenCollapsible(False)
+        self.analysisTrialSplitter.addWidget(self._csv_group())
+        self.analysisTrialSplitter.addWidget(self._trial_group())
+        self.analysisTrialSplitter.setStretchFactor(0, 3)
+        self.analysisTrialSplitter.setStretchFactor(1, 2)
+        self.mainSplitter.addWidget(self.analysisTrialSplitter)
+
         self.ratePlot = pg.PlotWidget()
         self.ratePlot.setObjectName("pulseRatePlot")
         self.ratePlot.setBackground("w")
         self.ratePlot.setLabel("left", "Rate", units="g/s")
         self.ratePlot.setLabel("bottom", "Time", units="s")
         self.ratePlot.showGrid(x=True, y=True, alpha=0.25)
-        root.addWidget(self.ratePlot, 1)
-        root.addWidget(self._trial_records_group(), 1)
-        root.addWidget(self._history_group(), 1)
+        self.ratePlot.setMinimumHeight(180)
+        self.mainSplitter.addWidget(self.ratePlot)
+        self.mainSplitter.addWidget(self._trial_records_group())
+        self.mainSplitter.setStretchFactor(0, 0)
+        self.mainSplitter.setStretchFactor(1, 3)
+        self.mainSplitter.setStretchFactor(2, 2)
+        root.addWidget(self.mainSplitter, 1)
+        self._update_profile_summary()
 
-    def _profile_group(self) -> QWidget:
+    def _profile_bar(self) -> QWidget:
         group = QGroupBox("Device Profile")
         layout = QHBoxLayout(group)
-        self.deviceIdLineEdit = QLineEdit()
-        self.deviceIdLineEdit.setObjectName("pulseDeviceIdLineEdit")
-        self.deviceIdLineEdit.setPlaceholderText("Stable Device ID")
-        self.channelLineEdit = QLineEdit("0")
-        self.channelLineEdit.setObjectName("pulseChannelLineEdit")
-        self.channelLineEdit.setMaximumWidth(80)
-        self.edgeCombo = QComboBox()
-        self.edgeCombo.setObjectName("pulseEdgeCombo")
-        self.edgeCombo.addItems(["rising", "falling", "both"])
-        self.pulseValueSpinBox = QDoubleSpinBox()
-        self.pulseValueSpinBox.setObjectName("pulseValueSpinBox")
-        self.pulseValueSpinBox.setRange(0.000001, 1_000_000.0)
-        self.pulseValueSpinBox.setDecimals(6)
-        self.pulseValueSpinBox.setValue(0.05)
-        self.unitLineEdit = QLineEdit("g")
-        self.unitLineEdit.setObjectName("pulseUnitLineEdit")
-        self.unitLineEdit.setMaximumWidth(80)
-        self.switchFrequencySpinBox = QDoubleSpinBox()
-        self.switchFrequencySpinBox.setObjectName("pulseSwitchFrequencySpinBox")
-        self.switchFrequencySpinBox.setRange(0.001, 1_000_000.0)
-        self.switchFrequencySpinBox.setDecimals(3)
-        self.switchFrequencySpinBox.setValue(100.0)
-        self.saveProfileButton = QPushButton("Save Config")
-        self.saveProfileButton.setObjectName("pulseSaveProfileButton")
-        self.loadProfileButton = QPushButton("Load Config")
-        self.loadProfileButton.setObjectName("pulseLoadProfileButton")
-        layout.addWidget(QLabel("Device ID"))
-        layout.addWidget(self.deviceIdLineEdit, 1)
-        layout.addWidget(QLabel("Ch"))
-        layout.addWidget(self.channelLineEdit)
-        layout.addWidget(QLabel("Edge"))
-        layout.addWidget(self.edgeCombo)
-        layout.addWidget(QLabel("Pulse"))
-        layout.addWidget(self.pulseValueSpinBox)
-        layout.addWidget(self.unitLineEdit)
-        layout.addWidget(QLabel("Switch Hz"))
-        layout.addWidget(self.switchFrequencySpinBox)
-        layout.addWidget(self.saveProfileButton)
-        layout.addWidget(self.loadProfileButton)
+        self.profileSummaryLabel = QLabel()
+        self.profileSummaryLabel.setObjectName("pulseProfileSummaryLabel")
+        self.profileSummaryLabel.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
+        self.configureProfileButton = QPushButton("Configure...")
+        self.configureProfileButton.setObjectName("pulseConfigureProfileButton")
+        layout.addWidget(self.profileSummaryLabel, 1)
+        layout.addWidget(self.configureProfileButton)
         return group
 
     def _csv_group(self) -> QWidget:
@@ -193,34 +192,68 @@ class PulseCounterWindow(QDialog):
         layout.addLayout(row)
         return group
 
-    def _history_group(self) -> QWidget:
-        group = QGroupBox("Pulse Records")
-        layout = QVBoxLayout(group)
-        self.historyTable = QTableWidget(0, 5)
-        self.historyTable.setObjectName("pulseHistoryTable")
-        self.historyTable.setHorizontalHeaderLabels(
-            ["Started", "Operation", "Status", "Pulses", "Error %"]
-        )
-        self.historyTable.verticalHeader().setVisible(False)
-        self.historyTable.horizontalHeader().setStretchLastSection(True)
-        layout.addWidget(self.historyTable)
-        return group
-
     def _connect_signals(self) -> None:
-        self.saveProfileButton.clicked.connect(self._save_profile)
-        self.loadProfileButton.clicked.connect(self._load_profile)
+        self.configureProfileButton.clicked.connect(self._open_profile_dialog)
         self.browseCsvButton.clicked.connect(self._browse_csv)
         self.analyzeCsvButton.clicked.connect(self._analyze_csv)
         self.calculateTrialButton.clicked.connect(self._calculate_trial)
         self.calculateRepeatabilityButton.clicked.connect(self._calculate_repeatability)
 
+    def _open_profile_dialog(self) -> None:
+        if self.profileDialog is not None and self.profileDialog.isVisible():
+            self.profileDialog.raise_()
+            self.profileDialog.activateWindow()
+            return
+        self.profileDialog = PulseProfileDialog(parent=self)
+        self.profileDialog.set_configuration(
+            device_id=self._profile_device_id,
+            channel=self._profile_channel,
+            edge=self._profile_edge,
+            pulse_value=self._profile_pulse_value,
+            unit=self._profile_unit,
+            switch_frequency_hz=self._profile_switch_frequency_hz,
+        )
+        self.profileDialog.applyProfileButton.clicked.connect(
+            self._apply_profile_dialog
+        )
+        self.profileDialog.saveProfileButton.clicked.connect(self._save_profile)
+        self.profileDialog.loadProfileButton.clicked.connect(self._load_profile)
+        self.profileDialog.destroyed.connect(self._profile_dialog_destroyed)
+        self.profileDialog.show()
+
+    def _profile_dialog_destroyed(self, _object: object | None = None) -> None:
+        self.profileDialog = None
+
+    def _apply_profile_dialog(self) -> None:
+        dialog = self._require_profile_dialog()
+        self._set_profile_configuration(
+            device_id=dialog.device_id(),
+            channel=dialog.channel(),
+            edge=dialog.edge(),
+            pulse_value=dialog.pulse_value(),
+            unit=dialog.unit(),
+            switch_frequency_hz=dialog.switch_frequency_hz(),
+        )
+        dialog.set_status(f"Applied {self._profile_device_id}.")
+        self._refresh_history()
+
     def _save_profile(self) -> None:
+        dialog = self._require_profile_dialog()
+        self._set_profile_configuration(
+            device_id=dialog.device_id(),
+            channel=dialog.channel(),
+            edge=dialog.edge(),
+            pulse_value=dialog.pulse_value(),
+            unit=dialog.unit(),
+            switch_frequency_hz=dialog.switch_frequency_hz(),
+        )
         try:
             self._save_profile_or_raise()
         except Exception as exc:
-            self._show_error("Config save failed", exc)
+            dialog.set_status(f"Config save failed: {exc}")
             return
         device_id = self._device_id()
+        dialog.set_status(f"Config saved for {device_id}.")
         self.summaryLabel.setText(f"Config saved for {device_id}.")
         self._refresh_history()
 
@@ -228,25 +261,38 @@ class PulseCounterWindow(QDialog):
         device_id = self._device_id()
         self.runtime.save_profile(
             device_id=device_id,
-            channel=self.channelLineEdit.text().strip() or "0",
-            edge=self.edgeCombo.currentText(),
-            pulse_value=self.pulseValueSpinBox.value(),
-            unit=self.unitLineEdit.text().strip() or "g",
-            switch_frequency_hz=self.switchFrequencySpinBox.value(),
+            channel=self._profile_channel,
+            edge=self._profile_edge,
+            pulse_value=self._profile_pulse_value,
+            unit=self._profile_unit,
+            switch_frequency_hz=self._profile_switch_frequency_hz,
         )
 
     def _load_profile(self) -> None:
+        dialog = self._require_profile_dialog()
         try:
-            device_id = self._device_id()
+            device_id = dialog.device_id()
             profile = self.runtime.load_profile(device_id)
         except Exception as exc:
-            self._show_error("Config load failed", exc)
+            dialog.set_status(f"Config load failed: {exc}")
             return
-        self.channelLineEdit.setText(profile.config.channel)
-        self.edgeCombo.setCurrentText(profile.config.edge)
-        self.pulseValueSpinBox.setValue(profile.config.pulse_value)
-        self.unitLineEdit.setText(profile.config.unit)
-        self.switchFrequencySpinBox.setValue(profile.config.switch_frequency_hz)
+        dialog.set_configuration(
+            device_id=device_id,
+            channel=profile.config.channel,
+            edge=profile.config.edge,
+            pulse_value=profile.config.pulse_value,
+            unit=profile.config.unit,
+            switch_frequency_hz=profile.config.switch_frequency_hz,
+        )
+        self._set_profile_configuration(
+            device_id=device_id,
+            channel=profile.config.channel,
+            edge=profile.config.edge,
+            pulse_value=profile.config.pulse_value,
+            unit=profile.config.unit,
+            switch_frequency_hz=profile.config.switch_frequency_hz,
+        )
+        dialog.set_status(f"Config loaded for {device_id}.")
         self.summaryLabel.setText(f"Config loaded for {device_id}.")
         self._refresh_history()
 
@@ -351,31 +397,7 @@ class PulseCounterWindow(QDialog):
         )
 
     def _refresh_history(self) -> None:
-        device_id = self.deviceIdLineEdit.text().strip()
-        records = self.runtime.list_history(device_id) if device_id else ()
-        self.historyTable.setRowCount(len(records))
-        for row, record in enumerate(records):
-            summary = record.summary
-            pulse_count = summary.get("pulse_count", "")
-            if record.operation_type == "pulse_repeatability":
-                pulse_count = summary.get("trial_count", "")
-            percent_error = summary.get("percent_error", "")
-            if record.operation_type == "pulse_repeatability":
-                percent_error = summary.get("repeatability_stddev_percent", "")
-            values = (
-                record.started_at.astimezone().strftime("%Y-%m-%d %H:%M:%S")
-                if record.started_at
-                else "",
-                record.operation_type,
-                record.status,
-                str(pulse_count),
-                str(percent_error),
-            )
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                item.setFlags(item.flags() & ~item.flags().ItemIsEditable)
-                self.historyTable.setItem(row, column, item)
-        self.historyTable.resizeColumnsToContents()
+        device_id = self._device_id_text()
         self._refresh_trials(device_id)
 
     def _refresh_trials(self, device_id: str) -> None:
@@ -399,10 +421,50 @@ class PulseCounterWindow(QDialog):
         self.calculateRepeatabilityButton.setEnabled(_has_repeatability_window(trials))
 
     def _device_id(self) -> str:
-        device_id = self.deviceIdLineEdit.text().strip()
+        device_id = self._device_id_text()
         if not device_id:
             raise ValueError("Device ID is required.")
         return device_id
+
+    def _device_id_text(self) -> str:
+        return self._profile_device_id.strip()
+
+    def _require_profile_dialog(self) -> "PulseProfileDialog":
+        if self.profileDialog is None:
+            raise RuntimeError("Profile configuration dialog is not open.")
+        return self.profileDialog
+
+    def _set_profile_configuration(
+        self,
+        *,
+        device_id: str,
+        channel: str,
+        edge: str,
+        pulse_value: float,
+        unit: str,
+        switch_frequency_hz: float,
+    ) -> None:
+        self._profile_device_id = device_id.strip()
+        self._profile_channel = channel.strip() or "0"
+        self._profile_edge = edge
+        self._profile_pulse_value = pulse_value
+        self._profile_unit = unit.strip() or "g"
+        self._profile_switch_frequency_hz = switch_frequency_hz
+        self._update_profile_summary()
+
+    def _update_profile_summary(self) -> None:
+        if not hasattr(self, "profileSummaryLabel"):
+            return
+        device_id = self._device_id_text()
+        if not device_id:
+            self.profileSummaryLabel.setText("Device ID: not configured")
+            return
+        self.profileSummaryLabel.setText(
+            f"Device ID: {device_id} | Ch {self._profile_channel} | "
+            f"{self._profile_edge} | "
+            f"{self._profile_pulse_value:g} {self._profile_unit}/pulse | "
+            f"Switch {self._profile_switch_frequency_hz:g} Hz"
+        )
 
     def _csv_path(self) -> Path:
         raw_path = self.csvPathLineEdit.text().strip()
@@ -416,6 +478,120 @@ class PulseCounterWindow(QDialog):
 
     def _show_error(self, prefix: str, exc: Exception) -> None:
         self.summaryLabel.setText(f"{prefix}: {exc}")
+
+
+class PulseProfileDialog(QDialog):
+    """Edit a Pulse Counter device-bound configuration."""
+
+    def __init__(self, *, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Pulse Device Configuration")
+        self.setModal(False)
+        self.resize(520, 260)
+        self._build_ui()
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(10)
+
+        form = QFormLayout()
+        self.deviceIdLineEdit = QLineEdit()
+        self.deviceIdLineEdit.setObjectName("pulseDeviceIdLineEdit")
+        self.deviceIdLineEdit.setPlaceholderText("Stable Device ID")
+        form.addRow("Device ID", self.deviceIdLineEdit)
+
+        self.channelLineEdit = QLineEdit("0")
+        self.channelLineEdit.setObjectName("pulseChannelLineEdit")
+        form.addRow("Channel", self.channelLineEdit)
+
+        self.edgeCombo = QComboBox()
+        self.edgeCombo.setObjectName("pulseEdgeCombo")
+        self.edgeCombo.addItems(["rising", "falling", "both"])
+        form.addRow("Edge", self.edgeCombo)
+
+        pulse_row = QHBoxLayout()
+        self.pulseValueSpinBox = QDoubleSpinBox()
+        self.pulseValueSpinBox.setObjectName("pulseValueSpinBox")
+        self.pulseValueSpinBox.setRange(0.000001, 1_000_000.0)
+        self.pulseValueSpinBox.setDecimals(6)
+        self.pulseValueSpinBox.setValue(0.05)
+        self.unitLineEdit = QLineEdit("g")
+        self.unitLineEdit.setObjectName("pulseUnitLineEdit")
+        self.unitLineEdit.setMaximumWidth(100)
+        pulse_row.addWidget(self.pulseValueSpinBox, 1)
+        pulse_row.addWidget(self.unitLineEdit)
+        form.addRow("Pulse Value", pulse_row)
+
+        self.switchFrequencySpinBox = QDoubleSpinBox()
+        self.switchFrequencySpinBox.setObjectName("pulseSwitchFrequencySpinBox")
+        self.switchFrequencySpinBox.setRange(0.001, 1_000_000.0)
+        self.switchFrequencySpinBox.setDecimals(3)
+        self.switchFrequencySpinBox.setValue(100.0)
+        form.addRow("Switch Hz", self.switchFrequencySpinBox)
+        root.addLayout(form)
+
+        self.statusLabel = QLabel("")
+        self.statusLabel.setObjectName("pulseProfileStatusLabel")
+        root.addWidget(self.statusLabel)
+
+        button_row = QHBoxLayout()
+        button_row.addStretch(1)
+        self.applyProfileButton = QPushButton("Apply")
+        self.applyProfileButton.setObjectName("pulseApplyProfileButton")
+        self.saveProfileButton = QPushButton("Save Config")
+        self.saveProfileButton.setObjectName("pulseSaveProfileButton")
+        self.loadProfileButton = QPushButton("Load Config")
+        self.loadProfileButton.setObjectName("pulseLoadProfileButton")
+        self.closeButton = QPushButton("Close")
+        self.closeButton.setObjectName("pulseCloseProfileButton")
+        self.closeButton.clicked.connect(self.close)
+        button_row.addWidget(self.applyProfileButton)
+        button_row.addWidget(self.saveProfileButton)
+        button_row.addWidget(self.loadProfileButton)
+        button_row.addWidget(self.closeButton)
+        root.addLayout(button_row)
+
+    def set_configuration(
+        self,
+        *,
+        device_id: str,
+        channel: str,
+        edge: str,
+        pulse_value: float,
+        unit: str,
+        switch_frequency_hz: float,
+    ) -> None:
+        self.deviceIdLineEdit.setText(device_id)
+        self.channelLineEdit.setText(channel)
+        self.edgeCombo.setCurrentText(edge)
+        self.pulseValueSpinBox.setValue(pulse_value)
+        self.unitLineEdit.setText(unit)
+        self.switchFrequencySpinBox.setValue(switch_frequency_hz)
+
+    def device_id(self) -> str:
+        device_id = self.deviceIdLineEdit.text().strip()
+        if not device_id:
+            raise ValueError("Device ID is required.")
+        return device_id
+
+    def channel(self) -> str:
+        return self.channelLineEdit.text().strip() or "0"
+
+    def edge(self) -> str:
+        return self.edgeCombo.currentText()
+
+    def pulse_value(self) -> float:
+        return self.pulseValueSpinBox.value()
+
+    def unit(self) -> str:
+        return self.unitLineEdit.text().strip() or "g"
+
+    def switch_frequency_hz(self) -> float:
+        return self.switchFrequencySpinBox.value()
+
+    def set_status(self, text: str) -> None:
+        self.statusLabel.setText(text)
 
 
 class PulseRepeatabilitySelectionDialog(QDialog):

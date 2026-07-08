@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QDialog
+from PySide6.QtWidgets import QDialog, QLineEdit, QSplitter, QTableWidget
 
 from coreflow.app import CoreFlowRuntime
 from coreflow.storage import PulseTrialRecord
@@ -33,18 +33,19 @@ def test_pulse_module_imports_csv_calculates_trial_and_saves_history(
     assert window.pulseWindow is not None
     pulse_window = window.pulseWindow
     assert window.moduleStack.currentWidget() is pulse_window
-    assert pulse_window.deviceIdLineEdit.text() == ""
-    assert pulse_window.channelLineEdit.text() == "0"
-    assert pulse_window.edgeCombo.currentText() == "rising"
-    assert pulse_window.pulseValueSpinBox.value() == 0.05
-    assert pulse_window.switchFrequencySpinBox.value() == 100.0
+    assert pulse_window.profileSummaryLabel.text() == "Device ID: not configured"
+    assert pulse_window.findChild(QTableWidget, "pulseHistoryTable") is None
     assert runtime.list_channels() == ()
 
-    pulse_window.deviceIdLineEdit.setText("CFM-PULSE-UI")
-    pulse_window.channelLineEdit.setText("0")
-    pulse_window.pulseValueSpinBox.setValue(0.05)
-    pulse_window.switchFrequencySpinBox.setValue(100.0)
-    _click(qtbot, pulse_window.saveProfileButton)
+    _configure_pulse_profile(
+        qtbot,
+        pulse_window,
+        device_id="CFM-PULSE-UI",
+        channel="0",
+        pulse_value=0.05,
+        switch_frequency_hz=100.0,
+        save=True,
+    )
 
     pulse_window.csvPathLineEdit.setText(str(csv_path))
     _click(qtbot, pulse_window.analyzeCsvButton)
@@ -59,9 +60,9 @@ def test_pulse_module_imports_csv_calculates_trial_and_saves_history(
     pulse_window.standardMassSpinBox.setValue(0.14)
     _click(qtbot, pulse_window.calculateTrialButton)
 
-    assert pulse_window.historyTable.rowCount() == 1
-    assert _table_text(pulse_window.historyTable, 0, 1) == "pulse_csv_trial"
-    assert "7.142857" in _table_text(pulse_window.historyTable, 0, 4)
+    assert pulse_window.trialTable.rowCount() == 1
+    assert _table_text(pulse_window.trialTable, 0, 1) == "1"
+    assert "7.14286" in _table_text(pulse_window.trialTable, 0, 5)
     assert runtime.repository.count_rows("pulse_operation_attempts") == 1
     assert runtime.repository.count_rows("pulse_trial_records") == 1
 
@@ -70,10 +71,12 @@ def test_pulse_module_imports_csv_calculates_trial_and_saves_history(
     second.show()
     second.pulseModuleAction.trigger()
     assert second.pulseWindow is not None
-    second.pulseWindow.deviceIdLineEdit.setText("CFM-PULSE-UI")
-    _click(qtbot, second.pulseWindow.loadProfileButton)
-    assert second.pulseWindow.pulseValueSpinBox.value() == 0.05
-    assert second.pulseWindow.historyTable.rowCount() == 1
+    dialog = _open_profile_dialog(qtbot, second.pulseWindow)
+    dialog.deviceIdLineEdit.setText("CFM-PULSE-UI")
+    _click(qtbot, dialog.loadProfileButton)
+    assert dialog.pulseValueSpinBox.value() == 0.05
+    assert "CFM-PULSE-UI" in second.pulseWindow.profileSummaryLabel.text()
+    assert second.pulseWindow.trialTable.rowCount() == 1
 
 
 def test_pulse_module_reports_missing_device_id_for_csv_analysis(
@@ -89,6 +92,7 @@ def test_pulse_module_reports_missing_device_id_for_csv_analysis(
     window.pulseModuleAction.trigger()
     assert window.pulseWindow is not None
     pulse_window = window.pulseWindow
+    assert pulse_window.profileSummaryLabel.text() == "Device ID: not configured"
     pulse_window.csvPathLineEdit.setText(str(csv_path))
 
     _click(qtbot, pulse_window.analyzeCsvButton)
@@ -111,7 +115,7 @@ def test_pulse_module_accepts_quoted_csv_path(
     window.pulseModuleAction.trigger()
     assert window.pulseWindow is not None
     pulse_window = window.pulseWindow
-    pulse_window.deviceIdLineEdit.setText("CFM-PULSE-QUOTED")
+    _configure_pulse_profile(qtbot, pulse_window, device_id="CFM-PULSE-QUOTED")
     pulse_window.csvPathLineEdit.setText(f'"{csv_path}"')
 
     _click(qtbot, pulse_window.analyzeCsvButton)
@@ -166,8 +170,9 @@ def test_pulse_module_user_selects_trials_for_repeatability(
     window.pulseModuleAction.trigger()
     assert window.pulseWindow is not None
     pulse_window = window.pulseWindow
-    pulse_window.deviceIdLineEdit.setText("CFM-PULSE-REPEAT")
-    _click(qtbot, pulse_window.loadProfileButton)
+    dialog = _open_profile_dialog(qtbot, pulse_window)
+    dialog.deviceIdLineEdit.setText("CFM-PULSE-REPEAT")
+    _click(qtbot, dialog.loadProfileButton)
 
     assert pulse_window.trialTable.rowCount() == 3
     assert pulse_window.calculateRepeatabilityButton.isEnabled()
@@ -180,9 +185,42 @@ def test_pulse_module_user_selects_trials_for_repeatability(
     )
     assert "Repeatability saved" in pulse_window.repeatabilitySummaryLabel.text()
     assert "stddev=1" in pulse_window.repeatabilitySummaryLabel.text()
-    assert pulse_window.historyTable.rowCount() == 4
-    assert _table_text(pulse_window.historyTable, 0, 1) == "pulse_repeatability"
+    assert pulse_window.findChild(QTableWidget, "pulseHistoryTable") is None
     assert runtime.repository.count_rows("pulse_operation_attempts") == 4
+
+
+def test_pulse_module_uses_configuration_dialog_and_resizable_panes(
+    qtbot,
+    tmp_path,
+) -> None:
+    runtime = CoreFlowRuntime(data_root=tmp_path / "data")
+    window = MainWindow(runtime=runtime)
+    qtbot.addWidget(window)
+    window.show()
+
+    window.pulseModuleAction.trigger()
+
+    assert window.pulseWindow is not None
+    pulse_window = window.pulseWindow
+    assert pulse_window.findChild(QLineEdit, "pulseChannelLineEdit") is None
+    assert pulse_window.findChild(QTableWidget, "pulseHistoryTable") is None
+
+    main_splitter = pulse_window.findChild(QSplitter, "pulseMainSplitter")
+    analysis_splitter = pulse_window.findChild(QSplitter, "pulseAnalysisTrialSplitter")
+    assert main_splitter is not None
+    assert main_splitter.orientation() == Qt.Orientation.Vertical
+    assert main_splitter.count() == 3
+    assert analysis_splitter is not None
+    assert analysis_splitter.orientation() == Qt.Orientation.Horizontal
+    assert analysis_splitter.count() == 2
+
+    dialog = _open_profile_dialog(qtbot, pulse_window)
+    assert dialog.findChild(QLineEdit, "pulseChannelLineEdit") is dialog.channelLineEdit
+    assert dialog.deviceIdLineEdit.text() == ""
+    assert dialog.channelLineEdit.text() == "0"
+    assert dialog.edgeCombo.currentText() == "rising"
+    assert dialog.pulseValueSpinBox.value() == 0.05
+    assert dialog.switchFrequencySpinBox.value() == 100.0
 
 
 def test_pulse_repeatability_selection_dialog_uses_consecutive_trial_windows(
@@ -233,6 +271,36 @@ def _pulse_trial(
         standard_quantity=50.0,
         percent_error=percent_error,
     )
+
+
+def _open_profile_dialog(qtbot, pulse_window):
+    _click(qtbot, pulse_window.configureProfileButton)
+    dialog = pulse_window.profileDialog
+    assert dialog is not None
+    qtbot.addWidget(dialog)
+    assert dialog.isVisible()
+    return dialog
+
+
+def _configure_pulse_profile(
+    qtbot,
+    pulse_window,
+    *,
+    device_id: str,
+    channel: str = "0",
+    pulse_value: float = 0.05,
+    switch_frequency_hz: float = 100.0,
+    save: bool = False,
+) -> None:
+    dialog = _open_profile_dialog(qtbot, pulse_window)
+    dialog.deviceIdLineEdit.setText(device_id)
+    dialog.channelLineEdit.setText(channel)
+    dialog.pulseValueSpinBox.setValue(pulse_value)
+    dialog.switchFrequencySpinBox.setValue(switch_frequency_hz)
+    if save:
+        _click(qtbot, dialog.saveProfileButton)
+    else:
+        _click(qtbot, dialog.applyProfileButton)
 
 
 def _write_dsview_csv(tmp_path) -> object:

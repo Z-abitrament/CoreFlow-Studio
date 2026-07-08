@@ -197,9 +197,10 @@ def test_main_window_embeds_pulse_counter_module_from_menu(qtbot, tmp_path) -> N
     assert not window.modbusModuleAction.isChecked()
     assert not window.asioModuleAction.isChecked()
     assert pulse_window.windowTitle() == "Pulse Counter Module"
-    assert pulse_window.deviceIdLineEdit.objectName() == "pulseDeviceIdLineEdit"
+    assert pulse_window.configureProfileButton.text() == "Configure..."
+    assert pulse_window.profileSummaryLabel.objectName() == "pulseProfileSummaryLabel"
     assert pulse_window.analyzeCsvButton.text() == "Analyze CSV"
-    assert pulse_window.historyTable.objectName() == "pulseHistoryTable"
+    assert not hasattr(pulse_window, "historyTable")
     assert runtime.list_channels() == ()
 
 

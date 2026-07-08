@@ -107,13 +107,13 @@ For implementation-level operation sequences and history fields, see `docs/MODBU
 ## Pulse Counter Module
 Open `Modules > Pulse Counter Module`. The module is independent from the Modbus connection and does not open or reconfigure Modbus serial ports.
 
-- Enter a stable `Device ID`, configure the pulse channel, edge, pulse value, unit, and fixed switch frequency, then click `Save Config`. The saved Pulse configuration belongs to that Device ID only.
-- Click `Load Config` after entering a Device ID to restore that device's saved Pulse configuration.
+- Click `Configure...` to open the configuration dialog, enter a stable `Device ID`, configure the pulse channel, edge, pulse value, unit, and fixed switch frequency, then click `Apply` or `Save Config`. The saved Pulse configuration belongs to that Device ID only.
+- Click `Load Config` in the configuration dialog after entering a Device ID to restore that device's saved Pulse configuration.
 - Enter or browse to a DSView/libsigrok4DSL CSV export and click `Analyze CSV`. The first implementation is offline CSV analysis only; it does not open DSLogic hardware or perform live capture.
 - The analysis extracts configured pulse edges, converts pulse count to measured quantity, aggregates rate into fixed switch-frequency windows, and plots rate versus time. Pulses close to a switch-window boundary are counted in the summary because adjacent frequency segments may have assignment uncertainty.
 - Enter `Standard Mass`, flow point, and trial index, then click `Calculate Trial`. The measured mass comes from pulse data: `pulse_count * pulse_value`. The saved trial error is `(measured_mass - standard_mass) / standard_mass * 100%`. Saved trials appear in `Trial Records`.
 - Use `Calculate Repeatability...` to choose one flow point and one consecutive three-trial window from saved Pulse trials. The selected-window result is saved as a `pulse_repeatability` record with mean error and repeatability standard deviation. Repeatability is not calculated automatically just because three trials exist.
-- Pulse records are stored under the same stable Device ID concept as Modbus records, but the Pulse module keeps its own history table. The module does not write transmitter parameters.
+- CSV Analysis and Trial Calculation are shown side by side, and the rate plot and Trial Records areas can be resized by dragging their splitters. Pulse records are stored under the same stable Device ID concept as Modbus records, and history is reviewed from `History > Device History`. The module does not write transmitter parameters.
 
 ## Device History
 Open `History > Device History` when one physical device has records from more than one module.
