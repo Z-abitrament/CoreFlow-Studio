@@ -3,7 +3,7 @@
 ## 适用范围
 本手册描述当前 M12 版本的 CoreFlow Studio。当前版本是一个 Windows 优先的桌面工具，主要用于基于模拟器的科里奥利流量计 PC 端自动化流程开发、验证和打包交付检查。
 
-当前桌面 UI 采用模块化主界面。主窗口只保留 `Modules` 菜单，并默认直接进入 `Modbus Module` 工作区。可通过菜单切换到其他模块，例如 `ASIO/IIS Module`。无界面的模拟器、replay 和导出 smoke 路径仍可通过控制台诊断程序运行，但旧的模拟器 dashboard 不再显示在主窗口中。
+当前桌面 UI 采用模块化主界面。主窗口默认直接进入 `Modbus Module` 工作区。可通过 `Modules` 切换到其他模块，例如 `ASIO/IIS Module` 或 `Pulse Counter Module`；也可通过 `History > Device History` 按同一个 Device ID 查看跨模块历史记录。无界面的模拟器、replay 和导出 smoke 路径仍可通过控制台诊断程序运行，但旧的模拟器 dashboard 不再显示在主窗口中。
 
 ## 启动应用
 在打包分发目录中双击：
@@ -56,10 +56,12 @@ artifacts/runs/<year>/<month>/<run_id>/
 ```
 
 ## 主窗口区域
-主窗口有意只保留 `Modules` 菜单和当前模块工作区。启动时默认显示 `Modbus Module`。
+主窗口中央显示当前模块工作区。启动时默认显示 `Modbus Module`。
 
 - `Modules > Modbus Module` 会回到 Modbus 主站操作界面。
 - `Modules > ASIO/IIS Module` 会在主窗口中显示 ASIO/IIS 帧流界面。
+- `Modules > Pulse Counter Module` 会在主窗口中显示脉冲计数界面。
+- `History > Device History` 会打开按 Device ID 聚合的历史记录窗口，可查看全部模块、仅 Modbus 或仅 Pulse 记录。
 - 选择另一个模块时，中央工作区会刷新为该模块界面，而不是打开新的顶层模块窗口。
 - `Help > Check for Updates...` 会打开软件更新弹窗。首次使用时粘贴
   GitHub Release 的 `latest.json` 地址并点击 `Save URL`；之后按顺序点击
@@ -91,6 +93,24 @@ artifacts/runs/<year>/<month>/<run_id>/
 - `Current Device Test Records` 会打开锁定当前设备档案的测试记录窗口；`All Test Records` 会从 `Operations` 菜单打开所有使用本程序测试过的设备的全局记录窗口。两个窗口都可与校准弹窗同时存在，支持按操作类型筛选，表格包含具体时间，并在参数栏汇总 K factor 写入状态、变量采样点数量或重复性摘要等关键信息，同时允许在记录关联 run 时编辑备注。对于 Variable Sampling 记录和已保存 trial 样点的 repeatability trial，可用 `View Flow Plot` 重新查看保存曲线，用 `View Flow Data` 以表格查看已保存样点，也可用 `Compare Flow Plots` 先勾选具体要比较的 sample artifact，再按第一采样点或有流量前一点对齐比较。图窗内有变量选择表和图布局选择，可单独显示 flow 或某个额外变量，也可将多个变量叠加到同一张图，或切换为每个变量单独一张图；点击图上的采样点会显示该点的具体样本信息。点击 `Export...` 后可先选择操作类型以及可选的开始/结束时间段，再导出方便其他电脑导入的 JSON 测试记录包；点击 `Import...` 可导入兼容包。重复运行记录会跳过；如果不同电脑产生了相同 run ID 但内容不同，导入时会自动使用新的 imported run ID 保留下来。Excel 导出入口先保留到后续版本。
 
 当前模块在没有工程提供验证寄存器表时仍使用占位寄存器表模板。不要把占位寄存器表当作生产发射机文档使用。
+
+## Pulse Counter Module
+打开 `Modules > Pulse Counter Module`。该模块与 Modbus 连接相互独立，不会打开或重新配置 Modbus 串口。
+
+- 输入稳定的 `Device ID`，配置脉冲通道、边沿、单脉冲值、单位和固定切换频率，然后点击 `Save Config`。Pulse 配置只跟当前 Device ID 绑定。
+- 输入 Device ID 后点击 `Load Config` 可恢复该设备保存过的 Pulse 配置。
+- 输入或浏览 DSView/libsigrok4DSL 导出的 CSV 文件，点击 `Analyze CSV`。当前第一版只支持离线 CSV 分析，不会打开 DSLogic 硬件，也不会实时采集。
+- 分析会提取配置边沿的脉冲，把脉冲数换算为测量质量，按固定切换频率窗口聚合速率，并显示速率随时间变化曲线。靠近窗口边界的脉冲会在摘要中单独计数，因为不同频率段接触处可能存在归属误差。
+- 输入 `Standard Mass`、流量点和 trial 序号后点击 `Calculate Trial`。测量质量来自脉冲数据：`pulse_count * pulse_value`。保存的试验误差为 `(measured_mass - standard_mass) / standard_mass * 100%`。已保存的 trial 会显示在 `Trial Records` 表中。
+- 点击 `Calculate Repeatability...` 后，由操作者选择一个流量点以及该流量点下连续 3 次 trial。程序只对这个用户选中的窗口计算并保存 `pulse_repeatability` 记录，包含平均误差和重复性标准差；不会因为已经存在 3 次 trial 就自动计算重复性。
+- Pulse 记录与 Modbus 一样挂在稳定 Device ID 下，但 Pulse 模块保留自己的历史表。该模块不会写入发射机参数。
+
+## Device History
+当同一台物理设备同时有 Modbus 和 Pulse 记录时，打开 `History > Device History`。
+
+- 输入 Device ID 后点击 `Refresh`。
+- 使用模块筛选查看 `All`、`Modbus` 或 `Pulse`。
+- 表格显示时间、模块、操作、状态、Device ID 和关键摘要值，例如误差、测量质量、标准质量、脉冲数或 Modbus 重复性指标。
 
 ## ASIO/IIS Module
 打开 `Modules > ASIO/IIS Module`。该模块拥有自己的连接状态，不会创建或连接发射机通道。

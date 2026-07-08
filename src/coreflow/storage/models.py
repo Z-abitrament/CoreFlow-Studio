@@ -203,3 +203,76 @@ class ModbusTrialRecord:
     raw_artifact_id: str | None = None
     device_metadata: dict[str, Any] = field(default_factory=dict)
     notes: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PulseDeviceProfileRecord:
+    """Operator-maintained Pulse Counter device profile."""
+
+    profile_id: str
+    device_id: str
+    display_name: str | None = None
+    channel: str = "0"
+    edge: str = "rising"
+    pulse_value: float = 0.05
+    unit: str = "g"
+    switch_frequency_hz: float = 100.0
+    boundary_tolerance_s: float | None = None
+    notes: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PulseOperationAttemptRecord:
+    """One Pulse Counter operation attempt saved for traceability."""
+
+    attempt_id: str
+    device_id: str
+    operation_type: str
+    status: str
+    operator: str
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    source_path: str | None = None
+    raw_artifact_id: str | None = None
+    summary: dict[str, Any] = field(default_factory=dict)
+    configuration_snapshot: dict[str, Any] = field(default_factory=dict)
+    notes: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PulseTrialRecord:
+    """One saved Pulse Counter error/repeatability trial."""
+
+    trial_id: str
+    device_id: str
+    flow_point: float
+    trial_index: int
+    trial_status: str
+    pulse_count: int
+    measured_quantity: float
+    standard_quantity: float
+    percent_error: float
+    attempt_id: str | None = None
+    mean_rate: float | None = None
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    boundary_pulse_count: int = 0
+    raw_artifact_id: str | None = None
+    notes: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DeviceHistoryRecord:
+    """One UI-ready history row across device-linked modules."""
+
+    module: str
+    record_id: str
+    device_id: str
+    operation_type: str
+    status: str
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    summary: dict[str, Any] = field(default_factory=dict)
+    notes: str | None = None

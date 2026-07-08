@@ -27,7 +27,9 @@ from coreflow.app.updates import (
     UpdateSettings,
 )
 from coreflow.ui.asio_window import AsioIisWindow
+from coreflow.ui.device_history import DeviceHistoryDialog
 from coreflow.ui.modbus_window import ModbusModuleWindow
+from coreflow.ui.pulse_counter_window import PulseCounterWindow
 from coreflow.ui.workers import WorkflowTask
 
 
@@ -40,6 +42,8 @@ class MainWindow(QMainWindow):
         self._thread_pool = QThreadPool.globalInstance()
         self.modbusWindow: ModbusModuleWindow | None = None
         self.asioWindow: AsioIisWindow | None = None
+        self.pulseWindow: PulseCounterWindow | None = None
+        self.deviceHistoryDialog: DeviceHistoryDialog | None = None
         self.updateDialog: UpdateDialog | None = None
 
         self.setWindowTitle("CoreFlow Studio")
@@ -64,6 +68,15 @@ class MainWindow(QMainWindow):
         self.asioModuleAction.setObjectName("asioModuleAction")
         self.asioModuleAction.setCheckable(True)
         self.asioModuleAction.triggered.connect(self._show_asio_module)
+        self.pulseModuleAction = modules_menu.addAction("Pulse Counter Module")
+        self.pulseModuleAction.setObjectName("pulseModuleAction")
+        self.pulseModuleAction.setCheckable(True)
+        self.pulseModuleAction.triggered.connect(self._show_pulse_module)
+
+        history_menu = self.menuBar().addMenu("History")
+        self.deviceHistoryAction = history_menu.addAction("Device History")
+        self.deviceHistoryAction.setObjectName("deviceHistoryAction")
+        self.deviceHistoryAction.triggered.connect(self._open_device_history)
 
         help_menu = self.menuBar().addMenu("Help")
         self.checkUpdatesAction = help_menu.addAction("Check for Updates...")
@@ -91,11 +104,33 @@ class MainWindow(QMainWindow):
             self.moduleStack.addWidget(self.asioWindow)
         self._set_current_module(self.asioWindow)
 
+    def _show_pulse_module(self) -> None:
+        if self.pulseWindow is None:
+            self.pulseWindow = PulseCounterWindow(
+                repository=self.runtime.repository,
+                operator=self.runtime.operator,
+                parent=self.moduleStack,
+                embedded=True,
+            )
+            self.moduleStack.addWidget(self.pulseWindow)
+        self._set_current_module(self.pulseWindow)
+
     def _set_current_module(self, widget: QWidget) -> None:
         widget.show()
         self.moduleStack.setCurrentWidget(widget)
         self.modbusModuleAction.setChecked(widget is self.modbusWindow)
         self.asioModuleAction.setChecked(widget is self.asioWindow)
+        self.pulseModuleAction.setChecked(widget is self.pulseWindow)
+
+    def _open_device_history(self) -> None:
+        if self.deviceHistoryDialog is None or not self.deviceHistoryDialog.isVisible():
+            self.deviceHistoryDialog = DeviceHistoryDialog(
+                self.runtime.repository,
+                parent=self,
+            )
+        self.deviceHistoryDialog.show()
+        self.deviceHistoryDialog.raise_()
+        self.deviceHistoryDialog.activateWindow()
 
     def _open_update_dialog(self) -> None:
         if self.updateDialog is None or not self.updateDialog.isVisible():
@@ -112,6 +147,8 @@ class MainWindow(QMainWindow):
             self.modbusWindow.close()
         if self.asioWindow is not None:
             self.asioWindow.close()
+        if self.pulseWindow is not None:
+            self.pulseWindow.close()
         super().closeEvent(event)
 
 

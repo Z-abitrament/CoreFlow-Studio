@@ -538,6 +538,11 @@ The UI exposes two record windows:
 - `All Test Records` opens the global record browser for every device tested
   with this program.
 
+The application-level `History > Device History` view is separate from the
+Modbus record windows. It aggregates records by stable Device ID across modules
+and currently shows Modbus and Pulse Counter rows with a module filter. Modbus
+operation logic and Modbus connection state remain owned by the Modbus Module.
+
 The record table and detail pane display units for values whose units are known
 from the saved operation register-map snapshot or saved sample metadata. Derived
 trial values use the configured flow-rate, accumulated-mass, and K-factor

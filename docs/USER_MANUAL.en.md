@@ -3,7 +3,7 @@
 ## Scope
 This manual describes the current M12 CoreFlow Studio build. The application is a Windows-first desktop tool for simulator-backed Coriolis flowmeter workflow development and packaging validation.
 
-The current desktop UI is module-centered. The main window keeps only the `Modules` menu and opens directly into the `Modbus Module` workspace by default. Use the menu to switch to another module such as `ASIO/IIS Module`. Headless simulator, replay, and export smoke paths remain available from the console diagnostics executable, but the old simulator dashboard is no longer shown in the main window.
+The current desktop UI is module-centered. The main window opens directly into the `Modbus Module` workspace by default. Use `Modules` to switch to another module such as `ASIO/IIS Module` or `Pulse Counter Module`, and use `History > Device History` to review records for one Device ID across modules. Headless simulator, replay, and export smoke paths remain available from the console diagnostics executable, but the old simulator dashboard is no longer shown in the main window.
 
 ## Starting The Application
 From the packaged distribution folder, double-click:
@@ -56,10 +56,12 @@ artifacts/runs/<year>/<month>/<run_id>/
 ```
 
 ## Main Window Overview
-The main window intentionally contains only the `Modules` menu and the active module workspace. On startup, the active workspace is `Modbus Module`.
+The main window keeps the active module workspace in the center. On startup, the active workspace is `Modbus Module`.
 
 - `Modules > Modbus Module` returns to the Modbus master operator interface.
 - `Modules > ASIO/IIS Module` shows the ASIO/IIS frame-stream interface in the main window.
+- `Modules > Pulse Counter Module` shows the pulse-counting interface in the main window.
+- `History > Device History` opens a device-centered record browser that can show all modules, only Modbus records, or only Pulse records for one Device ID.
 - Selecting another module replaces the central workspace instead of opening a new top-level module window.
 - `Help > Check for Updates...` opens the software update dialog. Paste the
   GitHub Release `latest.json` URL once, click `Save URL`, then use `Check`,
@@ -101,6 +103,24 @@ Open `Modules > Modbus Module`. The module has its own connection state, device 
 The current module still uses the placeholder register-map template unless engineering supplies a validated map. Do not use the placeholder map as production transmitter documentation.
 
 For implementation-level operation sequences and history fields, see `docs/MODBUS_OPERATIONS.md`.
+
+## Pulse Counter Module
+Open `Modules > Pulse Counter Module`. The module is independent from the Modbus connection and does not open or reconfigure Modbus serial ports.
+
+- Enter a stable `Device ID`, configure the pulse channel, edge, pulse value, unit, and fixed switch frequency, then click `Save Config`. The saved Pulse configuration belongs to that Device ID only.
+- Click `Load Config` after entering a Device ID to restore that device's saved Pulse configuration.
+- Enter or browse to a DSView/libsigrok4DSL CSV export and click `Analyze CSV`. The first implementation is offline CSV analysis only; it does not open DSLogic hardware or perform live capture.
+- The analysis extracts configured pulse edges, converts pulse count to measured quantity, aggregates rate into fixed switch-frequency windows, and plots rate versus time. Pulses close to a switch-window boundary are counted in the summary because adjacent frequency segments may have assignment uncertainty.
+- Enter `Standard Mass`, flow point, and trial index, then click `Calculate Trial`. The measured mass comes from pulse data: `pulse_count * pulse_value`. The saved trial error is `(measured_mass - standard_mass) / standard_mass * 100%`. Saved trials appear in `Trial Records`.
+- Use `Calculate Repeatability...` to choose one flow point and one consecutive three-trial window from saved Pulse trials. The selected-window result is saved as a `pulse_repeatability` record with mean error and repeatability standard deviation. Repeatability is not calculated automatically just because three trials exist.
+- Pulse records are stored under the same stable Device ID concept as Modbus records, but the Pulse module keeps its own history table. The module does not write transmitter parameters.
+
+## Device History
+Open `History > Device History` when one physical device has records from more than one module.
+
+- Enter the Device ID and click `Refresh`.
+- Use the module filter to show `All`, `Modbus`, or `Pulse`.
+- The table shows timestamp, module, operation, status, Device ID, and key summary values such as percent error, measured quantity, standard quantity, pulse count, or Modbus repeatability metrics.
 
 ## ASIO/IIS Module
 Open `Modules > ASIO/IIS Module`. The module keeps its own connection state and does not create or connect transmitter channels.

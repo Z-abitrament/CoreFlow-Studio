@@ -15,10 +15,14 @@ from coreflow.storage.models import (
     ArtifactType,
     AuditLogRecord,
     DeviceRecord,
+    DeviceHistoryRecord,
     ModbusDeviceProfileRecord,
     ModbusOperationAttemptRecord,
     ModbusTestSessionRecord,
     ModbusTrialRecord,
+    PulseDeviceProfileRecord,
+    PulseOperationAttemptRecord,
+    PulseTrialRecord,
     RunSummary,
     VariableSampleRecord,
 )
@@ -216,6 +220,78 @@ class StorageRepository:
                 """
             )
         return cursor.rowcount
+
+    def save_pulse_device_profile(
+        self,
+        record: PulseDeviceProfileRecord,
+    ) -> None:
+        now = _utc_now()
+        created_at = record.created_at or now
+        updated_at = record.updated_at or now
+        with self._database.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO pulse_device_profiles (
+                    profile_id, device_id, display_name, channel, edge,
+                    pulse_value, unit, switch_frequency_hz, boundary_tolerance_s,
+                    notes, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(profile_id) DO UPDATE SET
+                    device_id=excluded.device_id,
+                    display_name=excluded.display_name,
+                    channel=excluded.channel,
+                    edge=excluded.edge,
+                    pulse_value=excluded.pulse_value,
+                    unit=excluded.unit,
+                    switch_frequency_hz=excluded.switch_frequency_hz,
+                    boundary_tolerance_s=excluded.boundary_tolerance_s,
+                    notes=excluded.notes,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    record.profile_id,
+                    record.device_id,
+                    record.display_name,
+                    record.channel,
+                    record.edge,
+                    record.pulse_value,
+                    record.unit,
+                    record.switch_frequency_hz,
+                    record.boundary_tolerance_s,
+                    record.notes,
+                    _dt(created_at),
+                    _dt(updated_at),
+                ),
+            )
+
+    def get_pulse_device_profile(
+        self,
+        device_id: str,
+    ) -> PulseDeviceProfileRecord | None:
+        with self._database.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM pulse_device_profiles
+                WHERE device_id = ?
+                """,
+                (device_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return _pulse_device_profile_from_row(row)
+
+    def list_pulse_device_profiles(self) -> tuple[PulseDeviceProfileRecord, ...]:
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM pulse_device_profiles
+                ORDER BY device_id
+                """
+            ).fetchall()
+        return tuple(_pulse_device_profile_from_row(row) for row in rows)
 
     def save_modbus_test_session(self, record: ModbusTestSessionRecord) -> None:
         with self._database.connect() as connection:
@@ -418,6 +494,165 @@ class StorageRepository:
                 device_model=device_model,
                 tube_model=tube_model,
                 transmitter_model=transmitter_model,
+            )
+        )
+
+    def save_pulse_operation_attempt(
+        self,
+        record: PulseOperationAttemptRecord,
+    ) -> None:
+        with self._database.connect() as connection:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO pulse_operation_attempts (
+                    attempt_id, device_id, operation_type, status, started_at,
+                    ended_at, operator, source_path, raw_artifact_id,
+                    summary_json, configuration_snapshot_json, notes
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.attempt_id,
+                    record.device_id,
+                    record.operation_type,
+                    record.status,
+                    _dt(record.started_at),
+                    _dt(record.ended_at),
+                    record.operator,
+                    record.source_path,
+                    record.raw_artifact_id,
+                    _to_json(record.summary),
+                    _to_json(record.configuration_snapshot),
+                    record.notes,
+                ),
+            )
+
+    def list_pulse_operation_attempts(
+        self,
+        *,
+        device_id: str | None = None,
+        operation_type: str | None = None,
+        status: str | None = None,
+    ) -> tuple[PulseOperationAttemptRecord, ...]:
+        clauses: list[str] = []
+        parameters: list[Any] = []
+        if device_id is not None:
+            clauses.append("device_id = ?")
+            parameters.append(device_id)
+        if operation_type is not None and operation_type not in ("", "all"):
+            clauses.append("operation_type = ?")
+            parameters.append(operation_type)
+        if status is not None and status not in ("", "all"):
+            clauses.append("status = ?")
+            parameters.append(status)
+        query = "SELECT * FROM pulse_operation_attempts"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY COALESCE(started_at, '') DESC, attempt_id DESC"
+        with self._database.connect() as connection:
+            rows = connection.execute(query, tuple(parameters)).fetchall()
+        return tuple(_pulse_operation_attempt_from_row(row) for row in rows)
+
+    def save_pulse_trial_record(self, record: PulseTrialRecord) -> None:
+        with self._database.connect() as connection:
+            connection.execute(
+                """
+                INSERT OR REPLACE INTO pulse_trial_records (
+                    trial_id, attempt_id, device_id, flow_point, trial_index,
+                    trial_status, pulse_count, measured_quantity,
+                    standard_quantity, percent_error, mean_rate, started_at,
+                    ended_at, boundary_pulse_count, raw_artifact_id, notes
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.trial_id,
+                    record.attempt_id,
+                    record.device_id,
+                    record.flow_point,
+                    record.trial_index,
+                    record.trial_status,
+                    record.pulse_count,
+                    record.measured_quantity,
+                    record.standard_quantity,
+                    record.percent_error,
+                    record.mean_rate,
+                    _dt(record.started_at),
+                    _dt(record.ended_at),
+                    record.boundary_pulse_count,
+                    record.raw_artifact_id,
+                    record.notes,
+                ),
+            )
+
+    def list_pulse_trial_records(
+        self,
+        *,
+        device_id: str | None = None,
+        trial_status: str | None = None,
+    ) -> tuple[PulseTrialRecord, ...]:
+        clauses: list[str] = []
+        parameters: list[Any] = []
+        if device_id is not None:
+            clauses.append("device_id = ?")
+            parameters.append(device_id)
+        if trial_status is not None and trial_status not in ("", "all"):
+            clauses.append("trial_status = ?")
+            parameters.append(trial_status)
+        query = "SELECT * FROM pulse_trial_records"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY flow_point, trial_index, trial_id"
+        with self._database.connect() as connection:
+            rows = connection.execute(query, tuple(parameters)).fetchall()
+        return tuple(_pulse_trial_record_from_row(row) for row in rows)
+
+    def list_device_history_records(
+        self,
+        *,
+        device_id: str,
+        module: str | None = None,
+    ) -> tuple[DeviceHistoryRecord, ...]:
+        normalized_module = None if module in (None, "", "All") else module
+        records: list[DeviceHistoryRecord] = []
+        if normalized_module in (None, "Modbus"):
+            records.extend(
+                DeviceHistoryRecord(
+                    module="Modbus",
+                    record_id=attempt.attempt_id,
+                    device_id=attempt.device_id,
+                    operation_type=attempt.operation_type,
+                    status=attempt.status,
+                    started_at=attempt.started_at,
+                    ended_at=attempt.ended_at,
+                    summary=attempt.summary,
+                    notes=attempt.notes,
+                )
+                for attempt in self.list_modbus_operation_attempts(device_id=device_id)
+            )
+        if normalized_module in (None, "Pulse"):
+            records.extend(
+                DeviceHistoryRecord(
+                    module="Pulse",
+                    record_id=attempt.attempt_id,
+                    device_id=attempt.device_id,
+                    operation_type=attempt.operation_type,
+                    status=attempt.status,
+                    started_at=attempt.started_at,
+                    ended_at=attempt.ended_at,
+                    summary=attempt.summary,
+                    notes=attempt.notes,
+                )
+                for attempt in self.list_pulse_operation_attempts(device_id=device_id)
+            )
+        return tuple(
+            sorted(
+                records,
+                key=lambda record: (
+                    record.started_at or datetime.min.replace(tzinfo=UTC),
+                    record.record_id,
+                ),
+                reverse=True,
             )
         )
 
@@ -712,6 +947,9 @@ class StorageRepository:
             "modbus_test_sessions",
             "modbus_operation_attempts",
             "modbus_trial_records",
+            "pulse_device_profiles",
+            "pulse_operation_attempts",
+            "pulse_trial_records",
         }:
             raise ValueError(f"Unsupported table: {table_name}")
         with self._database.connect() as connection:
@@ -746,6 +984,23 @@ def _modbus_device_profile_from_row(
         transmitter_model=row["transmitter_model"],
         connection_settings=_from_json(row["connection_settings_json"], {}),
         register_map=_from_json(row["register_map_json"], {}),
+        notes=row["notes"],
+        created_at=_parse_dt(row["created_at"]),
+        updated_at=_parse_dt(row["updated_at"]),
+    )
+
+
+def _pulse_device_profile_from_row(row: sqlite3.Row) -> PulseDeviceProfileRecord:
+    return PulseDeviceProfileRecord(
+        profile_id=row["profile_id"],
+        device_id=row["device_id"],
+        display_name=row["display_name"],
+        channel=row["channel"],
+        edge=row["edge"],
+        pulse_value=float(row["pulse_value"]),
+        unit=row["unit"],
+        switch_frequency_hz=float(row["switch_frequency_hz"]),
+        boundary_tolerance_s=row["boundary_tolerance_s"],
         notes=row["notes"],
         created_at=_parse_dt(row["created_at"]),
         updated_at=_parse_dt(row["updated_at"]),
@@ -812,6 +1067,46 @@ def _modbus_trial_from_row(row: sqlite3.Row) -> ModbusTrialRecord:
         flow_ended_at=_parse_dt(row["flow_ended_at"]),
         raw_artifact_id=row["raw_artifact_id"],
         device_metadata=_from_json(row["device_metadata_json"], {}),
+        notes=row["notes"],
+    )
+
+
+def _pulse_operation_attempt_from_row(
+    row: sqlite3.Row,
+) -> PulseOperationAttemptRecord:
+    return PulseOperationAttemptRecord(
+        attempt_id=row["attempt_id"],
+        device_id=row["device_id"],
+        operation_type=row["operation_type"],
+        status=row["status"],
+        operator=row["operator"],
+        started_at=_parse_dt(row["started_at"]),
+        ended_at=_parse_dt(row["ended_at"]),
+        source_path=row["source_path"],
+        raw_artifact_id=row["raw_artifact_id"],
+        summary=_from_json(row["summary_json"], {}),
+        configuration_snapshot=_from_json(row["configuration_snapshot_json"], {}),
+        notes=row["notes"],
+    )
+
+
+def _pulse_trial_record_from_row(row: sqlite3.Row) -> PulseTrialRecord:
+    return PulseTrialRecord(
+        trial_id=row["trial_id"],
+        attempt_id=row["attempt_id"],
+        device_id=row["device_id"],
+        flow_point=float(row["flow_point"]),
+        trial_index=int(row["trial_index"]),
+        trial_status=row["trial_status"],
+        pulse_count=int(row["pulse_count"]),
+        measured_quantity=float(row["measured_quantity"]),
+        standard_quantity=float(row["standard_quantity"]),
+        percent_error=float(row["percent_error"]),
+        mean_rate=row["mean_rate"],
+        started_at=_parse_dt(row["started_at"]),
+        ended_at=_parse_dt(row["ended_at"]),
+        boundary_pulse_count=int(row["boundary_pulse_count"]),
+        raw_artifact_id=row["raw_artifact_id"],
         notes=row["notes"],
     )
 

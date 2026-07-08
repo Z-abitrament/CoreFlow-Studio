@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class Database:
@@ -31,6 +31,13 @@ class Database:
                 {
                     "k_factor_parameter": "TEXT",
                     "original_k_factor": "REAL",
+                },
+            )
+            _ensure_columns(
+                connection,
+                "pulse_device_profiles",
+                {
+                    "boundary_tolerance_s": "REAL",
                 },
             )
             connection.execute(
@@ -243,6 +250,61 @@ SCHEMA_STATEMENTS = (
         notes TEXT,
         FOREIGN KEY(session_id) REFERENCES modbus_test_sessions(session_id),
         FOREIGN KEY(attempt_id) REFERENCES modbus_operation_attempts(attempt_id),
+        FOREIGN KEY(raw_artifact_id) REFERENCES artifacts(artifact_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS pulse_device_profiles (
+        profile_id TEXT PRIMARY KEY,
+        device_id TEXT NOT NULL UNIQUE,
+        display_name TEXT,
+        channel TEXT NOT NULL,
+        edge TEXT NOT NULL,
+        pulse_value REAL NOT NULL,
+        unit TEXT NOT NULL,
+        switch_frequency_hz REAL NOT NULL,
+        boundary_tolerance_s REAL,
+        notes TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS pulse_operation_attempts (
+        attempt_id TEXT PRIMARY KEY,
+        device_id TEXT NOT NULL,
+        operation_type TEXT NOT NULL,
+        status TEXT NOT NULL,
+        started_at TEXT,
+        ended_at TEXT,
+        operator TEXT NOT NULL,
+        source_path TEXT,
+        raw_artifact_id TEXT,
+        summary_json TEXT NOT NULL DEFAULT '{}',
+        configuration_snapshot_json TEXT NOT NULL DEFAULT '{}',
+        notes TEXT,
+        FOREIGN KEY(raw_artifact_id) REFERENCES artifacts(artifact_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS pulse_trial_records (
+        trial_id TEXT PRIMARY KEY,
+        attempt_id TEXT,
+        device_id TEXT NOT NULL,
+        flow_point REAL NOT NULL,
+        trial_index INTEGER NOT NULL,
+        trial_status TEXT NOT NULL,
+        pulse_count INTEGER NOT NULL,
+        measured_quantity REAL NOT NULL,
+        standard_quantity REAL NOT NULL,
+        percent_error REAL NOT NULL,
+        mean_rate REAL,
+        started_at TEXT,
+        ended_at TEXT,
+        boundary_pulse_count INTEGER NOT NULL DEFAULT 0,
+        raw_artifact_id TEXT,
+        notes TEXT,
+        FOREIGN KEY(attempt_id) REFERENCES pulse_operation_attempts(attempt_id),
         FOREIGN KEY(raw_artifact_id) REFERENCES artifacts(artifact_id)
     )
     """,

@@ -12,6 +12,9 @@ Testing must prove that CoreFlow Studio can automate Coriolis flowmeter workflow
   opening the relevant dialog/window and asserting that the expected label,
   input, table column, and detail text are visible to the user.
 - Data integrity test SQLite records and referenced artifacts together.
+- Pulse Counter tests must cover DSView CSV parsing, fixed switch-frequency rate
+  windows, per-Device-ID configuration, pulse-derived trial errors, and
+  cross-module Device ID history.
 - Hardware acceptance tests are defined but deferred until real transmitters and register maps are available.
 
 ## Required Test Categories
@@ -220,6 +223,26 @@ Scenarios:
 - Reject zero or negative standard mass values.
 - Store repeatability summary metrics for later review.
 - For the Modbus Simple-mode repeatability workflow, use the captured accumulated-mass change for `delta_m` and the operator-entered standard-scale mass for `standard_mass`.
+- For the Pulse Counter workflow, use `pulse_count * pulse_value` as measured
+  mass and the operator-entered standard mass as the reference.
+
+ID: TP-CALC-004
+
+Goal: Verify Pulse Counter CSV, error, and repeatability calculations.
+
+Scenarios:
+
+- Parse DSView/libsigrok4DSL CSV change-point rows and extract configured
+  rising, falling, or both-edge pulse events.
+- Aggregate pulse counts into fixed switch-frequency windows with default
+  `100 Hz` and flag boundary pulses near window edges.
+- Persist Pulse configuration per stable Device ID and reload it without a
+  global configuration fallback.
+- Calculate trial percent error from pulse-derived measured mass and
+  operator-entered standard mass.
+- Calculate selected-trial repeatability only after the operator selects one
+  flow point and one consecutive three-trial Pulse window; save the selected
+  trial IDs, mean error, and sample standard deviation of percent errors.
 
 ### Data Integrity Tests
 ID: TP-DATA-001
@@ -236,6 +259,9 @@ Scenarios:
 - Store standalone Modbus device profiles, test sessions, operation attempts,
   repeatability trial records, and raw Modbus polling artifact references with
   device metadata snapshots.
+- Store standalone Pulse Counter device profiles, operation attempts, and trial
+  records by Device ID, and expose cross-module Device ID history rows that can
+  filter Modbus and Pulse records.
 - Export standalone Modbus test records to a portable JSON package with
   optional operation and started-at time-range filters, include operation
   attempts, trial records, artifact metadata, and embedded artifact file
@@ -266,12 +292,18 @@ Goal: Verify the main module shell and embedded module UI.
 Scenarios:
 
 - Launch the main window.
-- Confirm the main window only exposes the `Modules` menu and the central module workspace.
+- Confirm the main window exposes module switching, device history, and help
+  actions while keeping the active module in the central workspace.
 - Confirm the main window opens directly into the embedded Modbus Module by default.
 - Select the Modbus Module from the `Modules` menu and confirm it remains in the main workspace instead of opening a top-level module window.
 - Confirm the Modbus Module has its own connection state and does not create or connect simulator/replay channels in the main window.
 - Open the ASIO/IIS Module from the `Modules` menu and confirm it refreshes into the main workspace instead of opening a top-level module window.
-- Switch between Modbus and ASIO/IIS modules without losing each module's local UI state.
+- Open the Pulse Counter Module from the `Modules` menu and confirm it refreshes
+  into the main workspace instead of opening a top-level module window.
+- Switch between Modbus, ASIO/IIS, and Pulse modules without losing each
+  module's local UI state.
+- Open `History > Device History`, enter a Device ID, and confirm Modbus and
+  Pulse records can be shown together or filtered by module.
 - For every bug fix that adds, moves, or relabels a control in a dialog, open
   that dialog through the same button/action used by the operator and assert the
   label and input widget are visible. Do not rely only on direct internal-widget
@@ -306,6 +338,25 @@ Scenarios:
 - Open the ASIO/IIS test dialog and run loopback and non-loopback checks with plotted or tabulated data for user confirmation.
 - Choose sine, square, or white-noise test signals and edit signal parameters such as amplitude and frequency where applicable.
 - Display input, output, or input and output together on one plot.
+
+ID: TP-UI-004
+
+Goal: Verify the Pulse Counter module UI remains independent from Modbus and can store Device-ID scoped records.
+
+Scenarios:
+
+- Open the Pulse Counter module from the main window `Modules` menu.
+- Save and reload channel, edge, pulse value, unit, and switch-frequency
+  configuration for one Device ID.
+- Analyze a DSView CSV path, display pulse count, measured quantity, boundary
+  pulse count, and a rate-versus-time plot.
+- Calculate a trial from the analyzed pulse data and operator-entered standard
+  mass, then store a Pulse history record under the current Device ID.
+- Save at least three Pulse trials for one flow point, click `Calculate
+  Repeatability...`, select a consecutive three-trial window, and confirm the
+  saved `pulse_repeatability` row appears in Pulse history for that Device ID.
+- Confirm Pulse Counter actions do not connect, disconnect, or reconfigure
+  Modbus, ASIO/IIS, simulator, or replay channels.
 
 ### Report Tests
 ID: TP-RPT-001

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from pathlib import Path
 import subprocess
 import sys
+import tomllib
 
 import pytest
 
@@ -10,7 +12,7 @@ from coreflow.__main__ import main
 
 
 def test_package_exposes_version() -> None:
-    assert coreflow.__version__ == "0.6.3"
+    assert coreflow.__version__ == _project_version()
 
 
 def test_main_returns_success(capsys) -> None:
@@ -33,7 +35,7 @@ def test_packaged_ui_startup_failure_writes_log(monkeypatch, tmp_path, capsys) -
     assert "UI startup failed" in captured.err
     assert str(log_path) in captured.err
     log_text = log_path.read_text(encoding="utf-8")
-    assert "build=version=0.6.3" in log_text
+    assert f"build=version={coreflow.__version__}" in log_text
     assert "RuntimeError: qt dependency missing" in log_text
     assert "traceback:" in log_text
 
@@ -58,4 +60,10 @@ def test_module_entry_point_runs() -> None:
         capture_output=True,
         text=True,
     )
-    assert "CoreFlow Studio 0.6.3" in completed.stdout
+    assert f"CoreFlow Studio {coreflow.__version__}" in completed.stdout
+
+
+def _project_version() -> str:
+    pyproject_path = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    return str(pyproject["project"]["version"])

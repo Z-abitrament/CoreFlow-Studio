@@ -24,6 +24,7 @@ def test_main_window_defaults_to_modbus_module(qtbot, tmp_path) -> None:
 
     assert [action.text() for action in window.menuBar().actions()] == [
         "Modules",
+        "History",
         "Help",
     ]
     assert window.centralWidget() is window.moduleStack
@@ -32,6 +33,7 @@ def test_main_window_defaults_to_modbus_module(qtbot, tmp_path) -> None:
     assert not window.modbusWindow.isWindow()
     assert window.modbusModuleAction.isChecked()
     assert window.asioWindow is None
+    assert window.pulseWindow is None
     assert not hasattr(window, "deviceTable")
     assert not hasattr(window, "addSimulatorButton")
     assert not hasattr(window, "runCalibrationButton")
@@ -52,6 +54,20 @@ def test_main_window_opens_update_dialog_from_help_menu(qtbot, tmp_path) -> None
     assert window.updateDialog.manifestUrlEdit.objectName() == "updateManifestUrlEdit"
     assert window.updateDialog.downloadButton.text() == "Download"
     assert window.updateDialog.installButton.text() == "Update and Restart"
+
+
+def test_main_window_opens_device_history_dialog(qtbot, tmp_path) -> None:
+    runtime = CoreFlowRuntime(data_root=tmp_path)
+    window = MainWindow(runtime=runtime)
+    qtbot.addWidget(window)
+    window.show()
+
+    window.deviceHistoryAction.trigger()
+
+    assert window.deviceHistoryDialog is not None
+    assert window.deviceHistoryDialog.isVisible()
+    assert window.deviceHistoryDialog.windowTitle() == "Device History"
+    assert window.deviceHistoryDialog.moduleFilterCombo.currentText() == "All"
 
 
 def test_main_window_embeds_modbus_module_from_menu(qtbot, tmp_path) -> None:
@@ -161,6 +177,29 @@ def test_main_window_embeds_asio_iis_module_from_menu(qtbot, tmp_path) -> None:
     assert asio_window.probeButton.text() == "Probe"
     assert not hasattr(asio_window, "frameCountSpinBox")
     assert not hasattr(asio_window, "maxLatencySpinBox")
+    assert runtime.list_channels() == ()
+
+
+def test_main_window_embeds_pulse_counter_module_from_menu(qtbot, tmp_path) -> None:
+    runtime = CoreFlowRuntime(data_root=tmp_path)
+    window = MainWindow(runtime=runtime)
+    qtbot.addWidget(window)
+    window.show()
+
+    window.pulseModuleAction.trigger()
+
+    assert window.pulseWindow is not None
+    pulse_window = window.pulseWindow
+    assert window.moduleStack.currentWidget() is pulse_window
+    assert not pulse_window.isWindow()
+    assert pulse_window.isVisible()
+    assert window.pulseModuleAction.isChecked()
+    assert not window.modbusModuleAction.isChecked()
+    assert not window.asioModuleAction.isChecked()
+    assert pulse_window.windowTitle() == "Pulse Counter Module"
+    assert pulse_window.deviceIdLineEdit.objectName() == "pulseDeviceIdLineEdit"
+    assert pulse_window.analyzeCsvButton.text() == "Analyze CSV"
+    assert pulse_window.historyTable.objectName() == "pulseHistoryTable"
     assert runtime.list_channels() == ()
 
 

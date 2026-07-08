@@ -8,6 +8,7 @@ __all__ = [
     "ModbusConnectionSettings",
     "ModbusModuleRuntime",
     "ModbusModuleStatus",
+    "PulseCounterRuntime",
     "RunInspection",
     "WriteGuardDecision",
     "WriteGuardService",
@@ -45,4 +46,8 @@ def __getattr__(name: str) -> object:
             "ModbusModuleStatus": ModbusModuleStatus,
         }
         return exports[name]
+    if name == "PulseCounterRuntime":
+        from coreflow.app.pulse_runtime import PulseCounterRuntime
+
+        return PulseCounterRuntime
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

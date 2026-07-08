@@ -21,6 +21,7 @@ The Qt desktop UI provides:
 - Live numeric readings and time-series charts.
 - Calibration/test result tables.
 - Historical run browser.
+- Cross-module Device ID history for Modbus, Pulse Counter, and future modules.
 - Report/export actions.
 - Experiment configuration views.
 
@@ -177,6 +178,28 @@ Data processing handles:
 
 Processing modules must receive explicit input data and configuration and return structured outputs. They must not read directly from UI widgets or hidden global state.
 
+### Pulse Counter Layer
+The pulse counter module converts external pulse trains into quantity and rate
+data for calibration and analysis workflows. The first implementation parses
+DSView/libsigrok4DSL CSV exports; future live DSLogic or other counter hardware
+should feed the same edge/time model.
+
+Responsibilities:
+
+- Parse DSView change-point CSV metadata and channel state rows.
+- Extract configured rising, falling, or both-edge pulse events.
+- Convert pulse counts to quantity using a configurable pulse value and unit.
+- Aggregate pulses into fixed switch-frequency windows, defaulting to `100 Hz`
+  or `10 ms`, for rate-versus-time plots.
+- Flag pulses close to switch-window boundaries where adjacent frequency
+  segments may introduce edge-assignment uncertainty.
+- Produce calibration-preview inputs without writing transmitter parameters.
+
+Pulse input is not a Modbus register-map source. It is an external quantity
+source that workflows may select alongside Modbus variables, replay data, or
+operator-entered values. Any future K-factor write remains behind the existing
+write guard and audit path.
+
 ### Storage Layer
 Storage uses SQLite for structured records and files for large data artifacts.
 
@@ -188,6 +211,7 @@ SQLite stores:
 - Calibration results.
 - Error and stability metrics.
 - Timestamped low-rate variable samples.
+- Pulse Counter device profiles, operation attempts, and trial records.
 - File artifact references.
 - Audit log entries.
 
@@ -195,6 +219,7 @@ Files store:
 
 - Raw time-series captures.
 - High-rate signal data.
+- Pulse edge, rate-window, and frequency-segment CSV artifacts.
 - ASIO/IIS frame captures and loopback diagnostic artifacts.
 - Exported CSV files.
 - Generated reports.
@@ -225,6 +250,8 @@ The exact file tree will be created during implementation, but the first code pa
 - `coreflow/protocols`: Modbus RTU and future protocol adapters.
 - `coreflow/simulation`: virtual transmitter and replay support.
 - `coreflow/analysis`: calibration, error, stability, signal-processing, and ML extension interfaces.
+- `coreflow/pulse_counter`: DSView CSV pulse parsing, fixed-window rate analysis, and pulse-derived calibration previews.
+- `coreflow/app/pulse_runtime.py`: Pulse Counter device-profile, trial, and history orchestration independent from Modbus.
 - `coreflow/storage`: SQLite repositories and artifact storage.
 - `coreflow/reports`: report generation and exports.
 - `tests`: unit, integration, simulator, and UI tests.
@@ -237,7 +264,10 @@ Typical factory workflow:
 3. Workflow runner validates inputs and creates a run session in storage.
 4. Workflow steps read from or write to devices through `FlowmeterDevice`.
 5. Raw samples are streamed to artifact files.
-6. Analysis modules compute results from stored or buffered data.
+6. Analysis modules compute results from stored or buffered data. For pulse-counter
+   calibration paths, DSView CSV or future live pulse edges are converted into
+   quantity, rate-window, and frequency-segment outputs before calibration
+   formulas are evaluated.
 7. Storage records step results, metrics, and file references.
 8. UI receives progress events and displays status.
 9. Report service generates final artifacts from stored run data.
