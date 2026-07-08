@@ -33,6 +33,24 @@ function Invoke-Checked {
     }
 }
 
+function Invoke-NativeAllowFailure {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+        [string[]]$Arguments = @()
+    )
+
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $FilePath @Arguments *> $null
+        return $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $PreviousErrorActionPreference
+    }
+}
+
 function Assert-LastCommandSucceeded {
     param(
         [Parameter(Mandatory = $true)]
@@ -118,8 +136,14 @@ function Assert-ReleaseDoesNotExist {
         }
     }
 
-    & $Gh release view $Tag --repo $Repository *> $null
-    if ($LASTEXITCODE -eq 0) {
+    $ReleaseViewExitCode = Invoke-NativeAllowFailure -FilePath $Gh -Arguments @(
+        "release",
+        "view",
+        $Tag,
+        "--repo",
+        $Repository
+    )
+    if ($ReleaseViewExitCode -eq 0) {
         throw "GitHub Release $Tag already exists."
     }
 }

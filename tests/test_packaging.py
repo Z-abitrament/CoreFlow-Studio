@@ -418,6 +418,7 @@ def test_windows_packaging_files_are_present() -> None:
     assert "shiboken6.cp313-win_amd64.dll" in verify_text
     assert "Read-ProjectVersion" in release_text
     assert "Assert-CleanTrackedTree" in release_text
+    assert "Invoke-NativeAllowFailure" in release_text
     assert "build.ps1" in release_text
     assert "verify_package.ps1" in release_text
     assert "--make-update-package" in release_text
