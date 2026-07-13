@@ -189,14 +189,21 @@ class FillingDeviceSelectionDialog(QDialog):
         self.accept()
 
     def _open_new_device(self) -> None:
-        if self.newDeviceDialog is not None and self.newDeviceDialog.isVisible():
-            self.newDeviceDialog.raise_()
-            self.newDeviceDialog.activateWindow()
+        dialog = self.newDeviceDialog
+        if dialog is None:
+            dialog = NewFillingDeviceDialog(self.service, parent=self)
+            dialog.accepted.connect(lambda: self._device_created(dialog))
+            self.newDeviceDialog = dialog
+        if dialog.isVisible():
+            dialog.raise_()
+            dialog.activateWindow()
             return
-        dialog = NewFillingDeviceDialog(self.service, parent=self)
-        dialog.accepted.connect(lambda: self._device_created(dialog))
-        self.newDeviceDialog = dialog
+        dialog.created_device_id = None
+        dialog.deviceIdLineEdit.clear()
+        dialog.modelLineEdit.clear()
+        dialog.statusLabel.clear()
         dialog.show()
+        dialog.deviceIdLineEdit.setFocus(Qt.FocusReason.OtherFocusReason)
         dialog.raise_()
         dialog.activateWindow()
 

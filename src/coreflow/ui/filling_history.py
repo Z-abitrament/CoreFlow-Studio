@@ -73,10 +73,20 @@ class FillingHistoryDialog(QDialog):
 
         splitter = QSplitter(Qt.Orientation.Vertical)
         splitter.setObjectName("fillingHistorySplitter")
-        self.recordTable = QTableWidget(0, 4)
+        self.recordTable = QTableWidget(0, 9)
         self.recordTable.setObjectName("fillingHistoryRecordTable")
         self.recordTable.setHorizontalHeaderLabels(
-            ["Type", "Time", "Summary", "ID"]
+            [
+                "Type",
+                "Time",
+                "Flow Point",
+                "Specified",
+                "Target / Corrected",
+                "Control / Valve Label",
+                "Notes",
+                "Summary",
+                "Record ID",
+            ]
         )
         self.recordTable.setEditTriggers(
             QAbstractItemView.EditTrigger.NoEditTriggers
@@ -88,11 +98,17 @@ class FillingHistoryDialog(QDialog):
             QAbstractItemView.SelectionMode.SingleSelection
         )
         self.recordTable.verticalHeader().setVisible(False)
+        self.recordTable.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
         header_view = self.recordTable.horizontalHeader()
-        header_view.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        header_view.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        header_view.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        header_view.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        header_view.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header_view.setSectionsMovable(True)
+        header_view.setStretchLastSection(False)
+        for column, width in enumerate(
+            (180, 150, 110, 110, 150, 190, 190, 260, 220)
+        ):
+            self.recordTable.setColumnWidth(column, width)
         splitter.addWidget(self.recordTable)
 
         self.detailTextEdit = QTextEdit()
@@ -144,12 +160,32 @@ class FillingHistoryDialog(QDialog):
                 if entry.created_at is not None
                 else ""
             )
+            flow_point, specified, target, label, notes = _condition_values(
+                entry
+            )
+            flow_item = QTableWidgetItem(flow_point)
+            specified_item = QTableWidgetItem(specified)
+            target_item = QTableWidgetItem(target)
+            label_item = QTableWidgetItem(label)
+            notes_item = QTableWidgetItem(notes)
             summary_item = QTableWidgetItem(entry.summary)
             id_item = QTableWidgetItem(entry.record_id)
             id_item.setData(Qt.ItemDataRole.UserRole, entry.record_id)
             for column, item in enumerate(
-                (type_item, time_item, summary_item, id_item)
+                (
+                    type_item,
+                    time_item,
+                    flow_item,
+                    specified_item,
+                    target_item,
+                    label_item,
+                    notes_item,
+                    summary_item,
+                    id_item,
+                )
             ):
+                if item.text():
+                    item.setToolTip(item.text())
                 self.recordTable.setItem(row, column, item)
 
         self.statusLabel.setText(f"{len(self._entries_by_id)} records")
@@ -166,7 +202,7 @@ class FillingHistoryDialog(QDialog):
         if row < 0:
             self.detailTextEdit.clear()
             return
-        id_item = self.recordTable.item(row, 3)
+        id_item = self.recordTable.item(row, 8)
         if id_item is None:
             self.detailTextEdit.clear()
             return
@@ -191,6 +227,72 @@ class FillingHistoryDialog(QDialog):
         self.detailTextEdit.setPlainText(
             json.dumps(payload, indent=2, sort_keys=True, default=str)
         )
+
+
+def _condition_values(
+    entry: FillingHistoryEntry,
+) -> tuple[str, str, str, str, str]:
+    details = entry.details
+    metrics = _mapping(details.get("metrics"))
+    configuration = _mapping(details.get("configuration_snapshot"))
+    if not configuration:
+        configuration = _mapping(metrics.get("configuration_snapshot"))
+    sources = (details, metrics, configuration)
+    mass_unit = _text_value(_first_value(("mass_unit",), sources))
+
+    flow = _measurement(
+        _first_value(("flow_point_g_per_s",), sources),
+        "g/s",
+    )
+    specified = _measurement(
+        _first_value(("specified_mass",), sources),
+        mass_unit,
+    )
+    target_keys = (
+        ("corrected_target_mass", "target_mass")
+        if entry.record_type in {"advance_calculation", "advance_profile"}
+        else ("target_mass", "corrected_target_mass")
+    )
+    target = _measurement(_first_value(target_keys, sources), mass_unit)
+    label = _text_value(
+        _first_value(("control_valve_label",), sources)
+    )
+    notes = _text_value(
+        _first_value(("notes", "run_notes"), (details,))
+    )
+    return flow, specified, target, label, notes
+
+
+def _mapping(value: object) -> dict[str, object]:
+    return value if isinstance(value, dict) else {}
+
+
+def _first_value(
+    keys: tuple[str, ...],
+    sources: tuple[dict[str, object], ...],
+) -> object | None:
+    for source in sources:
+        for key in keys:
+            value = source.get(key)
+            if value is not None and value != "":
+                return value
+    return None
+
+
+def _measurement(value: object | None, unit: str) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        text = str(value)
+    elif isinstance(value, (int, float)):
+        text = f"{float(value):.15g}"
+    else:
+        text = str(value)
+    return f"{text} {unit}" if unit else text
+
+
+def _text_value(value: object | None) -> str:
+    return "" if value is None else str(value)
 
 
 __all__ = ["FillingHistoryDialog"]

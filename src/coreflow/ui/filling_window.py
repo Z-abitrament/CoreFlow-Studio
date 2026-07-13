@@ -301,8 +301,8 @@ class FillingModuleWindow(QDialog):
     def _number_spin_box(object_name: str, value: float) -> QDoubleSpinBox:
         field = QDoubleSpinBox()
         field.setObjectName(object_name)
-        field.setDecimals(12)
-        field.setRange(0.0, 1.0e15)
+        field.setDecimals(15)
+        field.setRange(0.0, 1.0e18)
         field.setSingleStep(0.1)
         field.setValue(value)
         field.setAccelerated(True)
@@ -319,16 +319,16 @@ class FillingModuleWindow(QDialog):
         if snapshot.run_id is not None:
             self.statusLabel.setText("End Group before changing devices.")
             return None
-        if self.deviceSelectionDialog is not None and self.deviceSelectionDialog.isVisible():
-            self.deviceSelectionDialog.raise_()
-            self.deviceSelectionDialog.activateWindow()
-            return self.deviceSelectionDialog
-
-        dialog = FillingDeviceSelectionDialog(self.service, parent=self)
-        if snapshot.device_id is not None:
-            dialog.refresh_devices(snapshot.device_id)
-        dialog.accepted.connect(lambda: self._device_selected(dialog))
-        self.deviceSelectionDialog = dialog
+        dialog = self.deviceSelectionDialog
+        if dialog is None:
+            dialog = FillingDeviceSelectionDialog(self.service, parent=self)
+            dialog.accepted.connect(lambda: self._device_selected(dialog))
+            self.deviceSelectionDialog = dialog
+        dialog.refresh_devices(snapshot.device_id)
+        if dialog.isVisible():
+            dialog.raise_()
+            dialog.activateWindow()
+            return dialog
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
@@ -358,6 +358,8 @@ class FillingModuleWindow(QDialog):
         if device_id is None:
             return
         try:
+            if self.service.snapshot().device_id == device_id:
+                return
             restored = self.service.select_device(device_id)
         except Exception as exc:
             self._set_error(exc)
@@ -484,6 +486,7 @@ class FillingModuleWindow(QDialog):
 
     def _trial_item_changed(self, _item: QTableWidgetItem) -> None:
         if not self._loading:
+            self._clear_analysis_result()
             self._update_action_state()
 
     def _calculate_repeatability(self) -> None:
@@ -747,9 +750,11 @@ class FillingModuleWindow(QDialog):
                 )
                 text = (
                     f"{profile.control_valve_label} | "
-                    f"flow={profile.flow_point_g_per_s:g} g/s | "
-                    f"specified={profile.specified_mass:g} {profile.mass_unit} | "
-                    f"advance={profile.advance_mass:+g} {profile.mass_unit} | "
+                    f"flow={_format_profile_number(profile.flow_point_g_per_s)} g/s | "
+                    f"specified={_format_profile_number(profile.specified_mass)} "
+                    f"{profile.mass_unit} | "
+                    f"advance={_format_profile_number(profile.advance_mass, signed=True)} "
+                    f"{profile.mass_unit} | "
                     f"{timestamp} | {profile.profile_id}"
                 )
                 self.advanceProfileCombo.addItem(text, profile.profile_id)
@@ -850,23 +855,27 @@ class FillingModuleWindow(QDialog):
         if device_id is None:
             self.statusLabel.setText("Select a device before opening history.")
             return
-        if (
-            self.historyDialog is not None
-            and self.historyDialog.isVisible()
-            and self.historyDialog.device_id == device_id
-        ):
-            self.historyDialog.refresh_records()
-            self.historyDialog.raise_()
-            self.historyDialog.activateWindow()
+        dialog = self.historyDialog
+        if dialog is not None and dialog.device_id == device_id:
+            dialog.refresh_records()
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
             return
-        self.historyDialog = FillingHistoryDialog(
+        if dialog is not None:
+            dialog.close()
+            dialog.setParent(None)
+            dialog.deleteLater()
+            self.historyDialog = None
+        dialog = FillingHistoryDialog(
             self.service,
             device_id,
             parent=self,
         )
-        self.historyDialog.show()
-        self.historyDialog.raise_()
-        self.historyDialog.activateWindow()
+        self.historyDialog = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def _clear_analysis_result(self) -> None:
         self._preview_advance_result_id = None
@@ -883,7 +892,11 @@ class FillingModuleWindow(QDialog):
 
 
 def _format_number(value: float) -> str:
-    return f"{value:.12g}"
+    return f"{value:.15g}"
+
+
+def _format_profile_number(value: float, *, signed: bool = False) -> str:
+    return f"{value:+.15g}" if signed else f"{value:.15g}"
 
 
 __all__ = ["FillingModuleWindow"]

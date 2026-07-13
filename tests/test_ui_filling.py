@@ -104,9 +104,9 @@ def _service_configuration(
     mode: FillingMode,
     *,
     label: str = "CTRL-A + VALVE-2",
+    specified_mass: float = 1000.0,
     target_mass: float | None = None,
 ) -> FillingConfiguration:
-    specified_mass = 1000.0
     return FillingConfiguration(
         mode=mode,
         control_valve_label=label,
@@ -126,10 +126,21 @@ def _service_configuration(
 def _service_trials(
     service: FillingTrialService,
     masses: tuple[float, ...],
+    *,
+    note_prefix: str | None = None,
 ) -> tuple[str, ...]:
     trial_ids: list[str] = []
     for index, mass in enumerate(masses):
-        trial_ids.append(service.calculate_current_trial(mass).trial_id)
+        trial_ids.append(
+            service.calculate_current_trial(
+                mass,
+                notes=(
+                    f"{note_prefix} {index + 1}"
+                    if note_prefix is not None
+                    else None
+                ),
+            ).trial_id
+        )
         if index < len(masses) - 1:
             service.add_trial()
     return tuple(trial_ids)
@@ -167,6 +178,8 @@ def test_workbench_uses_shared_device_selector_and_has_stable_compact_controls(
     )
     assert isinstance(window.standardMassEdit.validator(), QDoubleValidator)
     assert window.standardMassEdit.text() == ""
+    assert window.massPerPulseSpinBox.decimals() >= 15
+    assert window.massPerPulseSpinBox.maximum() >= 1.0e18
 
     stable_controls = (
         window.deviceValueLabel,
@@ -242,6 +255,10 @@ def test_new_device_dialog_creates_selectable_device_and_rejects_duplicates(
 
     assert repository.get_device("CFM-UI-NEW") is not None
     assert selector.deviceCombo.currentData() == "CFM-UI-NEW"
+    _click(qtbot, selector.newDeviceButton)
+    assert selector.newDeviceDialog is create_dialog
+    assert len(selector.findChildren(NewFillingDeviceDialog)) == 1
+    create_dialog.close()
     selector.close()
 
     duplicate = NewFillingDeviceDialog(service)
@@ -469,6 +486,38 @@ def test_advance_allows_nonconsecutive_selection_and_set_starts_regular_trial_on
     assert not window.setAdvanceButton.isEnabled()
 
 
+def test_advance_preview_is_invalidated_when_trial_selection_changes(
+    qtbot,
+    repository: StorageRepository,
+) -> None:
+    service = FillingTrialService(repository)
+    window = FillingModuleWindow(service=service)
+    qtbot.addWidget(window)
+    window.show()
+    _select_device(qtbot, window)
+    _set_configuration(window)
+    _click(qtbot, window.advanceModeButton)
+    for index, mass in enumerate((1005.0, 1006.0, 1004.0, 1007.0)):
+        _calculate_trial(qtbot, window, mass, add_next=index < 3)
+
+    for row in (0, 1, 2):
+        _check_trial(window, row)
+    _click(qtbot, window.calculateAdvanceButton)
+    assert window.setAdvanceButton.isEnabled()
+    assert window.resultTextEdit.toPlainText()
+
+    _check_trial(window, 2, checked=False)
+    _check_trial(window, 3)
+
+    assert window.calculateAdvanceButton.isEnabled()
+    assert not window.setAdvanceButton.isEnabled()
+    assert window.resultTextEdit.toPlainText() == ""
+    profiles_before = service.list_advance_profiles()
+    _click(qtbot, window.setAdvanceButton)
+    assert service.list_advance_profiles() == profiles_before
+    assert service.snapshot().configuration.mode is FillingMode.ADVANCE
+
+
 def test_multiple_same_condition_profiles_remain_distinct_and_load_full_snapshot(
     qtbot,
     repository: StorageRepository,
@@ -511,6 +560,114 @@ def test_multiple_same_condition_profiles_remain_distinct_and_load_full_snapshot
     assert sorted(loaded_targets) == pytest.approx(sorted(expected_targets))
 
 
+def test_close_profile_conditions_remain_distinguishable_in_profile_summary(
+    qtbot,
+    repository: StorageRepository,
+) -> None:
+    service = FillingTrialService(repository)
+    service.select_device("CFM-UI-1")
+    specified_values = (1000.0000001, 1000.0000002)
+    for specified in specified_values:
+        service.start_group(
+            _service_configuration(
+                FillingMode.ADVANCE,
+                specified_mass=specified,
+            )
+        )
+        trial_ids = _service_trials(
+            service,
+            (specified + 1.0, specified + 1.1, specified + 0.9),
+        )
+        result = service.calculate_advance(trial_ids)
+        service.set_advance(result.result_id)
+        service.end_group()
+
+    window = FillingModuleWindow(service=service)
+    qtbot.addWidget(window)
+    window.show()
+    summaries = [
+        window.advanceProfileCombo.itemText(index)
+        for index in range(1, window.advanceProfileCombo.count())
+    ]
+
+    assert any("specified=1000.0000001" in text for text in summaries)
+    assert any("specified=1000.0000002" in text for text in summaries)
+
+
+def test_history_table_exposes_scannable_conditions_for_all_record_types(
+    qtbot,
+    repository: StorageRepository,
+) -> None:
+    service = FillingTrialService(repository)
+    service.select_device("CFM-UI-1")
+    service.start_group(
+        _service_configuration(FillingMode.REGULAR, label="REGULAR-LABEL")
+    )
+    regular_ids = _service_trials(
+        service,
+        (1005.0, 1006.0, 1004.0),
+        note_prefix="regular note",
+    )
+    repeatability = service.calculate_repeatability(regular_ids)
+    service.end_group()
+    service.start_group(
+        _service_configuration(FillingMode.ADVANCE, label="ADVANCE-LABEL")
+    )
+    advance_ids = _service_trials(
+        service,
+        (1005.0, 1006.0, 1004.0),
+        note_prefix="advance note",
+    )
+    advance = service.calculate_advance(advance_ids)
+    profile = service.set_advance(advance.result_id)
+    service.end_group()
+
+    dialog = FillingHistoryDialog(service, "CFM-UI-1")
+    qtbot.addWidget(dialog)
+    dialog.show()
+
+    assert [
+        dialog.recordTable.horizontalHeaderItem(column).text()
+        for column in range(dialog.recordTable.columnCount())
+    ] == [
+        "Type",
+        "Time",
+        "Flow Point",
+        "Specified",
+        "Target / Corrected",
+        "Control / Valve Label",
+        "Notes",
+        "Summary",
+        "Record ID",
+    ]
+    rows = {
+        dialog.recordTable.item(row, 8).text(): row
+        for row in range(dialog.recordTable.rowCount())
+    }
+    regular_trial_row = rows[regular_ids[0]]
+    assert dialog.recordTable.item(regular_trial_row, 2).text() == "100 g/s"
+    assert dialog.recordTable.item(regular_trial_row, 3).text() == "1000 g"
+    assert dialog.recordTable.item(regular_trial_row, 4).text() == "995 g"
+    assert dialog.recordTable.item(regular_trial_row, 5).text() == "REGULAR-LABEL"
+    assert dialog.recordTable.item(regular_trial_row, 6).text() == "regular note 1"
+
+    repeatability_row = rows[repeatability.result_id]
+    assert dialog.recordTable.item(repeatability_row, 2).text() == "100 g/s"
+    assert dialog.recordTable.item(repeatability_row, 4).text() == "995 g"
+    assert dialog.recordTable.item(repeatability_row, 5).text() == "REGULAR-LABEL"
+
+    advance_row = rows[advance.result_id]
+    assert dialog.recordTable.item(advance_row, 4).text() == "995 g"
+    assert dialog.recordTable.item(advance_row, 5).text() == "ADVANCE-LABEL"
+
+    profile_row = rows[profile.profile_id]
+    assert dialog.recordTable.item(profile_row, 2).text() == "100 g/s"
+    assert dialog.recordTable.item(profile_row, 4).text() == "995 g"
+    assert dialog.recordTable.item(profile_row, 5).text() == "ADVANCE-LABEL"
+    assert "advance note" in dialog.recordTable.item(profile_row, 6).text()
+    assert dialog.recordTable.item(profile_row, 6).toolTip()
+
+
 def test_history_shows_four_record_types_complete_details_and_isolates_query_error(
     qtbot,
     repository: StorageRepository,
@@ -543,7 +700,7 @@ def test_history_shows_four_record_types_complete_details_and_isolates_query_err
     }
     assert all(
         dialog.recordTable.item(row, 0).data(Qt.ItemDataRole.UserRole)
-        == dialog.recordTable.item(row, 3).text()
+        == dialog.recordTable.item(row, 8).text()
         for row in range(dialog.recordTable.rowCount())
     )
     assert {
@@ -556,7 +713,7 @@ def test_history_shows_four_record_types_complete_details_and_isolates_query_err
     result_row = next(
         row
         for row in range(dialog.recordTable.rowCount())
-        if dialog.recordTable.item(row, 3).text() == advance_result.result_id
+        if dialog.recordTable.item(row, 8).text() == advance_result.result_id
     )
     dialog.recordTable.selectRow(result_row)
     detail = dialog.detailTextEdit.toPlainText()
@@ -564,6 +721,11 @@ def test_history_shows_four_record_types_complete_details_and_isolates_query_err
     assert "configuration_snapshot" in detail
     assert "metrics" in detail
     assert profile.profile_id in detail
+
+    dialog.close()
+    _click(qtbot, window.historyButton)
+    assert window.historyDialog is dialog
+    assert len(window.findChildren(FillingHistoryDialog)) == 1
 
     workbench_status = window.statusLabel.text()
 
@@ -576,6 +738,83 @@ def test_history_shows_four_record_types_complete_details_and_isolates_query_err
     assert "injected history query failure" in dialog.statusLabel.text()
     assert window.statusLabel.text() == workbench_status
     assert service.snapshot().device_id == "CFM-UI-1"
+
+
+def test_same_device_accept_and_cancel_preserve_draft_while_real_switch_restores(
+    qtbot,
+    repository: StorageRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = FillingTrialService(repository)
+    service.select_device("CFM-UI-2")
+    service.start_group(
+        _service_configuration(
+            FillingMode.REGULAR,
+            label="DEVICE-B-SAVED",
+            specified_mass=750.25,
+            target_mass=742.125,
+        )
+    )
+    service.calculate_current_trial(751.0)
+    service.end_group()
+    service.select_device("CFM-UI-1")
+    window = FillingModuleWindow(service=service)
+    qtbot.addWidget(window)
+    window.show()
+    _set_configuration(
+        window,
+        label="DEVICE-A-DRAFT",
+        pulse_switch=333.125,
+        mass_per_pulse=0.000125,
+        flow_point=225.75,
+        specified_mass=1000.5,
+        target_mass=990.25,
+    )
+    window.standardMassEdit.setText("1001.75")
+
+    original_select_device = service.select_device
+    select_calls: list[str] = []
+
+    def tracking_select(device_id: str):
+        select_calls.append(device_id)
+        return original_select_device(device_id)
+
+    monkeypatch.setattr(service, "select_device", tracking_select)
+    window.open_device_selector()
+    selector = window.deviceSelectionDialog
+    assert selector is not None
+    selector.deviceCombo.setCurrentIndex(
+        selector.deviceCombo.findData("CFM-UI-1")
+    )
+    _click(qtbot, selector.selectButton)
+
+    assert select_calls == []
+    assert window.controlValveCombo.currentText() == "DEVICE-A-DRAFT"
+    assert window.pulseSwitchSpinBox.value() == pytest.approx(333.125)
+    assert window.standardMassEdit.text() == "1001.75"
+
+    window.open_device_selector()
+    assert window.deviceSelectionDialog is selector
+    window.standardMassEdit.setText("1002.25")
+    _click(qtbot, selector.cancelButton)
+    assert select_calls == []
+    assert window.controlValveCombo.currentText() == "DEVICE-A-DRAFT"
+    assert window.standardMassEdit.text() == "1002.25"
+    assert len(window.findChildren(FillingDeviceSelectionDialog)) == 1
+
+    window.open_device_selector()
+    assert window.deviceSelectionDialog is selector
+    selector.deviceCombo.setCurrentIndex(
+        selector.deviceCombo.findData("CFM-UI-2")
+    )
+    _click(qtbot, selector.selectButton)
+
+    assert select_calls == ["CFM-UI-2"]
+    assert window.deviceValueLabel.text() == "CFM-UI-2"
+    assert window.controlValveCombo.currentText() == "DEVICE-B-SAVED"
+    assert window.specifiedMassSpinBox.value() == pytest.approx(750.25)
+    assert window.targetMassSpinBox.value() == pytest.approx(742.125)
+    assert window.standardMassEdit.text() == ""
 
 
 def test_open_history_remains_fixed_to_device_after_workbench_switch(
@@ -601,7 +840,7 @@ def test_open_history_remains_fixed_to_device_after_workbench_switch(
     assert dialog is not None
     assert dialog.deviceValueLabel.text() == "CFM-UI-1"
     assert dialog.recordTable.rowCount() == 1
-    assert dialog.recordTable.item(0, 3).text() == device_a_trial.trial_id
+    assert dialog.recordTable.item(0, 8).text() == device_a_trial.trial_id
 
     assert window.end_active_group() is True
     _select_device(qtbot, window, "CFM-UI-2")
@@ -610,7 +849,7 @@ def test_open_history_remains_fixed_to_device_after_workbench_switch(
     assert dialog.deviceValueLabel.text() == "CFM-UI-1"
     assert dialog.recordTable.rowCount() == 1
     record_ids = {
-        dialog.recordTable.item(row, 3).text()
+        dialog.recordTable.item(row, 8).text()
         for row in range(dialog.recordTable.rowCount())
     }
     assert device_a_trial.trial_id in record_ids
