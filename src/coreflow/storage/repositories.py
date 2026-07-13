@@ -490,6 +490,7 @@ class StorageRepository:
         record: FillingAdvanceProfileRecord,
     ) -> None:
         with self._database.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             _insert_filling_advance_profile(connection, record)
 
     def list_filling_advance_profiles(
@@ -520,7 +521,7 @@ class StorageRepository:
         if trial.device_id != run.device_id:
             raise ValueError("Filling run and trial must share one device ID")
         with self._database.connect() as connection:
-            connection.execute("BEGIN")
+            connection.execute("BEGIN IMMEDIATE")
             if _update_run(connection, run) == 0:
                 stored_device_id = _stored_run_device_id(connection, run.run_id)
                 if stored_device_id is not None:
@@ -541,7 +542,7 @@ class StorageRepository:
         if result.run_id != step.run_id or result.step_id != step.step_id:
             raise ValueError("Filling analysis step and result references must match")
         with self._database.connect() as connection:
-            connection.execute("BEGIN")
+            connection.execute("BEGIN IMMEDIATE")
             _insert_step(connection, step)
             _insert_analysis_result(connection, result)
 
@@ -560,7 +561,7 @@ class StorageRepository:
         ):
             raise ValueError("Filling advance transition must use one device ID")
         with self._database.connect() as connection:
-            connection.execute("BEGIN")
+            connection.execute("BEGIN IMMEDIATE")
             stored_device_id = _stored_run_device_id(
                 connection,
                 completed_run.run_id,

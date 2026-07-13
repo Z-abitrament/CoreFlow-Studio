@@ -4,9 +4,11 @@ import sqlite3
 from dataclasses import FrozenInstanceError, replace
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
+from threading import Event, Thread
 
 import pytest
 
+import coreflow.storage.repositories as storage_repositories
 from coreflow.storage import (
     AnalysisResultRecord,
     Database,
@@ -603,6 +605,101 @@ def test_save_step_protects_profile_source_run_identity(tmp_path) -> None:
     )
     repository.save_step(allowed_update)
     assert repository.list_steps(source_step.run_id) == (allowed_update,)
+
+
+@pytest.mark.parametrize("ancestor", ("run", "step"))
+def test_profile_save_serializes_ancestor_identity_checks(
+    tmp_path,
+    monkeypatch,
+    ancestor: str,
+) -> None:
+    _, repository = _repository(tmp_path)
+    repository.create_device(_device("CFM-1"))
+    repository.create_device(_device("CFM-2"))
+    source_run = _seed_run(repository)
+    other_run = _run("RUN-OTHER")
+    repository.save_run(other_run)
+    source_step = _step()
+    repository.save_step(source_step)
+    result = _result(step_id=source_step.step_id)
+    repository.save_analysis_result(result)
+    profile = _profile(source_result_id=result.result_id)
+    validation_completed = Event()
+    allow_profile_insert = Event()
+    rehome_started = Event()
+    rehome_finished = Event()
+    profile_errors: list[BaseException] = []
+    rehome_errors: list[BaseException] = []
+    original_validator = (
+        storage_repositories._validate_filling_advance_profile_references
+    )
+
+    def pausing_validator(
+        connection: sqlite3.Connection,
+        record: FillingAdvanceProfileRecord,
+        *,
+        source_run_id: str | None = None,
+    ) -> None:
+        original_validator(
+            connection,
+            record,
+            source_run_id=source_run_id,
+        )
+        validation_completed.set()
+        if not allow_profile_insert.wait(5):
+            raise TimeoutError("Profile insert was not released")
+
+    monkeypatch.setattr(
+        storage_repositories,
+        "_validate_filling_advance_profile_references",
+        pausing_validator,
+    )
+
+    def save_profile() -> None:
+        try:
+            repository.save_filling_advance_profile(profile)
+        except BaseException as exc:  # pragma: no cover - asserted below
+            profile_errors.append(exc)
+
+    def rehome_ancestor() -> None:
+        rehome_started.set()
+        try:
+            if ancestor == "run":
+                repository.save_run(replace(source_run, device_id="CFM-2"))
+            else:
+                repository.save_step(
+                    replace(source_step, run_id=other_run.run_id)
+                )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            rehome_errors.append(exc)
+        finally:
+            rehome_finished.set()
+
+    profile_thread = Thread(target=save_profile, name="profile-save")
+    profile_thread.start()
+    assert validation_completed.wait(5)
+    rehome_thread = Thread(target=rehome_ancestor, name="ancestor-rehome")
+    rehome_thread.start()
+    assert rehome_started.wait(5)
+    rehome_finished.wait(1)
+    allow_profile_insert.set()
+    profile_thread.join(5)
+    rehome_thread.join(5)
+
+    assert not profile_thread.is_alive()
+    assert not rehome_thread.is_alive()
+    assert profile_errors == []
+    assert len(rehome_errors) == 1
+    assert isinstance(rehome_errors[0], ValueError)
+    assert repository.list_filling_advance_profiles("CFM-1") == (profile,)
+    stored_run = repository.get_run(source_run.run_id)
+    assert stored_run is not None
+    assert stored_run.device_id == profile.device_id
+    stored_result = repository.get_analysis_result(result.result_id)
+    assert stored_result is not None
+    assert stored_result.run_id == stored_run.run_id
+    assert repository.list_steps(source_run.run_id) == (source_step,)
+    assert repository.list_steps(other_run.run_id) == ()
 
 
 def test_repository_normalizes_aware_timestamps_before_history_sorting(
