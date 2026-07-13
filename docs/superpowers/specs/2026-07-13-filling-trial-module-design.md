@@ -109,6 +109,10 @@ Create a headless `FillingTrialService` under `coreflow/app`. It owns:
 - Advance selection, calculation, setting, and profile creation.
 - History queries and last-used-configuration queries.
 
+New Device records created from this module use the existing neutral
+`future_adapter` device type because this milestone does not define a protocol
+adapter. Duplicate creation uses insert-only repository behavior.
+
 ### Analysis Layer
 
 Create focused filling calculation functions under `coreflow/analysis`. They
@@ -120,6 +124,10 @@ storage, or protocol dependencies.
 Extend the existing repository rather than adding UI-level SQL. Reuse
 `run_sessions`, `workflow_steps`, and `analysis_results`, and add dedicated
 tables for queryable filling trials and reusable advance profiles.
+
+Each saved Trial and each repeatability/advance calculation has a completed
+workflow step. Add a neutral `completed` step status for the same reason the run
+model needs neutral completion.
 
 ## Device Selection
 
@@ -138,8 +146,9 @@ action. Switching back to the already-created Filling Module in the same
 application session retains its current selection. Changing devices requires
 the current trial group to be ended first.
 
-Modbus profiles already create matching shared `DeviceRecord` rows, so those
-Device IDs appear in the Filling Module without duplicating Modbus profiles.
+Current Modbus profile creation writes matching shared `DeviceRecord` rows. The
+v3-to-v4 migration also backfills legacy orphan Modbus profile IDs so every
+existing flowmeter profile can appear in the Filling Module selector.
 
 ## Single-Page Workbench
 
@@ -334,13 +343,21 @@ Trial-group states are:
 - `canceled`: operator ends or closes an empty group.
 - `error`: an unrecoverable service or persistence error prevents continuation.
 
+The UI starts and persists a pending group when the operator first invokes
+Trial calculation with a valid configuration. The Trial and run/step status
+update then commit atomically. Set Advance also creates its corrected pending
+group atomically. A validation failure before group creation remains an
+unpersisted UI draft.
+
 Pending current-trial input exists only in UI memory. Closing discards it.
 Calculated trials are never discarded by normal close behavior.
 
 ## Data Model
 
 Increase `SCHEMA_VERSION` from 3 to 4 and add an explicit v3-to-v4 migration
-test.
+test. The migration creates the new tables and indexes, preserves existing
+data, backfills orphan Modbus profile Device IDs, records version 4 only after
+success, and rejects databases from a future schema version.
 
 ### Shared Run Records
 
@@ -348,7 +365,7 @@ Add `filling_trial` to `RunType`. Each trial group creates one `RunSession` with
 
 - `run_type=filling_trial`
 - `workflow_name=filling_trial_group`
-- `workflow_version=1`
+- `workflow_version="1"`
 - Device ID, operator/source, timestamps, status, software version, and notes.
 - A complete group-configuration snapshot.
 
@@ -368,7 +385,9 @@ Add `filling_trial_records` with:
   specified mass, and target mass.
 - Standard mass and percent error.
 - Full configuration snapshot JSON.
-- `started_at` and `calculated_at` timestamps.
+- `started_at` and `calculated_at` timestamps. `started_at` is the time pending
+  Trial 1 or a manually added Trial is created; `calculated_at` is the
+  successful calculation/save time.
 - Notes.
 
 The unique key `(run_id, trial_index)` prevents accidental duplicate indexes.
@@ -384,6 +403,7 @@ Add `filling_advance_profiles` with:
 - Pulse and mass parameter snapshot.
 - Flow point, specified mass, advance mass, and corrected target mass.
 - Source Trial IDs JSON.
+- Full configuration snapshot JSON and notes.
 - Created timestamp.
 
 Profiles are immutable. Recalculating or setting another advance creates a new
