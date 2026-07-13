@@ -183,29 +183,78 @@ def test_main_window_close_ends_filling_group_but_module_switch_does_not(
     assert stored.status is expected_status
 
 
-def test_main_window_close_survives_filling_cleanup_failure(
+@pytest.mark.parametrize("cleanup_failure", ("returned_false", "raised"))
+def test_main_window_rejects_close_when_filling_cleanup_fails(
     qtbot,
     tmp_path,
     monkeypatch,
+    cleanup_failure,
 ) -> None:
     monkeypatch.setattr(
         FillingModuleWindow,
         "ensure_device_selected",
         _select_filling_device,
     )
-    window = MainWindow(runtime=CoreFlowRuntime(data_root=tmp_path))
+    runtime = CoreFlowRuntime(data_root=tmp_path)
+    window = MainWindow(runtime=runtime)
     qtbot.addWidget(window)
     window.show()
+    window.asioModuleAction.trigger()
     window.fillingModuleAction.trigger()
-    assert window.fillingWindow is not None
+    modbus_window = window.modbusWindow
+    asio_window = window.asioWindow
+    filling_window = window.fillingWindow
+    assert modbus_window is not None
+    assert asio_window is not None
+    assert filling_window is not None
 
-    def fail_cleanup() -> bool:
-        raise RuntimeError("filling cleanup failed")
+    group = filling_window.service.start_group(_filling_configuration())
+    real_end_active_group = filling_window.end_active_group
+    child_close_calls: list[str] = []
+    monkeypatch.setattr(
+        type(modbus_window),
+        "close",
+        lambda _window: child_close_calls.append("modbus"),
+    )
+    monkeypatch.setattr(
+        type(asio_window),
+        "close",
+        lambda _window: child_close_calls.append("asio"),
+    )
 
-    monkeypatch.setattr(window.fillingWindow, "end_active_group", fail_cleanup)
-    window.close()
+    if cleanup_failure == "returned_false":
+        monkeypatch.setattr(filling_window, "end_active_group", lambda: False)
+    else:
+        def fail_cleanup() -> bool:
+            raise RuntimeError("filling cleanup failed")
 
-    assert not window.isVisible()
+        monkeypatch.setattr(filling_window, "end_active_group", fail_cleanup)
+
+    assert window.close() is False
+
+    assert window.isVisible()
+    assert child_close_calls == []
+    assert window.statusBar().isVisible()
+    assert window.statusBar().currentMessage() == (
+        "Cannot close CoreFlow Studio: Filling Module cleanup failed. "
+        "Resolve the error and try again."
+    )
+    assert filling_window.service.snapshot().run_id == group.run_id
+    stored = runtime.repository.get_run(group.run_id)
+    assert stored is not None
+    assert stored.status is RunStatus.PENDING
+    assert stored.ended_at is None
+
+    monkeypatch.setattr(
+        filling_window,
+        "end_active_group",
+        real_end_active_group,
+    )
+    assert window.close() is True
+    assert child_close_calls == ["modbus", "asio"]
+    stored = runtime.repository.get_run(group.run_id)
+    assert stored is not None
+    assert stored.status is RunStatus.CANCELED
 
 
 def test_main_window_opens_update_dialog_from_help_menu(qtbot, tmp_path) -> None:

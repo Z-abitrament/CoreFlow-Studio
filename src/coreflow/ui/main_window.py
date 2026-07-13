@@ -140,12 +140,24 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override name
         if self.fillingWindow is not None:
+            cleanup_message = (
+                "Cannot close CoreFlow Studio: Filling Module cleanup failed. "
+                "Resolve the error and try again."
+            )
             try:
                 ended = self.fillingWindow.end_active_group()
                 if not ended:
                     LOGGER.warning("Filling group cleanup reported failure during shutdown.")
+                    self.statusBar().showMessage(cleanup_message)
+                    self.statusBar().show()
+                    event.ignore()
+                    return
             except Exception:
                 LOGGER.exception("Filling group cleanup failed during shutdown.")
+                self.statusBar().showMessage(cleanup_message)
+                self.statusBar().show()
+                event.ignore()
+                return
         if self.modbusWindow is not None:
             self.modbusWindow.close()
         if self.asioWindow is not None:
