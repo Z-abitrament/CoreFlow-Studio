@@ -33,6 +33,7 @@ packaging/windows/generated_build_stamp.py
 *.autosave
 .vscode/
 .idea/
+.worktrees/
 
 # Runtime data, logs, and generated artifacts
 CoreFlowStudioData/
