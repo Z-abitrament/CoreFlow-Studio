@@ -5,6 +5,12 @@ from coreflow.app.write_guard import WriteGuardDecision, WriteGuardService
 __all__ = [
     "ChannelSnapshot",
     "CoreFlowRuntime",
+    "FillingAnalysisRecord",
+    "FillingConfiguration",
+    "FillingGroupSnapshot",
+    "FillingHistoryEntry",
+    "FillingMode",
+    "FillingTrialService",
     "ModbusConnectionSettings",
     "ModbusModuleRuntime",
     "ModbusModuleStatus",
@@ -15,6 +21,32 @@ __all__ = [
 
 
 def __getattr__(name: str) -> object:
+    if name in {
+        "FillingAnalysisRecord",
+        "FillingConfiguration",
+        "FillingGroupSnapshot",
+        "FillingHistoryEntry",
+        "FillingMode",
+        "FillingTrialService",
+    }:
+        from coreflow.app.filling import (
+            FillingAnalysisRecord,
+            FillingConfiguration,
+            FillingGroupSnapshot,
+            FillingHistoryEntry,
+            FillingMode,
+            FillingTrialService,
+        )
+
+        exports = {
+            "FillingAnalysisRecord": FillingAnalysisRecord,
+            "FillingConfiguration": FillingConfiguration,
+            "FillingGroupSnapshot": FillingGroupSnapshot,
+            "FillingHistoryEntry": FillingHistoryEntry,
+            "FillingMode": FillingMode,
+            "FillingTrialService": FillingTrialService,
+        }
+        return exports[name]
     if name in {"ChannelSnapshot", "CoreFlowRuntime", "RunInspection"}:
         from coreflow.app.runtime import (
             ChannelSnapshot,
