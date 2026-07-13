@@ -49,6 +49,12 @@ def test_workflow_step_model_records_inputs_outputs_and_errors() -> None:
     assert step.error_message is None
 
 
+def test_filling_workflow_enums_use_neutral_completion_values() -> None:
+    assert RunType.FILLING_TRIAL.value == "filling_trial"
+    assert RunStatus.COMPLETED.value == "completed"
+    assert WorkflowStepStatus.COMPLETED.value == "completed"
+
+
 def test_artifact_model_links_files_to_runs() -> None:
     artifact = Artifact(
         artifact_id="ART-001",

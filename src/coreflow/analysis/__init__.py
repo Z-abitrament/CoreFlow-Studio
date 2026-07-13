@@ -25,6 +25,14 @@ from coreflow.analysis.error import (
     NearZeroPolicy,
     analyze_error,
 )
+from coreflow.analysis.filling import (
+    FillingAdvanceResult,
+    FillingRepeatabilityResult,
+    FillingTrialValue,
+    calculate_advance,
+    calculate_repeatability,
+    calculate_trial_error,
+)
 from coreflow.analysis.stability import (
     StabilityAnalysisConfig,
     StabilityAnalysisResult,
@@ -44,6 +52,9 @@ __all__ = [
     "ErrorAnalysisResult",
     "ErrorPoint",
     "ErrorPointResult",
+    "FillingAdvanceResult",
+    "FillingRepeatabilityResult",
+    "FillingTrialValue",
     "NearZeroPolicy",
     "PlaceholderCalibrationCalculator",
     "RepeatabilityTestResult",
@@ -57,6 +68,9 @@ __all__ = [
     "analyze_repeatability",
     "analyze_error",
     "analyze_stability",
+    "calculate_advance",
     "calculate_k_factor",
+    "calculate_repeatability",
+    "calculate_trial_error",
     "load_mass_flow_csv",
 ]

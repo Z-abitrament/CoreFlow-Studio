@@ -17,6 +17,7 @@ class RunType(StrEnum):
     STABILITY = "stability"
     EXPERIMENT = "experiment"
     HARDWARE_ACCEPTANCE = "hardware_acceptance"
+    FILLING_TRIAL = "filling_trial"
 
 
 class RunStatus(StrEnum):
@@ -24,6 +25,7 @@ class RunStatus(StrEnum):
 
     PENDING = "pending"
     RUNNING = "running"
+    COMPLETED = "completed"
     PASSED = "passed"
     FAILED = "failed"
     CANCELED = "canceled"
@@ -46,6 +48,7 @@ class WorkflowStepStatus(StrEnum):
 
     PENDING = "pending"
     RUNNING = "running"
+    COMPLETED = "completed"
     PASSED = "passed"
     FAILED = "failed"
     SKIPPED = "skipped"
