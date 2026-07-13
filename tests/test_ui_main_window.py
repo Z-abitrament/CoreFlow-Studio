@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QTextEdit, QSplitter
 
-from coreflow.app import CoreFlowRuntime
+from coreflow.app import CoreFlowRuntime, FillingConfiguration, FillingMode
 from coreflow.ui import MainWindow
+from coreflow.ui.filling_window import FillingModuleWindow
+from coreflow.workflows import RunStatus
 
 
 def _click(qtbot, button) -> None:
@@ -14,6 +17,26 @@ def _click(qtbot, button) -> None:
 def _table_text(table, row: int, column: int) -> str:
     item = table.item(row, column)
     return "" if item is None else item.text()
+
+
+def _select_filling_device(window: FillingModuleWindow) -> bool:
+    if window.service.snapshot().device_id is None:
+        window.service.create_device(device_id="CFM-MAIN-FILL")
+        window.service.select_device("CFM-MAIN-FILL")
+    return True
+
+
+def _filling_configuration() -> FillingConfiguration:
+    return FillingConfiguration(
+        mode=FillingMode.REGULAR,
+        control_valve_label="CTRL-A + VALVE-1",
+        pulse_frequency_switch_point_hz=125.0,
+        mass_per_pulse=0.1,
+        mass_unit="g",
+        flow_point_g_per_s=100.0,
+        specified_mass=1000.0,
+        target_mass=995.0,
+    )
 
 
 def test_main_window_defaults_to_modbus_module(qtbot, tmp_path) -> None:
@@ -32,9 +55,157 @@ def test_main_window_defaults_to_modbus_module(qtbot, tmp_path) -> None:
     assert not window.modbusWindow.isWindow()
     assert window.modbusModuleAction.isChecked()
     assert window.asioWindow is None
+    assert window.fillingWindow is None
+    assert window.fillingModuleAction.text() == "Filling Module"
+    assert window.fillingModuleAction.isCheckable()
+    assert not window.fillingModuleAction.isChecked()
     assert not hasattr(window, "deviceTable")
     assert not hasattr(window, "addSimulatorButton")
     assert not hasattr(window, "runCalibrationButton")
+
+
+def test_filling_cancel_keeps_previous_module_and_lazily_created_window_hidden(
+    qtbot,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        FillingModuleWindow,
+        "ensure_device_selected",
+        lambda _window: False,
+    )
+    window = MainWindow(runtime=CoreFlowRuntime(data_root=tmp_path))
+    qtbot.addWidget(window)
+    window.show()
+    modbus_window = window.modbusWindow
+
+    window.fillingModuleAction.trigger()
+
+    assert window.fillingWindow is not None
+    assert not window.fillingWindow.isWindow()
+    assert window.fillingWindow.embedded is True
+    assert window.moduleStack.currentWidget() is modbus_window
+    assert window.modbusModuleAction.isChecked()
+    assert not window.asioModuleAction.isChecked()
+    assert not window.fillingModuleAction.isChecked()
+    assert not window.fillingWindow.isVisible()
+
+
+def test_main_window_preserves_all_module_instances_draft_and_connection_state(
+    qtbot,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        FillingModuleWindow,
+        "ensure_device_selected",
+        _select_filling_device,
+    )
+    window = MainWindow(runtime=CoreFlowRuntime(data_root=tmp_path))
+    qtbot.addWidget(window)
+    window.show()
+    modbus_window = window.modbusWindow
+
+    window.fillingModuleAction.trigger()
+    filling_window = window.fillingWindow
+    assert filling_window is not None
+    filling_window.standardMassEdit.setText("1005.25")
+    assert window.moduleStack.currentWidget() is filling_window
+    assert window.fillingModuleAction.isChecked()
+    assert not window.modbusModuleAction.isChecked()
+    assert not window.asioModuleAction.isChecked()
+
+    window.asioModuleAction.trigger()
+    asio_window = window.asioWindow
+    assert asio_window is not None
+    asio_window.backendCombo.setCurrentText("fake")
+    asio_window.deviceCombo.setCurrentText("BRAVO-HD Device Control")
+    _click(qtbot, asio_window.connectButton)
+    qtbot.waitUntil(
+        lambda: asio_window.statusValueLabel.text() == "Connected",
+        timeout=5000,
+    )
+    assert window.asioModuleAction.isChecked()
+    assert not window.modbusModuleAction.isChecked()
+    assert not window.fillingModuleAction.isChecked()
+
+    window.modbusModuleAction.trigger()
+    assert window.modbusWindow is modbus_window
+    assert window.modbusModuleAction.isChecked()
+    assert not window.asioModuleAction.isChecked()
+    assert not window.fillingModuleAction.isChecked()
+
+    window.fillingModuleAction.trigger()
+    assert window.fillingWindow is filling_window
+    assert filling_window.standardMassEdit.text() == "1005.25"
+    assert window.fillingModuleAction.isChecked()
+
+    window.asioModuleAction.trigger()
+    assert window.asioWindow is asio_window
+    assert asio_window.statusValueLabel.text() == "Connected"
+    assert window.asioModuleAction.isChecked()
+
+
+@pytest.mark.parametrize(
+    ("has_trial", "expected_status"),
+    ((False, RunStatus.CANCELED), (True, RunStatus.COMPLETED)),
+)
+def test_main_window_close_ends_filling_group_but_module_switch_does_not(
+    qtbot,
+    tmp_path,
+    monkeypatch,
+    has_trial,
+    expected_status,
+) -> None:
+    monkeypatch.setattr(
+        FillingModuleWindow,
+        "ensure_device_selected",
+        _select_filling_device,
+    )
+    runtime = CoreFlowRuntime(data_root=tmp_path)
+    window = MainWindow(runtime=runtime)
+    qtbot.addWidget(window)
+    window.show()
+    window.fillingModuleAction.trigger()
+    filling_window = window.fillingWindow
+    assert filling_window is not None
+    group = filling_window.service.start_group(_filling_configuration())
+    if has_trial:
+        filling_window.service.calculate_current_trial(1005.0)
+
+    window.modbusModuleAction.trigger()
+    assert filling_window.service.snapshot().run_id == group.run_id
+
+    window.close()
+
+    stored = runtime.repository.get_run(group.run_id)
+    assert stored is not None
+    assert stored.status is expected_status
+
+
+def test_main_window_close_survives_filling_cleanup_failure(
+    qtbot,
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        FillingModuleWindow,
+        "ensure_device_selected",
+        _select_filling_device,
+    )
+    window = MainWindow(runtime=CoreFlowRuntime(data_root=tmp_path))
+    qtbot.addWidget(window)
+    window.show()
+    window.fillingModuleAction.trigger()
+    assert window.fillingWindow is not None
+
+    def fail_cleanup() -> bool:
+        raise RuntimeError("filling cleanup failed")
+
+    monkeypatch.setattr(window.fillingWindow, "end_active_group", fail_cleanup)
+    window.close()
+
+    assert not window.isVisible()
 
 
 def test_main_window_opens_update_dialog_from_help_menu(qtbot, tmp_path) -> None:

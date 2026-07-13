@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -10,7 +12,7 @@ from coreflow.__main__ import main
 
 
 def test_package_exposes_version() -> None:
-    assert coreflow.__version__ == "0.6.3"
+    assert coreflow.__version__ == "0.7.0"
 
 
 def test_main_returns_success(capsys) -> None:
@@ -33,7 +35,7 @@ def test_packaged_ui_startup_failure_writes_log(monkeypatch, tmp_path, capsys) -
     assert "UI startup failed" in captured.err
     assert str(log_path) in captured.err
     log_text = log_path.read_text(encoding="utf-8")
-    assert "build=version=0.6.3" in log_text
+    assert "build=version=0.7.0" in log_text
     assert "RuntimeError: qt dependency missing" in log_text
     assert "traceback:" in log_text
 
@@ -52,10 +54,13 @@ def test_source_ui_startup_failure_is_re_raised(monkeypatch, tmp_path) -> None:
 
 
 def test_module_entry_point_runs() -> None:
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
     completed = subprocess.run(
         [sys.executable, "-m", "coreflow", "--version"],
         check=True,
         capture_output=True,
         text=True,
+        env=env,
     )
-    assert "CoreFlow Studio 0.6.3" in completed.stdout
+    assert "CoreFlow Studio 0.7.0" in completed.stdout

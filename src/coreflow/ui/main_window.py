@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from PySide6.QtCore import QCoreApplication, QThreadPool, Qt
 from PySide6.QtWidgets import (
     QDialog,
@@ -27,8 +29,12 @@ from coreflow.app.updates import (
     UpdateSettings,
 )
 from coreflow.ui.asio_window import AsioIisWindow
+from coreflow.ui.filling_window import FillingModuleWindow
 from coreflow.ui.modbus_window import ModbusModuleWindow
 from coreflow.ui.workers import WorkflowTask
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class MainWindow(QMainWindow):
@@ -40,6 +46,7 @@ class MainWindow(QMainWindow):
         self._thread_pool = QThreadPool.globalInstance()
         self.modbusWindow: ModbusModuleWindow | None = None
         self.asioWindow: AsioIisWindow | None = None
+        self.fillingWindow: FillingModuleWindow | None = None
         self.updateDialog: UpdateDialog | None = None
 
         self.setWindowTitle("CoreFlow Studio")
@@ -64,6 +71,10 @@ class MainWindow(QMainWindow):
         self.asioModuleAction.setObjectName("asioModuleAction")
         self.asioModuleAction.setCheckable(True)
         self.asioModuleAction.triggered.connect(self._show_asio_module)
+        self.fillingModuleAction = modules_menu.addAction("Filling Module")
+        self.fillingModuleAction.setObjectName("fillingModuleAction")
+        self.fillingModuleAction.setCheckable(True)
+        self.fillingModuleAction.triggered.connect(self._show_filling_module)
 
         help_menu = self.menuBar().addMenu("Help")
         self.checkUpdatesAction = help_menu.addAction("Check for Updates...")
@@ -91,11 +102,31 @@ class MainWindow(QMainWindow):
             self.moduleStack.addWidget(self.asioWindow)
         self._set_current_module(self.asioWindow)
 
+    def _show_filling_module(self) -> None:
+        previous_widget = self.moduleStack.currentWidget()
+        if self.fillingWindow is None:
+            self.fillingWindow = FillingModuleWindow(
+                repository=self.runtime.repository,
+                operator=self.runtime.operator,
+                parent=self.moduleStack,
+                embedded=True,
+            )
+            self.fillingWindow.setWindowFlags(Qt.WindowType.Widget)
+            self.moduleStack.addWidget(self.fillingWindow)
+        if not self.fillingWindow.ensure_device_selected():
+            if previous_widget is not None:
+                self._set_current_module(previous_widget)
+            else:
+                self.fillingModuleAction.setChecked(False)
+            return
+        self._set_current_module(self.fillingWindow)
+
     def _set_current_module(self, widget: QWidget) -> None:
         widget.show()
         self.moduleStack.setCurrentWidget(widget)
         self.modbusModuleAction.setChecked(widget is self.modbusWindow)
         self.asioModuleAction.setChecked(widget is self.asioWindow)
+        self.fillingModuleAction.setChecked(widget is self.fillingWindow)
 
     def _open_update_dialog(self) -> None:
         if self.updateDialog is None or not self.updateDialog.isVisible():
@@ -108,6 +139,13 @@ class MainWindow(QMainWindow):
         self.updateDialog.activateWindow()
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override name
+        if self.fillingWindow is not None:
+            try:
+                ended = self.fillingWindow.end_active_group()
+                if not ended:
+                    LOGGER.warning("Filling group cleanup reported failure during shutdown.")
+            except Exception:
+                LOGGER.exception("Filling group cleanup failed during shutdown.")
         if self.modbusWindow is not None:
             self.modbusWindow.close()
         if self.asioWindow is not None:

@@ -280,6 +280,13 @@ def test_windows_packaging_files_are_present() -> None:
     assert "collect_dynamic_libs(\"PySide6\")" in spec_text
     assert "collect_dynamic_libs(\"shiboken6\")" in spec_text
     assert '"PySide6.QtOpenGL"' in spec_text
+    for hidden_import in (
+        "coreflow.ui.filling_window",
+        "coreflow.ui.filling_dialogs",
+        "coreflow.ui.filling_history",
+        "coreflow.app.filling",
+    ):
+        assert f'"{hidden_import}"' in spec_text
     assert "collect_conda_qt_binaries" in spec_text
     assert "Library\" / \"bin\"" in spec_text
     assert "shiboken6*.dll" in spec_text
