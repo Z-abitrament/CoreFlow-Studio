@@ -6,9 +6,11 @@ import sqlite3
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from math import isclose, isfinite
+from functools import wraps
+from math import isfinite
 from numbers import Real
-from typing import Callable, Sequence
+from threading import RLock
+from typing import Any, Callable, Sequence
 from uuid import uuid4
 
 from coreflow import __version__
@@ -167,6 +169,17 @@ class _PendingTrial:
     started_at: datetime
 
 
+def _synchronized(method: Callable[..., Any]) -> Callable[..., Any]:
+    """Serialize every public operation that observes service state."""
+
+    @wraps(method)
+    def wrapper(self: FillingTrialService, *args: Any, **kwargs: Any) -> Any:
+        with self._state_lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class FillingTrialService:
     """Coordinate one in-memory filling group and its atomic persistence."""
 
@@ -179,6 +192,7 @@ class FillingTrialService:
         clock: Clock = utc_now,
         token_factory: TokenFactory = new_token,
     ) -> None:
+        self._state_lock = RLock()
         self._repository = repository
         self._operator = _nonempty_text("Operator", operator)
         self._software_version = _nonempty_text(
@@ -194,9 +208,11 @@ class FillingTrialService:
         self._pending_trial: _PendingTrial | None = None
         self._trials: tuple[FillingTrialRecord, ...] = ()
 
+    @_synchronized
     def list_devices(self) -> tuple[DeviceRecord, ...]:
         return self._repository.list_devices()
 
+    @_synchronized
     def create_device(
         self,
         *,
@@ -222,6 +238,7 @@ class FillingTrialService:
             ) from exc
         return record
 
+    @_synchronized
     def select_device(self, device_id: str) -> FillingConfiguration | None:
         normalized_id = _nonempty_text("Device ID", device_id)
         if (
@@ -240,6 +257,7 @@ class FillingTrialService:
         self._selected_configuration = restored
         return restored
 
+    @_synchronized
     def start_group(
         self,
         configuration: FillingConfiguration,
@@ -272,6 +290,7 @@ class FillingTrialService:
         self._trials = ()
         return self.snapshot()
 
+    @_synchronized
     def update_pending_configuration(
         self,
         configuration: FillingConfiguration,
@@ -291,6 +310,7 @@ class FillingTrialService:
         self._configuration = configuration
         return self.snapshot()
 
+    @_synchronized
     def calculate_current_trial(
         self,
         standard_mass: float,
@@ -302,7 +322,10 @@ class FillingTrialService:
         if pending is None:
             raise ValueError("There is no pending trial to calculate.")
         normalized_mass = _positive_number("Standard mass", standard_mass)
-        calculated_at = self._now()
+        calculated_at = self._event_time(
+            "Trial calculation",
+            pending.started_at,
+        )
         percent_error = calculate_trial_error(
             configuration.specified_mass,
             normalized_mass,
@@ -364,19 +387,25 @@ class FillingTrialService:
         self._selected_configuration = configuration
         return trial
 
+    @_synchronized
     def add_trial(self) -> FillingGroupSnapshot:
         self._require_active_group()
         if not self._trials:
             raise ValueError("Calculate the first trial before adding another.")
         if self._pending_trial is not None:
             raise ValueError("A trial is already pending.")
-        started_at = self._now()
+        last_calculated_at = max(
+            _aware_utc("Trial calculated_at", trial.calculated_at)
+            for trial in self._trials
+        )
+        started_at = self._event_time("Add Trial", last_calculated_at)
         self._pending_trial = _PendingTrial(
             max(trial.trial_index for trial in self._trials) + 1,
             started_at,
         )
         return self.snapshot()
 
+    @_synchronized
     def calculate_repeatability(
         self,
         trial_ids: Sequence[str],
@@ -401,6 +430,7 @@ class FillingTrialService:
             metrics=metrics,
         )
 
+    @_synchronized
     def calculate_advance(
         self,
         trial_ids: Sequence[str],
@@ -420,6 +450,7 @@ class FillingTrialService:
             metrics=metrics,
         )
 
+    @_synchronized
     def set_advance(self, result_id: str) -> FillingAdvanceProfileRecord:
         run, configuration = self._require_active_group()
         if configuration.mode is not FillingMode.ADVANCE:
@@ -429,28 +460,56 @@ class FillingTrialService:
         )
         if result is None:
             raise ValueError(f"Unknown filling analysis result: {result_id}")
-        if result.run_id != run.run_id or result.result_type != "filling_advance":
-            raise ValueError(
-                "Set Advance requires an advance result from the active run."
+        try:
+            if result.run_id != run.run_id:
+                raise ValueError("result belongs to another run")
+            source_ids = _string_list_metric(
+                result.summary_metrics,
+                "source_trial_ids",
             )
-        if result.step_id is None or not any(
-            step.step_id == result.step_id
-            and step.status is WorkflowStepStatus.COMPLETED
-            for step in self._repository.list_steps(run.run_id)
-        ):
-            raise ValueError("Advance result is not backed by a completed step.")
+            source_trials = self._load_selected_trials(source_ids)
+            recalculated = calculate_advance(
+                tuple(_trial_value(trial) for trial in source_trials)
+            )
+            source_started_at, source_ended_at = _source_time_range(
+                source_trials
+            )
+            canonical_configuration = _analysis_configuration(
+                configuration,
+                source_trials,
+                source_started_at=source_started_at,
+                source_ended_at=source_ended_at,
+            )
+            canonical_metrics = self._advance_metrics(
+                recalculated,
+                source_trials,
+            )
+            matching_steps = tuple(
+                step
+                for step in self._repository.list_steps(run.run_id)
+                if step.step_id == result.step_id
+            )
+            result_created_at = self._validate_advance_result(
+                result,
+                run=run,
+                canonical_configuration=canonical_configuration,
+                canonical_metrics=canonical_metrics,
+                source_ended_at=source_ended_at,
+                matching_steps=matching_steps,
+            )
+        except ValueError as exc:
+            raise ValueError(
+                f"Advance provenance validation failed: {exc}"
+            ) from exc
 
-        source_ids = _string_list_metric(
-            result.summary_metrics,
-            "source_trial_ids",
+        transition_at = self._event_time(
+            "Set Advance",
+            max(
+                _aware_utc("Run started_at", run.started_at),
+                source_ended_at,
+                result_created_at,
+            ),
         )
-        source_trials = self._load_selected_trials(source_ids)
-        recalculated = calculate_advance(
-            tuple(_trial_value(trial) for trial in source_trials)
-        )
-        self._validate_advance_result(result, recalculated, configuration)
-
-        transition_at = self._now()
         notes = _combined_notes(source_trials)
         profile = FillingAdvanceProfileRecord(
             profile_id=self._new_id("filling-profile"),
@@ -506,10 +565,12 @@ class FillingTrialService:
         self._trials = ()
         return profile
 
+    @_synchronized
     def end_group(self) -> None:
         if self._run is None:
             return
-        ended_at = self._now()
+        minimum_end_time = max(self._active_event_times())
+        ended_at = self._event_time("End Group", minimum_end_time)
         final_status = (
             RunStatus.COMPLETED if self._trials else RunStatus.CANCELED
         )
@@ -524,6 +585,7 @@ class FillingTrialService:
         self._pending_trial = None
         self._trials = ()
 
+    @_synchronized
     def list_advance_profiles(
         self,
     ) -> tuple[FillingAdvanceProfileRecord, ...]:
@@ -531,6 +593,7 @@ class FillingTrialService:
             self._require_selected_device()
         )
 
+    @_synchronized
     def list_history(self) -> tuple[FillingHistoryEntry, ...]:
         device_id = self._require_selected_device()
         trials = self._repository.list_filling_trials(device_id=device_id)
@@ -595,6 +658,7 @@ class FillingTrialService:
             )
         )
 
+    @_synchronized
     def snapshot(self) -> FillingGroupSnapshot:
         if self._run is None:
             return FillingGroupSnapshot(
@@ -631,21 +695,16 @@ class FillingTrialService:
         metrics: dict[str, object],
     ) -> FillingAnalysisRecord:
         run, configuration = self._require_active_group()
-        created_at = self._now()
+        source_started_at, source_ended_at = _source_time_range(source_trials)
+        created_at = self._event_time("Filling analysis", source_ended_at)
         step_id = self._new_id("filling-step")
         result_id = self._new_id("filling-result")
-        source_started_at, source_ended_at = _source_time_range(source_trials)
-        analysis_configuration = {
-            **configuration.snapshot(),
-            "source_trial_ids": list(
-                trial.trial_id for trial in source_trials
-            ),
-            "source_trial_indexes": list(
-                trial.trial_index for trial in source_trials
-            ),
-            "source_trial_started_at": source_started_at.isoformat(),
-            "source_trial_ended_at": source_ended_at.isoformat(),
-        }
+        analysis_configuration = _analysis_configuration(
+            configuration,
+            source_trials,
+            source_started_at=source_started_at,
+            source_ended_at=source_ended_at,
+        )
         step = WorkflowStep(
             step_id=step_id,
             run_id=run.run_id,
@@ -762,42 +821,65 @@ class FillingTrialService:
     def _validate_advance_result(
         self,
         result: AnalysisResultRecord,
-        recalculated: FillingAdvanceResult,
-        configuration: FillingConfiguration,
-    ) -> None:
-        metrics = result.summary_metrics
-        expected_values = {
-            "selected_trial_count": len(recalculated.trial_ids),
-            "specified_mass": recalculated.specified_mass,
-            "mean_standard_mass": recalculated.mean_standard_mass,
-            "advance_mass": recalculated.advance_mass,
-            "corrected_target_mass": recalculated.corrected_target_mass,
-        }
-        for key, expected in expected_values.items():
-            value = metrics.get(key)
-            if isinstance(value, bool) or not isinstance(value, Real):
-                raise ValueError(f"Advance result is missing numeric metric: {key}")
-            if not isclose(float(value), float(expected), rel_tol=1e-12, abs_tol=1e-12):
-                raise ValueError(f"Advance result metric does not match source trials: {key}")
-        if tuple(_string_list_metric(metrics, "source_trial_ids")) != recalculated.trial_ids:
-            raise ValueError("Advance result source Trial IDs are inconsistent.")
-        source_masses = metrics.get("source_standard_masses")
-        if not isinstance(source_masses, (list, tuple)) or len(source_masses) != len(
-            recalculated.standard_masses
+        *,
+        run: RunSession,
+        canonical_configuration: dict[str, object],
+        canonical_metrics: dict[str, object],
+        source_ended_at: datetime,
+        matching_steps: tuple[WorkflowStep, ...],
+    ) -> datetime:
+        if result.run_id != run.run_id:
+            raise ValueError("result run ID is inconsistent")
+        if result.result_type != "filling_advance":
+            raise ValueError("result type is inconsistent")
+        if result.algorithm_name != "filling_advance":
+            raise ValueError("algorithm name is inconsistent")
+        if result.algorithm_version != "1":
+            raise ValueError("algorithm version is inconsistent")
+        if result.input_artifact_ids != ():
+            raise ValueError("input artifact IDs must be empty")
+        if result.pass_fail_decision is not None:
+            raise ValueError("pass/fail decision must be unset")
+        if result.configuration_snapshot != canonical_configuration:
+            raise ValueError("result configuration snapshot is inconsistent")
+        if result.summary_metrics != canonical_metrics:
+            raise ValueError("result metrics are inconsistent")
+        result_created_at = _aware_utc(
+            "Advance result created_at",
+            result.created_at,
+        )
+        if result_created_at < source_ended_at:
+            raise ValueError("result predates its source trials")
+        if (
+            not isinstance(result.step_id, str)
+            or not result.step_id.strip()
+            or len(matching_steps) != 1
         ):
-            raise ValueError("Advance result source standard masses are incomplete.")
-        for stored, expected in zip(source_masses, recalculated.standard_masses):
-            if isinstance(stored, bool) or not isinstance(stored, Real) or not isclose(
-                float(stored), expected, rel_tol=1e-12, abs_tol=1e-12
-            ):
-                raise ValueError("Advance result source standard masses are inconsistent.")
-        if metrics.get("configuration_snapshot") != configuration.snapshot():
-            raise ValueError("Advance result configuration snapshot is inconsistent.")
-        if not all(
-            key in metrics
-            for key in ("source_trial_started_at", "source_trial_ended_at")
+            raise ValueError("result must reference one unique workflow step")
+
+        step = matching_steps[0]
+        if step.step_id != result.step_id or step.run_id != run.run_id:
+            raise ValueError("workflow step references are inconsistent")
+        if step.name != "Calculate filling advance":
+            raise ValueError("workflow step name is inconsistent")
+        if step.step_type is not WorkflowStepType.ANALYSIS:
+            raise ValueError("workflow step type is inconsistent")
+        if step.status is not WorkflowStepStatus.COMPLETED:
+            raise ValueError("workflow step status is inconsistent")
+        if step.input_configuration != canonical_configuration:
+            raise ValueError("workflow step input is inconsistent")
+        if step.output_summary != canonical_metrics:
+            raise ValueError("workflow step output is inconsistent")
+        if step.error_message is not None:
+            raise ValueError("workflow step error must be unset")
+        if (
+            _aware_utc("Advance step started_at", step.started_at)
+            != result_created_at
+            or _aware_utc("Advance step ended_at", step.ended_at)
+            != result_created_at
         ):
-            raise ValueError("Advance result source time range is incomplete.")
+            raise ValueError("workflow step timestamps are inconsistent")
+        return result_created_at
 
     def _trial_history_entry(
         self,
@@ -937,6 +1019,35 @@ class FillingTrialService:
     def _now(self) -> datetime:
         return _aware_utc("Clock value", self._clock())
 
+    def _event_time(self, label: str, minimum: datetime) -> datetime:
+        lower_bound = _aware_utc(f"{label} lower bound", minimum)
+        value = self._now()
+        if value < lower_bound:
+            raise ValueError(
+                f"{label} time cannot be earlier than {lower_bound.isoformat()}."
+            )
+        return value
+
+    def _active_event_times(self) -> tuple[datetime, ...]:
+        run, _ = self._require_active_group()
+        event_times = [
+            _aware_utc("Run started_at", run.started_at),
+        ]
+        if self._pending_trial is not None:
+            event_times.append(self._pending_trial.started_at)
+        for trial in self._trials:
+            event_times.extend(
+                (
+                    _aware_utc("Trial started_at", trial.started_at),
+                    _aware_utc("Trial calculated_at", trial.calculated_at),
+                )
+            )
+        for result in self._repository.list_analysis_results(run.run_id):
+            event_times.append(
+                _aware_utc("Analysis created_at", result.created_at)
+            )
+        return tuple(event_times)
+
     def _new_id(self, prefix: str) -> str:
         token = _nonempty_text("Generated token", self._token_factory())
         candidate = f"{prefix}:{token}"
@@ -1029,6 +1140,24 @@ def _source_time_range(
         for trial in trials
     )
     return min(started), max(ended)
+
+
+def _analysis_configuration(
+    configuration: FillingConfiguration,
+    trials: Sequence[FillingTrialRecord],
+    *,
+    source_started_at: datetime | None = None,
+    source_ended_at: datetime | None = None,
+) -> dict[str, object]:
+    if source_started_at is None or source_ended_at is None:
+        source_started_at, source_ended_at = _source_time_range(trials)
+    return {
+        **configuration.snapshot(),
+        "source_trial_ids": [trial.trial_id for trial in trials],
+        "source_trial_indexes": [trial.trial_index for trial in trials],
+        "source_trial_started_at": source_started_at.isoformat(),
+        "source_trial_ended_at": source_ended_at.isoformat(),
+    }
 
 
 def _combined_notes(trials: Sequence[FillingTrialRecord]) -> str | None:

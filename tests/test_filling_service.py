@@ -4,6 +4,7 @@ import sqlite3
 from dataclasses import FrozenInstanceError, replace
 from datetime import UTC, datetime, timedelta
 from math import inf, nan
+from threading import Event, Lock, Thread
 
 import pytest
 
@@ -16,7 +17,12 @@ from coreflow.app import (
     FillingTrialService,
 )
 from coreflow.storage import Database, DeviceRecord, StorageRepository
-from coreflow.workflows import RunStatus, RunType, WorkflowStepStatus
+from coreflow.workflows import (
+    RunStatus,
+    RunType,
+    WorkflowStepStatus,
+    WorkflowStepType,
+)
 
 
 START = datetime(2026, 7, 13, 1, 0, tzinfo=UTC)
@@ -120,6 +126,14 @@ def _calculate_trials(
         if index < len(masses):
             service.add_trial()
     return tuple(trial_ids)
+
+
+def _advance_calculation(
+    service: FillingTrialService,
+) -> tuple[tuple[str, ...], FillingAnalysisRecord]:
+    service.start_group(_config(FillingMode.ADVANCE))
+    trial_ids = _calculate_trials(service, (1005.0, 1006.0, 1004.0))
+    return trial_ids, service.calculate_advance(trial_ids)
 
 
 def test_public_service_models_are_frozen_slotted_and_snapshot_complete() -> None:
@@ -532,6 +546,259 @@ def test_set_advance_failure_does_not_switch_memory_or_complete_old_run(
     assert len(repository.list_runs(device_id="CFM-1")) == 1
 
 
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "result_type",
+        "algorithm_name",
+        "algorithm_version",
+        "input_artifact_ids",
+        "pass_fail_decision",
+        "configuration_snapshot",
+        "source_trial_indexes",
+        "source_trial_time_range",
+        "created_at",
+    ],
+)
+def test_set_advance_rejects_tampered_result_provenance(
+    repository: StorageRepository,
+    tamper: str,
+) -> None:
+    service, _ = _service(repository)
+    _, calculation = _advance_calculation(service)
+    stored = repository.get_analysis_result(calculation.result_id)
+    assert stored is not None
+
+    changes: dict[str, object]
+    if tamper == "result_type":
+        changes = {"result_type": "filling_repeatability"}
+    elif tamper == "algorithm_name":
+        changes = {"algorithm_name": "tampered_algorithm"}
+    elif tamper == "algorithm_version":
+        changes = {"algorithm_version": "2"}
+    elif tamper == "input_artifact_ids":
+        changes = {"input_artifact_ids": ("ARTIFACT-TAMPERED",)}
+    elif tamper == "pass_fail_decision":
+        changes = {"pass_fail_decision": "passed"}
+    elif tamper == "configuration_snapshot":
+        changes = {
+            "configuration_snapshot": {
+                **stored.configuration_snapshot,
+                "source_trial_indexes": [99, 100, 101],
+            }
+        }
+    elif tamper == "source_trial_indexes":
+        changes = {
+            "summary_metrics": {
+                **stored.summary_metrics,
+                "source_trial_indexes": [99, 100, 101],
+            }
+        }
+    elif tamper == "source_trial_time_range":
+        changes = {
+            "summary_metrics": {
+                **stored.summary_metrics,
+                "source_trial_ended_at": START.isoformat(),
+            }
+        }
+    else:
+        changes = {"created_at": START}
+    repository.save_analysis_result(replace(stored, **changes))
+    before = service.snapshot()
+
+    with pytest.raises(ValueError, match="provenance"):
+        service.set_advance(calculation.result_id)
+
+    assert service.snapshot() == before
+    assert repository.list_filling_advance_profiles("CFM-1") == ()
+    assert len(repository.list_runs(device_id="CFM-1")) == 1
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "name",
+        "step_type",
+        "status",
+        "input_configuration",
+        "output_summary",
+        "started_at",
+        "ended_at",
+        "error_message",
+    ],
+)
+def test_set_advance_rejects_tampered_step_provenance(
+    repository: StorageRepository,
+    tamper: str,
+) -> None:
+    service, _ = _service(repository)
+    _, calculation = _advance_calculation(service)
+    stored_result = repository.get_analysis_result(calculation.result_id)
+    assert stored_result is not None
+    matching = [
+        step
+        for step in repository.list_steps(calculation.run_id)
+        if step.step_id == stored_result.step_id
+    ]
+    assert len(matching) == 1
+    step = matching[0]
+
+    changes: dict[str, object]
+    if tamper == "name":
+        changes = {"name": "Tampered advance step"}
+    elif tamper == "step_type":
+        changes = {"step_type": WorkflowStepType.CAPTURE}
+    elif tamper == "status":
+        changes = {"status": WorkflowStepStatus.FAILED}
+    elif tamper == "input_configuration":
+        changes = {
+            "input_configuration": {
+                **step.input_configuration,
+                "source_trial_indexes": [99, 100, 101],
+            }
+        }
+    elif tamper == "output_summary":
+        changes = {
+            "output_summary": {
+                **step.output_summary,
+                "advance_mass": 999.0,
+            }
+        }
+    elif tamper == "started_at":
+        changes = {"started_at": step.started_at - timedelta(seconds=1)}
+    elif tamper == "ended_at":
+        changes = {"ended_at": step.ended_at + timedelta(seconds=1)}
+    else:
+        changes = {"error_message": "tampered error"}
+    repository.save_step(replace(step, **changes))
+    before = service.snapshot()
+
+    with pytest.raises(ValueError, match="provenance"):
+        service.set_advance(calculation.result_id)
+
+    assert service.snapshot() == before
+    assert repository.list_filling_advance_profiles("CFM-1") == ()
+    assert len(repository.list_runs(device_id="CFM-1")) == 1
+
+
+def test_calculate_and_end_group_are_serialized_at_trial_persistence(
+    repository: StorageRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, _ = _service(repository)
+    group = service.start_group(_config())
+    save_entered = Event()
+    allow_save = Event()
+    end_attempted = Event()
+    end_finished = Event()
+    original_save = repository.save_filling_trial_transition
+    results: list[object] = []
+    errors: list[BaseException] = []
+
+    def blocking_save(**kwargs: object) -> None:
+        save_entered.set()
+        if not allow_save.wait(5.0):
+            raise RuntimeError("Timed out waiting to release trial save")
+        original_save(**kwargs)
+
+    def calculate() -> None:
+        try:
+            results.append(service.calculate_current_trial(1005.0))
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    def end() -> None:
+        end_attempted.set()
+        try:
+            service.end_group()
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+        finally:
+            end_finished.set()
+
+    monkeypatch.setattr(repository, "save_filling_trial_transition", blocking_save)
+    calculate_thread = Thread(target=calculate)
+    end_thread = Thread(target=end)
+    calculate_thread.start()
+    assert save_entered.wait(5.0)
+    end_thread.start()
+    assert end_attempted.wait(5.0)
+    end_was_blocked = not end_finished.wait(0.1)
+    allow_save.set()
+    calculate_thread.join(5.0)
+    end_thread.join(5.0)
+
+    assert end_was_blocked
+    assert not calculate_thread.is_alive()
+    assert not end_thread.is_alive()
+    assert errors == []
+    assert len(results) == 1
+    assert repository.get_run(group.run_id).status is RunStatus.COMPLETED
+    assert len(repository.list_filling_trials(run_id=group.run_id)) == 1
+    assert service.snapshot().run_id is None
+
+
+def test_concurrent_set_advance_creates_only_one_profile_and_new_group(
+    repository: StorageRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, _ = _service(repository)
+    _, calculation = _advance_calculation(service)
+    first_save_entered = Event()
+    second_call_attempted = Event()
+    second_save_entered = Event()
+    allow_save = Event()
+    call_guard = Lock()
+    save_calls = 0
+    original_save = repository.save_filling_advance_transition
+    results: list[object] = []
+    errors: list[BaseException] = []
+
+    def blocking_save(**kwargs: object) -> None:
+        nonlocal save_calls
+        with call_guard:
+            save_calls += 1
+            call_number = save_calls
+        if call_number == 1:
+            first_save_entered.set()
+        else:
+            second_save_entered.set()
+        if not allow_save.wait(5.0):
+            raise RuntimeError("Timed out waiting to release advance save")
+        original_save(**kwargs)
+
+    def set_advance(*, second: bool = False) -> None:
+        if second:
+            second_call_attempted.set()
+        try:
+            results.append(service.set_advance(calculation.result_id))
+        except BaseException as exc:
+            errors.append(exc)
+
+    monkeypatch.setattr(repository, "save_filling_advance_transition", blocking_save)
+    first = Thread(target=set_advance)
+    second = Thread(target=set_advance, kwargs={"second": True})
+    first.start()
+    assert first_save_entered.wait(5.0)
+    second.start()
+    assert second_call_attempted.wait(5.0)
+    second_was_blocked = not second_save_entered.wait(0.1)
+    allow_save.set()
+    first.join(5.0)
+    second.join(5.0)
+
+    assert second_was_blocked
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert save_calls == 1
+    assert len(results) == 1
+    assert len(errors) == 1
+    assert isinstance(errors[0], ValueError)
+    assert len(repository.list_filling_advance_profiles("CFM-1")) == 1
+    assert len(repository.list_runs(device_id="CFM-1")) == 2
+    assert service.snapshot().configuration.mode is FillingMode.REGULAR
+
+
 def test_set_advance_rejects_unknown_repeatability_and_other_run_results(
     repository: StorageRepository,
 ) -> None:
@@ -683,3 +950,84 @@ def test_naive_clock_is_rejected_before_any_persistence(
     with pytest.raises(ValueError, match="aware UTC"):
         service.create_device(device_id="NAIVE")
     assert repository.get_device("NAIVE") is None
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "calculate_trial",
+        "add_trial",
+        "calculate_analysis",
+        "set_advance",
+        "end_pending_group",
+        "end_running_group",
+    ],
+)
+def test_clock_rejects_event_time_regressions_without_state_changes(
+    repository: StorageRepository,
+    operation: str,
+) -> None:
+    clock = TickingClock()
+    service, _ = _service(repository, clock=clock)
+    calculation: FillingAnalysisRecord | None = None
+
+    if operation == "calculate_trial":
+        service.start_group(_config())
+    elif operation == "add_trial":
+        service.start_group(_config())
+        service.calculate_current_trial(1005.0)
+    elif operation == "calculate_analysis":
+        service.start_group(_config(FillingMode.ADVANCE))
+        trial_ids = _calculate_trials(service, (1005.0, 1006.0, 1004.0))
+    elif operation == "set_advance":
+        trial_ids, calculation = _advance_calculation(service)
+    elif operation == "end_pending_group":
+        service.start_group(_config())
+    else:
+        service.start_group(_config())
+        service.calculate_current_trial(1005.0)
+
+    before = service.snapshot()
+    runs_before = repository.list_runs(device_id="CFM-1")
+    trials_before = repository.list_filling_trials(device_id="CFM-1")
+    steps_before = tuple(
+        step
+        for run in runs_before
+        for step in repository.list_steps(run.run_id)
+    )
+    results_before = tuple(
+        result
+        for run in runs_before
+        for result in repository.list_analysis_results(run.run_id)
+    )
+    profiles_before = repository.list_filling_advance_profiles("CFM-1")
+    clock.value = START - timedelta(days=1)
+
+    with pytest.raises(ValueError, match="earlier"):
+        if operation == "calculate_trial":
+            service.calculate_current_trial(1005.0)
+        elif operation == "add_trial":
+            service.add_trial()
+        elif operation == "calculate_analysis":
+            service.calculate_advance(trial_ids)
+        elif operation == "set_advance":
+            assert calculation is not None
+            service.set_advance(calculation.result_id)
+        else:
+            service.end_group()
+
+    runs_after = repository.list_runs(device_id="CFM-1")
+    assert service.snapshot() == before
+    assert runs_after == runs_before
+    assert repository.list_filling_trials(device_id="CFM-1") == trials_before
+    assert tuple(
+        step
+        for run in runs_after
+        for step in repository.list_steps(run.run_id)
+    ) == steps_before
+    assert tuple(
+        result
+        for run in runs_after
+        for result in repository.list_analysis_results(run.run_id)
+    ) == results_before
+    assert repository.list_filling_advance_profiles("CFM-1") == profiles_before
