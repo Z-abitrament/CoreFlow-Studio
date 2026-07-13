@@ -30,9 +30,18 @@ from coreflow.workflows import (
 def test_database_initialization_creates_schema(tmp_path) -> None:
     database = Database(tmp_path / "coreflow.sqlite")
     database.initialize()
+    database.initialize()
     repository = StorageRepository(database)
 
     assert repository.count_rows("schema_migrations") == 1
+    with database.connect() as connection:
+        versions = [
+            int(row["version"])
+            for row in connection.execute(
+                "SELECT version FROM schema_migrations ORDER BY version"
+            )
+        ]
+    assert versions == [4]
     assert (tmp_path / "coreflow.sqlite").exists()
 
 

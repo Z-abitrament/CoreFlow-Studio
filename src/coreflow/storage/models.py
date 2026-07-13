@@ -87,6 +87,52 @@ class AnalysisResultRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class FillingTrialRecord:
+    """One immutable manually recorded filling trial."""
+
+    trial_id: str
+    run_id: str
+    device_id: str
+    trial_index: int
+    trial_status: str
+    mode: str
+    control_valve_label: str
+    pulse_frequency_switch_point_hz: float
+    mass_per_pulse: float
+    mass_unit: str
+    flow_point_g_per_s: float
+    specified_mass: float
+    target_mass: float
+    standard_mass: float
+    percent_error: float
+    configuration_snapshot: dict[str, Any] = field(default_factory=dict)
+    started_at: datetime | None = None
+    calculated_at: datetime | None = None
+    notes: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FillingAdvanceProfileRecord:
+    """Immutable valve-closing advance selected from a filling analysis."""
+
+    profile_id: str
+    device_id: str
+    source_result_id: str
+    control_valve_label: str
+    pulse_frequency_switch_point_hz: float
+    mass_per_pulse: float
+    mass_unit: str
+    flow_point_g_per_s: float
+    specified_mass: float
+    advance_mass: float
+    corrected_target_mass: float
+    source_trial_ids: tuple[str, ...]
+    created_at: datetime | None = None
+    configuration_snapshot: dict[str, Any] = field(default_factory=dict)
+    notes: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class AuditLogRecord:
     """Append-only safety-sensitive action record."""
 

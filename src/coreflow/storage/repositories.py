@@ -15,6 +15,8 @@ from coreflow.storage.models import (
     ArtifactType,
     AuditLogRecord,
     DeviceRecord,
+    FillingAdvanceProfileRecord,
+    FillingTrialRecord,
     ModbusDeviceProfileRecord,
     ModbusOperationAttemptRecord,
     ModbusTestSessionRecord,
@@ -30,6 +32,16 @@ class StorageRepository:
 
     def __init__(self, database: Database) -> None:
         self._database = database
+
+    def create_device(self, record: DeviceRecord) -> None:
+        now = _utc_now()
+        with self._database.connect() as connection:
+            _insert_device(
+                connection,
+                record,
+                created_at=record.created_at or now,
+                updated_at=record.updated_at or now,
+            )
 
     def save_device(self, record: DeviceRecord) -> None:
         now = _utc_now()
@@ -76,18 +88,14 @@ class StorageRepository:
             ).fetchone()
         if row is None:
             return None
-        return DeviceRecord(
-            device_id=row["device_id"],
-            device_type=row["device_type"],
-            serial_number=row["serial_number"],
-            model=row["model"],
-            firmware_version=row["firmware_version"],
-            hardware_version=row["hardware_version"],
-            protocol_address=row["protocol_address"],
-            connection_metadata=_from_json(row["connection_metadata_json"], {}),
-            created_at=_parse_dt(row["created_at"]),
-            updated_at=_parse_dt(row["updated_at"]),
-        )
+        return _device_from_row(row)
+
+    def list_devices(self) -> tuple[DeviceRecord, ...]:
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM devices ORDER BY device_id"
+            ).fetchall()
+        return tuple(_device_from_row(row) for row in rows)
 
     def save_modbus_device_profile(
         self,
@@ -421,6 +429,159 @@ class StorageRepository:
             )
         )
 
+    def save_filling_trial(self, record: FillingTrialRecord) -> None:
+        with self._database.connect() as connection:
+            _insert_filling_trial(connection, record)
+
+    def get_filling_trial(self, trial_id: str) -> FillingTrialRecord | None:
+        with self._database.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM filling_trial_records WHERE trial_id = ?",
+                (trial_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return _filling_trial_from_row(row)
+
+    def list_filling_trials(
+        self,
+        *,
+        run_id: str | None = None,
+        device_id: str | None = None,
+    ) -> tuple[FillingTrialRecord, ...]:
+        clauses: list[str] = []
+        parameters: list[Any] = []
+        if run_id is not None:
+            clauses.append("run_id = ?")
+            parameters.append(run_id)
+        if device_id is not None:
+            clauses.append("device_id = ?")
+            parameters.append(device_id)
+        query = "SELECT * FROM filling_trial_records"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        if run_id is not None:
+            query += " ORDER BY trial_index, trial_id"
+        else:
+            query += " ORDER BY COALESCE(calculated_at, '') DESC, trial_id DESC"
+        with self._database.connect() as connection:
+            rows = connection.execute(query, tuple(parameters)).fetchall()
+        return tuple(_filling_trial_from_row(row) for row in rows)
+
+    def latest_filling_trial(self, device_id: str) -> FillingTrialRecord | None:
+        with self._database.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM filling_trial_records
+                WHERE device_id = ?
+                ORDER BY COALESCE(calculated_at, '') DESC, trial_id DESC
+                LIMIT 1
+                """,
+                (device_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return _filling_trial_from_row(row)
+
+    def save_filling_advance_profile(
+        self,
+        record: FillingAdvanceProfileRecord,
+    ) -> None:
+        with self._database.connect() as connection:
+            _insert_filling_advance_profile(connection, record)
+
+    def list_filling_advance_profiles(
+        self,
+        device_id: str,
+    ) -> tuple[FillingAdvanceProfileRecord, ...]:
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM filling_advance_profiles
+                WHERE device_id = ?
+                ORDER BY created_at DESC, profile_id DESC
+                """,
+                (device_id,),
+            ).fetchall()
+        return tuple(_filling_advance_profile_from_row(row) for row in rows)
+
+    def save_filling_trial_transition(
+        self,
+        *,
+        run: RunSession,
+        step: WorkflowStep,
+        trial: FillingTrialRecord,
+    ) -> None:
+        if step.run_id != run.run_id or trial.run_id != run.run_id:
+            raise ValueError("Filling run, step, and trial must share one run ID")
+        if trial.device_id != run.device_id:
+            raise ValueError("Filling run and trial must share one device ID")
+        with self._database.connect() as connection:
+            connection.execute("BEGIN")
+            if _update_run(connection, run) == 0:
+                stored_device_id = _stored_run_device_id(connection, run.run_id)
+                if stored_device_id is not None:
+                    raise ValueError(
+                        f"Run {run.run_id} already belongs to device "
+                        f"{stored_device_id}"
+                    )
+                _insert_run(connection, run)
+            _insert_step(connection, step)
+            _insert_filling_trial(connection, trial)
+
+    def save_filling_analysis(
+        self,
+        *,
+        step: WorkflowStep,
+        result: AnalysisResultRecord,
+    ) -> None:
+        if result.run_id != step.run_id or result.step_id != step.step_id:
+            raise ValueError("Filling analysis step and result references must match")
+        with self._database.connect() as connection:
+            connection.execute("BEGIN")
+            _insert_step(connection, step)
+            _insert_analysis_result(connection, result)
+
+    def save_filling_advance_transition(
+        self,
+        *,
+        profile: FillingAdvanceProfileRecord,
+        completed_run: RunSession,
+        new_run: RunSession,
+    ) -> None:
+        if completed_run.run_id == new_run.run_id:
+            raise ValueError("Completed and new filling runs must have distinct IDs")
+        if (
+            profile.device_id != completed_run.device_id
+            or new_run.device_id != completed_run.device_id
+        ):
+            raise ValueError("Filling advance transition must use one device ID")
+        with self._database.connect() as connection:
+            connection.execute("BEGIN")
+            stored_device_id = _stored_run_device_id(
+                connection,
+                completed_run.run_id,
+            )
+            if stored_device_id is None:
+                raise KeyError(f"Unknown run: {completed_run.run_id}")
+            if stored_device_id != completed_run.device_id:
+                raise ValueError(
+                    f"Run {completed_run.run_id} already belongs to device "
+                    f"{stored_device_id}"
+                )
+            _insert_filling_advance_profile(
+                connection,
+                profile,
+                source_run_id=completed_run.run_id,
+            )
+            if _update_run(connection, completed_run) == 0:
+                raise RuntimeError(
+                    f"Run changed while completing: {completed_run.run_id}"
+                )
+            _insert_run(connection, new_run)
+
     def save_run(self, run: RunSession) -> None:
         with self._database.connect() as connection:
             connection.execute(
@@ -477,19 +638,34 @@ class StorageRepository:
             if cursor.rowcount == 0:
                 raise KeyError(f"Unknown run: {run_id}")
 
-    def list_runs(self, limit: int | None = None) -> tuple[RunSummary, ...]:
+    def list_runs(
+        self,
+        limit: int | None = None,
+        *,
+        device_id: str | None = None,
+        run_type: str | None = None,
+    ) -> tuple[RunSummary, ...]:
         query = """
             SELECT run_id, run_type, workflow_name, status, device_id, operator,
                    started_at, ended_at, software_version, notes
             FROM run_sessions
-            ORDER BY COALESCE(started_at, '') DESC, run_id DESC
         """
-        parameters: tuple[Any, ...] = ()
+        clauses: list[str] = []
+        parameters: list[Any] = []
+        if device_id is not None:
+            clauses.append("device_id = ?")
+            parameters.append(device_id)
+        if run_type is not None:
+            clauses.append("run_type = ?")
+            parameters.append(run_type)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY COALESCE(started_at, '') DESC, run_id DESC"
         if limit is not None:
             query += " LIMIT ?"
-            parameters = (limit,)
+            parameters.append(limit)
         with self._database.connect() as connection:
-            rows = connection.execute(query, parameters).fetchall()
+            rows = connection.execute(query, tuple(parameters)).fetchall()
         return tuple(_run_summary_from_row(row) for row in rows)
 
     def save_step(self, step: WorkflowStep) -> None:
@@ -544,6 +720,26 @@ class StorageRepository:
 
     def save_analysis_result(self, record: AnalysisResultRecord) -> None:
         with self._database.connect() as connection:
+            referenced = connection.execute(
+                """
+                SELECT 1
+                FROM filling_advance_profiles
+                WHERE source_result_id = ?
+                LIMIT 1
+                """,
+                (record.result_id,),
+            ).fetchone()
+            if referenced is not None:
+                existing_row = connection.execute(
+                    "SELECT * FROM analysis_results WHERE result_id = ?",
+                    (record.result_id,),
+                ).fetchone()
+                if existing_row is not None and _analysis_result_from_row(existing_row) == record:
+                    return
+                raise ValueError(
+                    "Analysis result is referenced by a filling advance profile "
+                    "and cannot be replaced."
+                )
             connection.execute(
                 """
                 INSERT OR REPLACE INTO analysis_results (
@@ -581,6 +777,16 @@ class StorageRepository:
                 (run_id,),
             ).fetchall()
         return tuple(_analysis_result_from_row(row) for row in rows)
+
+    def get_analysis_result(self, result_id: str) -> AnalysisResultRecord | None:
+        with self._database.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM analysis_results WHERE result_id = ?",
+                (result_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return _analysis_result_from_row(row)
 
     def save_artifact(self, artifact: Artifact) -> None:
         with self._database.connect() as connection:
@@ -712,11 +918,373 @@ class StorageRepository:
             "modbus_test_sessions",
             "modbus_operation_attempts",
             "modbus_trial_records",
+            "filling_trial_records",
+            "filling_advance_profiles",
         }:
             raise ValueError(f"Unsupported table: {table_name}")
         with self._database.connect() as connection:
             row = connection.execute(f"SELECT COUNT(*) AS count FROM {table_name}").fetchone()
         return int(row["count"])
+
+
+def _insert_device(
+    connection: sqlite3.Connection,
+    record: DeviceRecord,
+    *,
+    created_at: datetime,
+    updated_at: datetime,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO devices (
+            device_id, device_type, serial_number, model, firmware_version,
+            hardware_version, protocol_address, connection_metadata_json,
+            created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            record.device_id,
+            record.device_type,
+            record.serial_number,
+            record.model,
+            record.firmware_version,
+            record.hardware_version,
+            record.protocol_address,
+            _to_json(record.connection_metadata),
+            _dt(created_at),
+            _dt(updated_at),
+        ),
+    )
+
+
+def _insert_run(connection: sqlite3.Connection, run: RunSession) -> None:
+    connection.execute(
+        """
+        INSERT INTO run_sessions (
+            run_id, run_type, workflow_name, workflow_version, device_id,
+            operator, status, started_at, ended_at,
+            configuration_snapshot_json, software_version, notes
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            run.run_id,
+            run.run_type.value,
+            run.workflow_name,
+            run.workflow_version,
+            run.device_id,
+            run.operator,
+            run.status.value,
+            _dt(run.started_at),
+            _dt(run.ended_at),
+            _to_json(run.configuration_snapshot),
+            run.software_version,
+            run.notes,
+        ),
+    )
+
+
+def _update_run(connection: sqlite3.Connection, run: RunSession) -> int:
+    cursor = connection.execute(
+        """
+        UPDATE run_sessions
+        SET run_type = ?, workflow_name = ?, workflow_version = ?,
+            operator = ?, status = ?, started_at = ?, ended_at = ?,
+            configuration_snapshot_json = ?, software_version = ?, notes = ?
+        WHERE run_id = ? AND device_id = ?
+        """,
+        (
+            run.run_type.value,
+            run.workflow_name,
+            run.workflow_version,
+            run.operator,
+            run.status.value,
+            _dt(run.started_at),
+            _dt(run.ended_at),
+            _to_json(run.configuration_snapshot),
+            run.software_version,
+            run.notes,
+            run.run_id,
+            run.device_id,
+        ),
+    )
+    return cursor.rowcount
+
+
+def _stored_run_device_id(
+    connection: sqlite3.Connection,
+    run_id: str,
+) -> str | None:
+    row = connection.execute(
+        "SELECT device_id FROM run_sessions WHERE run_id = ?",
+        (run_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return str(row["device_id"])
+
+
+def _insert_step(connection: sqlite3.Connection, step: WorkflowStep) -> None:
+    connection.execute(
+        """
+        INSERT INTO workflow_steps (
+            step_id, run_id, name, step_type, status, started_at, ended_at,
+            input_configuration_json, output_summary_json, error_message
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            step.step_id,
+            step.run_id,
+            step.name,
+            step.step_type.value,
+            step.status.value,
+            _dt(step.started_at),
+            _dt(step.ended_at),
+            _to_json(step.input_configuration),
+            _to_json(step.output_summary),
+            step.error_message,
+        ),
+    )
+
+
+def _insert_analysis_result(
+    connection: sqlite3.Connection,
+    record: AnalysisResultRecord,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO analysis_results (
+            result_id, run_id, step_id, result_type, algorithm_name,
+            algorithm_version, input_artifact_ids_json,
+            configuration_snapshot_json, summary_metrics_json,
+            pass_fail_decision, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            record.result_id,
+            record.run_id,
+            record.step_id,
+            record.result_type,
+            record.algorithm_name,
+            record.algorithm_version,
+            _to_json(record.input_artifact_ids),
+            _to_json(record.configuration_snapshot),
+            _to_json(record.summary_metrics),
+            record.pass_fail_decision,
+            _dt(record.created_at or _utc_now()),
+        ),
+    )
+
+
+def _insert_filling_trial(
+    connection: sqlite3.Connection,
+    record: FillingTrialRecord,
+) -> None:
+    _validate_filling_trial_references(connection, record)
+    connection.execute(
+        """
+        INSERT INTO filling_trial_records (
+            trial_id, run_id, device_id, trial_index, trial_status, mode,
+            control_valve_label, pulse_frequency_switch_point_hz,
+            mass_per_pulse, mass_unit, flow_point_g_per_s, specified_mass,
+            target_mass, standard_mass, percent_error,
+            configuration_snapshot_json, started_at, calculated_at, notes
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            record.trial_id,
+            record.run_id,
+            record.device_id,
+            record.trial_index,
+            record.trial_status,
+            record.mode,
+            record.control_valve_label,
+            record.pulse_frequency_switch_point_hz,
+            record.mass_per_pulse,
+            record.mass_unit,
+            record.flow_point_g_per_s,
+            record.specified_mass,
+            record.target_mass,
+            record.standard_mass,
+            record.percent_error,
+            _to_json(record.configuration_snapshot),
+            _dt(record.started_at),
+            _dt(record.calculated_at),
+            record.notes,
+        ),
+    )
+
+
+def _validate_filling_trial_references(
+    connection: sqlite3.Connection,
+    record: FillingTrialRecord,
+) -> None:
+    row = connection.execute(
+        "SELECT device_id FROM run_sessions WHERE run_id = ?",
+        (record.run_id,),
+    ).fetchone()
+    if row is None or row["device_id"] == record.device_id:
+        return
+    device_exists = connection.execute(
+        "SELECT 1 FROM devices WHERE device_id = ?",
+        (record.device_id,),
+    ).fetchone()
+    if device_exists is not None:
+        raise ValueError(
+            f"Run {record.run_id} does not belong to device {record.device_id}"
+        )
+
+
+def _insert_filling_advance_profile(
+    connection: sqlite3.Connection,
+    record: FillingAdvanceProfileRecord,
+    *,
+    source_run_id: str | None = None,
+) -> None:
+    _validate_filling_advance_profile_references(
+        connection,
+        record,
+        source_run_id=source_run_id,
+    )
+    connection.execute(
+        """
+        INSERT INTO filling_advance_profiles (
+            profile_id, device_id, source_result_id, control_valve_label,
+            pulse_frequency_switch_point_hz, mass_per_pulse, mass_unit,
+            flow_point_g_per_s, specified_mass, advance_mass,
+            corrected_target_mass, source_trial_ids_json, created_at,
+            configuration_snapshot_json, notes
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            record.profile_id,
+            record.device_id,
+            record.source_result_id,
+            record.control_valve_label,
+            record.pulse_frequency_switch_point_hz,
+            record.mass_per_pulse,
+            record.mass_unit,
+            record.flow_point_g_per_s,
+            record.specified_mass,
+            record.advance_mass,
+            record.corrected_target_mass,
+            _to_json(record.source_trial_ids),
+            _dt(record.created_at or _utc_now()),
+            _to_json(record.configuration_snapshot),
+            record.notes,
+        ),
+    )
+
+
+def _validate_filling_advance_profile_references(
+    connection: sqlite3.Connection,
+    record: FillingAdvanceProfileRecord,
+    *,
+    source_run_id: str | None = None,
+) -> None:
+    row = connection.execute(
+        """
+        SELECT analysis_results.run_id, run_sessions.device_id
+        FROM analysis_results
+        JOIN run_sessions ON run_sessions.run_id = analysis_results.run_id
+        WHERE analysis_results.result_id = ?
+        """,
+        (record.source_result_id,),
+    ).fetchone()
+    if row is None:
+        return
+    if row["device_id"] != record.device_id:
+        device_exists = connection.execute(
+            "SELECT 1 FROM devices WHERE device_id = ?",
+            (record.device_id,),
+        ).fetchone()
+        if device_exists is not None:
+            raise ValueError(
+                f"Analysis result {record.source_result_id} does not belong to "
+                f"device {record.device_id}"
+            )
+        return
+    if source_run_id is not None:
+        result_run_id = str(row["run_id"])
+        if result_run_id != source_run_id:
+            raise ValueError(
+                f"Analysis result {record.source_result_id} belongs to run "
+                f"{result_run_id}, not {source_run_id}"
+            )
+
+
+def _device_from_row(row: sqlite3.Row) -> DeviceRecord:
+    return DeviceRecord(
+        device_id=row["device_id"],
+        device_type=row["device_type"],
+        serial_number=row["serial_number"],
+        model=row["model"],
+        firmware_version=row["firmware_version"],
+        hardware_version=row["hardware_version"],
+        protocol_address=row["protocol_address"],
+        connection_metadata=_from_json(row["connection_metadata_json"], {}),
+        created_at=_parse_dt(row["created_at"]),
+        updated_at=_parse_dt(row["updated_at"]),
+    )
+
+
+def _filling_trial_from_row(row: sqlite3.Row) -> FillingTrialRecord:
+    return FillingTrialRecord(
+        trial_id=row["trial_id"],
+        run_id=row["run_id"],
+        device_id=row["device_id"],
+        trial_index=int(row["trial_index"]),
+        trial_status=row["trial_status"],
+        mode=row["mode"],
+        control_valve_label=row["control_valve_label"],
+        pulse_frequency_switch_point_hz=float(
+            row["pulse_frequency_switch_point_hz"]
+        ),
+        mass_per_pulse=float(row["mass_per_pulse"]),
+        mass_unit=row["mass_unit"],
+        flow_point_g_per_s=float(row["flow_point_g_per_s"]),
+        specified_mass=float(row["specified_mass"]),
+        target_mass=float(row["target_mass"]),
+        standard_mass=float(row["standard_mass"]),
+        percent_error=float(row["percent_error"]),
+        configuration_snapshot=_from_json(
+            row["configuration_snapshot_json"], {}
+        ),
+        started_at=_parse_dt(row["started_at"]),
+        calculated_at=_parse_dt(row["calculated_at"]),
+        notes=row["notes"],
+    )
+
+
+def _filling_advance_profile_from_row(
+    row: sqlite3.Row,
+) -> FillingAdvanceProfileRecord:
+    return FillingAdvanceProfileRecord(
+        profile_id=row["profile_id"],
+        device_id=row["device_id"],
+        source_result_id=row["source_result_id"],
+        control_valve_label=row["control_valve_label"],
+        pulse_frequency_switch_point_hz=float(
+            row["pulse_frequency_switch_point_hz"]
+        ),
+        mass_per_pulse=float(row["mass_per_pulse"]),
+        mass_unit=row["mass_unit"],
+        flow_point_g_per_s=float(row["flow_point_g_per_s"]),
+        specified_mass=float(row["specified_mass"]),
+        advance_mass=float(row["advance_mass"]),
+        corrected_target_mass=float(row["corrected_target_mass"]),
+        source_trial_ids=tuple(_from_json(row["source_trial_ids_json"], [])),
+        created_at=_parse_dt(row["created_at"]),
+        configuration_snapshot=_from_json(
+            row["configuration_snapshot_json"], {}
+        ),
+        notes=row["notes"],
+    )
 
 
 def _artifact_from_row(row: sqlite3.Row) -> Artifact:
@@ -933,7 +1501,9 @@ def _utc_now() -> datetime:
 def _dt(value: datetime | None) -> str | None:
     if value is None:
         return None
-    return value.isoformat()
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("Stored datetimes must be timezone-aware.")
+    return value.astimezone(UTC).isoformat()
 
 
 def _parse_dt(value: str | None) -> datetime | None:

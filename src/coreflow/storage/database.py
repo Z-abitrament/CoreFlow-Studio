@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class Database:
@@ -23,6 +23,14 @@ class Database:
 
     def initialize(self) -> None:
         with self.connect() as connection:
+            current_version = _current_schema_version(connection)
+            if current_version is not None and current_version > SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"Database schema version {current_version} is newer than "
+                    f"supported version {SCHEMA_VERSION}"
+                )
+
+            connection.execute("BEGIN")
             for statement in SCHEMA_STATEMENTS:
                 connection.execute(statement)
             _ensure_columns(
@@ -33,6 +41,7 @@ class Database:
                     "original_k_factor": "REAL",
                 },
             )
+            _backfill_modbus_profile_devices(connection)
             connection.execute(
                 """
                 INSERT OR IGNORE INTO schema_migrations(version, applied_at)
@@ -246,7 +255,113 @@ SCHEMA_STATEMENTS = (
         FOREIGN KEY(raw_artifact_id) REFERENCES artifacts(artifact_id)
     )
     """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_run_sessions_run_device
+    ON run_sessions(run_id, device_id)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS filling_trial_records (
+        trial_id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        device_id TEXT NOT NULL,
+        trial_index INTEGER NOT NULL,
+        trial_status TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        control_valve_label TEXT NOT NULL,
+        pulse_frequency_switch_point_hz REAL NOT NULL,
+        mass_per_pulse REAL NOT NULL,
+        mass_unit TEXT NOT NULL,
+        flow_point_g_per_s REAL NOT NULL,
+        specified_mass REAL NOT NULL,
+        target_mass REAL NOT NULL,
+        standard_mass REAL NOT NULL,
+        percent_error REAL NOT NULL,
+        configuration_snapshot_json TEXT NOT NULL DEFAULT '{}',
+        started_at TEXT,
+        calculated_at TEXT,
+        notes TEXT,
+        UNIQUE(run_id, trial_index),
+        FOREIGN KEY(run_id) REFERENCES run_sessions(run_id),
+        FOREIGN KEY(device_id) REFERENCES devices(device_id),
+        FOREIGN KEY(run_id, device_id)
+            REFERENCES run_sessions(run_id, device_id)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_filling_trials_device_calculated
+    ON filling_trial_records(device_id, calculated_at DESC, trial_id DESC)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS filling_advance_profiles (
+        profile_id TEXT PRIMARY KEY,
+        device_id TEXT NOT NULL,
+        source_result_id TEXT NOT NULL,
+        control_valve_label TEXT NOT NULL,
+        pulse_frequency_switch_point_hz REAL NOT NULL,
+        mass_per_pulse REAL NOT NULL,
+        mass_unit TEXT NOT NULL,
+        flow_point_g_per_s REAL NOT NULL,
+        specified_mass REAL NOT NULL,
+        advance_mass REAL NOT NULL,
+        corrected_target_mass REAL NOT NULL,
+        source_trial_ids_json TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL,
+        configuration_snapshot_json TEXT NOT NULL DEFAULT '{}',
+        notes TEXT,
+        FOREIGN KEY(device_id) REFERENCES devices(device_id),
+        FOREIGN KEY(source_result_id) REFERENCES analysis_results(result_id)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_filling_advance_profiles_device_created
+    ON filling_advance_profiles(device_id, created_at DESC, profile_id DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_filling_advance_profiles_source_result
+    ON filling_advance_profiles(source_result_id)
+    """,
 )
+
+
+def _current_schema_version(connection: sqlite3.Connection) -> int | None:
+    table_exists = connection.execute(
+        """
+        SELECT 1
+        FROM sqlite_master
+        WHERE type = 'table' AND name = 'schema_migrations'
+        """
+    ).fetchone()
+    if table_exists is None:
+        return None
+    row = connection.execute(
+        "SELECT MAX(version) AS version FROM schema_migrations"
+    ).fetchone()
+    if row is None or row["version"] is None:
+        return None
+    return int(row["version"])
+
+
+def _backfill_modbus_profile_devices(connection: sqlite3.Connection) -> None:
+    connection.execute(
+        """
+        INSERT INTO devices (
+            device_id, device_type, connection_metadata_json,
+            created_at, updated_at
+        )
+        SELECT
+            profile.device_id,
+            'modbus_rtu',
+            '{}',
+            profile.created_at,
+            profile.updated_at
+        FROM modbus_device_profiles AS profile
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM devices AS device
+            WHERE device.device_id = profile.device_id
+        )
+        """
+    )
 
 
 def _ensure_columns(
