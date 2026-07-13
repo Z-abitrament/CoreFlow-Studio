@@ -919,6 +919,28 @@ def test_history_merges_four_record_types_with_sources_configuration_and_notes(
     assert service.list_advance_profiles() == ()
 
 
+def test_explicit_history_device_query_does_not_change_selection_or_active_group(
+    repository: StorageRepository,
+) -> None:
+    service, _ = _service(repository)
+    service.start_group(_config(label="DEVICE-A"))
+    device_a_trial = service.calculate_current_trial(1005.0)
+    service.end_group()
+
+    service.select_device("CFM-2")
+    active = service.start_group(_config(label="DEVICE-B"))
+
+    entries = service.list_history(device_id="CFM-1")
+
+    assert [entry.record_id for entry in entries] == [device_a_trial.trial_id]
+    assert all(entry.device_id == "CFM-1" for entry in entries)
+    assert service.snapshot() == active
+    assert service.list_history() == ()
+    with pytest.raises(ValueError, match="Unknown device"):
+        service.list_history(device_id="missing")
+    assert service.snapshot() == active
+
+
 def test_selected_device_queries_require_selection_and_propagate_query_failures(
     repository: StorageRepository,
     monkeypatch: pytest.MonkeyPatch,

@@ -589,8 +589,16 @@ class FillingTrialService:
         )
 
     @_synchronized
-    def list_history(self) -> tuple[FillingHistoryEntry, ...]:
-        device_id = self._require_selected_device()
+    def list_history(
+        self,
+        device_id: str | None = None,
+    ) -> tuple[FillingHistoryEntry, ...]:
+        if device_id is None:
+            device_id = self._require_selected_device()
+        else:
+            device_id = _nonempty_text("Device ID", device_id)
+            if self._repository.get_device(device_id) is None:
+                raise ValueError(f"Unknown device: {device_id}")
         trials = self._repository.list_filling_trials(device_id=device_id)
         profiles = self._repository.list_filling_advance_profiles(device_id)
         profile_by_result: dict[str, list[FillingAdvanceProfileRecord]] = {}

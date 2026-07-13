@@ -567,7 +567,7 @@ def test_history_shows_four_record_types_complete_details_and_isolates_query_err
 
     workbench_status = window.statusLabel.text()
 
-    def fail_history():
+    def fail_history(**_kwargs: object):
         raise RuntimeError("injected history query failure")
 
     monkeypatch.setattr(service, "list_history", fail_history)
@@ -576,6 +576,46 @@ def test_history_shows_four_record_types_complete_details_and_isolates_query_err
     assert "injected history query failure" in dialog.statusLabel.text()
     assert window.statusLabel.text() == workbench_status
     assert service.snapshot().device_id == "CFM-UI-1"
+
+
+def test_open_history_remains_fixed_to_device_after_workbench_switch(
+    qtbot,
+    repository: StorageRepository,
+) -> None:
+    service = FillingTrialService(repository)
+    service.select_device("CFM-UI-1")
+    service.start_group(_service_configuration(FillingMode.REGULAR, label="A"))
+    device_a_trial = service.calculate_current_trial(1005.0)
+    service.end_group()
+    service.select_device("CFM-UI-2")
+    service.start_group(_service_configuration(FillingMode.REGULAR, label="B"))
+    device_b_trial = service.calculate_current_trial(1006.0)
+    service.end_group()
+    service.select_device("CFM-UI-1")
+
+    window = FillingModuleWindow(service=service)
+    qtbot.addWidget(window)
+    window.show()
+    _click(qtbot, window.historyButton)
+    dialog = window.historyDialog
+    assert dialog is not None
+    assert dialog.deviceValueLabel.text() == "CFM-UI-1"
+    assert dialog.recordTable.rowCount() == 1
+    assert dialog.recordTable.item(0, 3).text() == device_a_trial.trial_id
+
+    assert window.end_active_group() is True
+    _select_device(qtbot, window, "CFM-UI-2")
+    _click(qtbot, dialog.refreshButton)
+
+    assert dialog.deviceValueLabel.text() == "CFM-UI-1"
+    assert dialog.recordTable.rowCount() == 1
+    record_ids = {
+        dialog.recordTable.item(row, 3).text()
+        for row in range(dialog.recordTable.rowCount())
+    }
+    assert device_a_trial.trial_id in record_ids
+    assert device_b_trial.trial_id not in record_ids
+    assert service.snapshot().device_id == "CFM-UI-2"
 
 
 def test_change_device_requires_end_and_end_group_is_safe(

@@ -123,7 +123,7 @@ class FillingHistoryDialog(QDialog):
         self.detailTextEdit.clear()
         self._entries_by_id.clear()
         try:
-            entries = self.service.list_history()
+            entries = self.service.list_history(device_id=self.device_id)
         except Exception as exc:
             self.statusLabel.setText(f"History query failed: {exc}")
             return
