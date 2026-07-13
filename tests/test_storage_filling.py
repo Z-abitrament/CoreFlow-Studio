@@ -29,6 +29,17 @@ STARTED_AT = datetime(2026, 7, 13, 1, 0, tzinfo=UTC)
 CALCULATED_AT = datetime(2026, 7, 13, 1, 5, tzinfo=UTC)
 
 
+class _TracingDatabase(Database):
+    def __init__(self, path: Path) -> None:
+        super().__init__(path)
+        self.statements: list[str] = []
+
+    def connect(self) -> sqlite3.Connection:
+        connection = super().connect()
+        connection.set_trace_callback(self.statements.append)
+        return connection
+
+
 def _create_v3_database(path: Path) -> None:
     with sqlite3.connect(path) as connection:
         connection.execute(
@@ -197,7 +208,7 @@ def _result(
     *,
     run_id: str = "RUN-FILL-1",
     step_id: str = "STEP-FILL-1",
-    created_at: datetime = CALCULATED_AT,
+    created_at: datetime | None = CALCULATED_AT,
 ) -> AnalysisResultRecord:
     return AnalysisResultRecord(
         result_id=result_id,
@@ -269,6 +280,12 @@ def test_schema_v4_preserves_v3_data_and_backfills_orphan_profiles(tmp_path) -> 
     orphan = repository.get_device("ORPHAN")
     assert orphan is not None
     assert orphan.device_type == "modbus_rtu"
+    assert orphan.created_at is not None
+    assert orphan.updated_at is not None
+    assert orphan.created_at.utcoffset() == timedelta(0)
+    assert orphan.updated_at.utcoffset() == timedelta(0)
+    repository.save_device(orphan)
+    assert repository.get_device("ORPHAN") == orphan
     assert [record.device_id for record in repository.list_devices()] == ["CFM-1", "ORPHAN"]
     assert repository.list_modbus_device_profiles()[0].profile_id == "profile:ORPHAN"
     assert repository.count_rows("filling_trial_records") == 0
@@ -479,7 +496,9 @@ def test_profiles_and_analysis_results_round_trip_without_overwrite(tmp_path) ->
 
 
 def test_generic_analysis_save_protects_profile_provenance(tmp_path) -> None:
-    _, repository = _repository(tmp_path)
+    database = _TracingDatabase(tmp_path / "coreflow.sqlite")
+    database.initialize()
+    repository = StorageRepository(database)
     repository.create_device(_device())
     _seed_run(repository)
     original = _seed_result(repository)
@@ -494,16 +513,96 @@ def test_generic_analysis_save_protects_profile_provenance(tmp_path) -> None:
 
     profile = _profile(source_result_id=updated.result_id)
     repository.save_filling_advance_profile(profile)
+    repository.save_analysis_result(updated)
+    assert repository.get_analysis_result(updated.result_id) == updated
     replacement = replace(
         updated,
         algorithm_version="3",
         summary_metrics={"advance_mass": 99.0},
     )
+    database.statements.clear()
     with pytest.raises(ValueError, match="referenced by a filling advance profile"):
         repository.save_analysis_result(replacement)
 
+    writes = [
+        statement.upper()
+        for statement in database.statements
+        if "INSERT INTO ANALYSIS_RESULTS" in statement.upper()
+    ]
+    assert len(writes) == 1
+    assert "ON CONFLICT(RESULT_ID) DO UPDATE" in writes[0]
+    assert "FILLING_ADVANCE_PROFILES" in writes[0]
     assert repository.get_analysis_result(updated.result_id) == updated
     assert repository.list_filling_advance_profiles("CFM-1") == (profile,)
+
+
+def test_referenced_analysis_with_automatic_timestamp_is_idempotent(tmp_path) -> None:
+    _, repository = _repository(tmp_path)
+    repository.create_device(_device())
+    _seed_run(repository)
+    retry_record = _result(created_at=None)
+    _seed_result(repository, result=retry_record)
+    persisted = repository.get_analysis_result(retry_record.result_id)
+    assert persisted is not None
+    assert persisted.created_at is not None
+    repository.save_filling_advance_profile(
+        _profile(source_result_id=retry_record.result_id)
+    )
+
+    repository.save_analysis_result(retry_record)
+
+    assert repository.get_analysis_result(retry_record.result_id) == persisted
+
+
+def test_save_run_protects_profile_source_device_identity(tmp_path) -> None:
+    _, repository = _repository(tmp_path)
+    repository.create_device(_device("CFM-1"))
+    repository.create_device(_device("CFM-2"))
+    source_run = _seed_run(repository)
+    result = _seed_result(repository)
+    repository.save_filling_advance_profile(
+        _profile(source_result_id=result.result_id)
+    )
+
+    with pytest.raises(ValueError, match="referenced by a filling advance profile"):
+        repository.save_run(replace(source_run, device_id="CFM-2"))
+
+    assert repository.get_run(source_run.run_id) == source_run
+    allowed_update = replace(
+        source_run,
+        status=RunStatus.COMPLETED,
+        ended_at=CALCULATED_AT,
+        notes="completed without changing identity",
+    )
+    repository.save_run(allowed_update)
+    assert repository.get_run(source_run.run_id) == allowed_update
+
+
+def test_save_step_protects_profile_source_run_identity(tmp_path) -> None:
+    _, repository = _repository(tmp_path)
+    repository.create_device(_device())
+    _seed_run(repository)
+    other_run = _run("RUN-OTHER")
+    repository.save_run(other_run)
+    source_step = _step()
+    repository.save_step(source_step)
+    result = _result(step_id=source_step.step_id)
+    repository.save_analysis_result(result)
+    repository.save_filling_advance_profile(
+        _profile(source_result_id=result.result_id)
+    )
+
+    with pytest.raises(ValueError, match="referenced by a filling advance profile"):
+        repository.save_step(replace(source_step, run_id=other_run.run_id))
+
+    assert repository.list_steps(source_step.run_id) == (source_step,)
+    assert repository.list_steps(other_run.run_id) == ()
+    allowed_update = replace(
+        source_step,
+        output_summary={"advance_mass": 5.0, "updated": True},
+    )
+    repository.save_step(allowed_update)
+    assert repository.list_steps(source_step.run_id) == (allowed_update,)
 
 
 def test_repository_normalizes_aware_timestamps_before_history_sorting(

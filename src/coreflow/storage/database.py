@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 
 SCHEMA_VERSION = 4
@@ -342,16 +343,10 @@ def _current_schema_version(connection: sqlite3.Connection) -> int | None:
 
 
 def _backfill_modbus_profile_devices(connection: sqlite3.Connection) -> None:
-    connection.execute(
+    profiles = connection.execute(
         """
-        INSERT INTO devices (
-            device_id, device_type, connection_metadata_json,
-            created_at, updated_at
-        )
         SELECT
             profile.device_id,
-            'modbus_rtu',
-            '{}',
             profile.created_at,
             profile.updated_at
         FROM modbus_device_profiles AS profile
@@ -361,7 +356,31 @@ def _backfill_modbus_profile_devices(connection: sqlite3.Connection) -> None:
             WHERE device.device_id = profile.device_id
         )
         """
+    ).fetchall()
+    connection.executemany(
+        """
+        INSERT INTO devices (
+            device_id, device_type, connection_metadata_json,
+            created_at, updated_at
+        )
+        VALUES (?, 'modbus_rtu', '{}', ?, ?)
+        """,
+        (
+            (
+                profile["device_id"],
+                _legacy_timestamp_as_utc(profile["created_at"]),
+                _legacy_timestamp_as_utc(profile["updated_at"]),
+            )
+            for profile in profiles
+        ),
     )
+
+
+def _legacy_timestamp_as_utc(value: str) -> str:
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC).isoformat()
 
 
 def _ensure_columns(

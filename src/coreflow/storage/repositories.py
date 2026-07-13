@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import PurePath, PureWindowsPath
 from typing import Any
@@ -584,14 +585,34 @@ class StorageRepository:
 
     def save_run(self, run: RunSession) -> None:
         with self._database.connect() as connection:
-            connection.execute(
+            cursor = connection.execute(
                 """
-                INSERT OR REPLACE INTO run_sessions (
+                INSERT INTO run_sessions (
                     run_id, run_type, workflow_name, workflow_version, device_id,
                     operator, status, started_at, ended_at,
                     configuration_snapshot_json, software_version, notes
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    run_type=excluded.run_type,
+                    workflow_name=excluded.workflow_name,
+                    workflow_version=excluded.workflow_version,
+                    device_id=excluded.device_id,
+                    operator=excluded.operator,
+                    status=excluded.status,
+                    started_at=excluded.started_at,
+                    ended_at=excluded.ended_at,
+                    configuration_snapshot_json=excluded.configuration_snapshot_json,
+                    software_version=excluded.software_version,
+                    notes=excluded.notes
+                WHERE run_sessions.device_id = excluded.device_id
+                   OR NOT EXISTS (
+                       SELECT 1
+                       FROM analysis_results AS result
+                       JOIN filling_advance_profiles AS profile
+                         ON profile.source_result_id = result.result_id
+                       WHERE result.run_id = run_sessions.run_id
+                   )
                 """,
                 (
                     run.run_id,
@@ -608,6 +629,11 @@ class StorageRepository:
                     run.notes,
                 ),
             )
+            if cursor.rowcount == 0:
+                raise ValueError(
+                    f"Run {run.run_id} is referenced by a filling advance profile; "
+                    "its device identity cannot be changed."
+                )
 
     def get_run_status(self, run_id: str) -> str | None:
         with self._database.connect() as connection:
@@ -670,13 +696,31 @@ class StorageRepository:
 
     def save_step(self, step: WorkflowStep) -> None:
         with self._database.connect() as connection:
-            connection.execute(
+            cursor = connection.execute(
                 """
-                INSERT OR REPLACE INTO workflow_steps (
+                INSERT INTO workflow_steps (
                     step_id, run_id, name, step_type, status, started_at, ended_at,
                     input_configuration_json, output_summary_json, error_message
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(step_id) DO UPDATE SET
+                    run_id=excluded.run_id,
+                    name=excluded.name,
+                    step_type=excluded.step_type,
+                    status=excluded.status,
+                    started_at=excluded.started_at,
+                    ended_at=excluded.ended_at,
+                    input_configuration_json=excluded.input_configuration_json,
+                    output_summary_json=excluded.output_summary_json,
+                    error_message=excluded.error_message
+                WHERE workflow_steps.run_id = excluded.run_id
+                   OR NOT EXISTS (
+                       SELECT 1
+                       FROM analysis_results AS result
+                       JOIN filling_advance_profiles AS profile
+                         ON profile.source_result_id = result.result_id
+                       WHERE result.step_id = workflow_steps.step_id
+                   )
                 """,
                 (
                     step.step_id,
@@ -691,6 +735,11 @@ class StorageRepository:
                     step.error_message,
                 ),
             )
+            if cursor.rowcount == 0:
+                raise ValueError(
+                    f"Workflow step {step.step_id} is referenced by a filling "
+                    "advance profile; its run identity cannot be changed."
+                )
 
     def list_step_statuses(self, run_id: str) -> tuple[tuple[str, str], ...]:
         with self._database.connect() as connection:
@@ -719,36 +768,33 @@ class StorageRepository:
         return tuple(_workflow_step_from_row(row) for row in rows)
 
     def save_analysis_result(self, record: AnalysisResultRecord) -> None:
+        created_at = record.created_at or _utc_now()
         with self._database.connect() as connection:
-            referenced = connection.execute(
+            cursor = connection.execute(
                 """
-                SELECT 1
-                FROM filling_advance_profiles
-                WHERE source_result_id = ?
-                LIMIT 1
-                """,
-                (record.result_id,),
-            ).fetchone()
-            if referenced is not None:
-                existing_row = connection.execute(
-                    "SELECT * FROM analysis_results WHERE result_id = ?",
-                    (record.result_id,),
-                ).fetchone()
-                if existing_row is not None and _analysis_result_from_row(existing_row) == record:
-                    return
-                raise ValueError(
-                    "Analysis result is referenced by a filling advance profile "
-                    "and cannot be replaced."
-                )
-            connection.execute(
-                """
-                INSERT OR REPLACE INTO analysis_results (
+                INSERT INTO analysis_results (
                     result_id, run_id, step_id, result_type, algorithm_name,
                     algorithm_version, input_artifact_ids_json,
                     configuration_snapshot_json, summary_metrics_json,
                     pass_fail_decision, created_at
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(result_id) DO UPDATE SET
+                    run_id=excluded.run_id,
+                    step_id=excluded.step_id,
+                    result_type=excluded.result_type,
+                    algorithm_name=excluded.algorithm_name,
+                    algorithm_version=excluded.algorithm_version,
+                    input_artifact_ids_json=excluded.input_artifact_ids_json,
+                    configuration_snapshot_json=excluded.configuration_snapshot_json,
+                    summary_metrics_json=excluded.summary_metrics_json,
+                    pass_fail_decision=excluded.pass_fail_decision,
+                    created_at=excluded.created_at
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM filling_advance_profiles AS profile
+                    WHERE profile.source_result_id = analysis_results.result_id
+                )
                 """,
                 (
                     record.result_id,
@@ -761,9 +807,23 @@ class StorageRepository:
                     _to_json(record.configuration_snapshot),
                     _to_json(record.summary_metrics),
                     record.pass_fail_decision,
-                    _dt(record.created_at or _utc_now()),
+                    _dt(created_at),
                 ),
             )
+            if cursor.rowcount == 0:
+                existing_row = connection.execute(
+                    "SELECT * FROM analysis_results WHERE result_id = ?",
+                    (record.result_id,),
+                ).fetchone()
+                if existing_row is not None and _analysis_results_equivalent(
+                    _analysis_result_from_row(existing_row),
+                    record,
+                ):
+                    return
+                raise ValueError(
+                    "Analysis result is referenced by a filling advance profile "
+                    "and cannot be replaced."
+                )
 
     def list_analysis_results(self, run_id: str) -> tuple[AnalysisResultRecord, ...]:
         with self._database.connect() as connection:
@@ -1416,6 +1476,15 @@ def _analysis_result_from_row(row: sqlite3.Row) -> AnalysisResultRecord:
         pass_fail_decision=row["pass_fail_decision"],
         created_at=_parse_dt(row["created_at"]),
     )
+
+
+def _analysis_results_equivalent(
+    stored: AnalysisResultRecord,
+    candidate: AnalysisResultRecord,
+) -> bool:
+    if candidate.created_at is None:
+        candidate = replace(candidate, created_at=stored.created_at)
+    return stored == candidate
 
 
 def _run_session_from_row(row: sqlite3.Row) -> RunSession:
