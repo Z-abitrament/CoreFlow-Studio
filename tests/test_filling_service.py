@@ -1031,3 +1031,50 @@ def test_clock_rejects_event_time_regressions_without_state_changes(
         for result in repository.list_analysis_results(run.run_id)
     ) == results_before
     assert repository.list_filling_advance_profiles("CFM-1") == profiles_before
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ["calculate_trial", "add_trial", "calculate_analysis", "set_advance"],
+)
+def test_clock_uses_latest_active_event_as_lower_bound(
+    repository: StorageRepository,
+    operation: str,
+) -> None:
+    clock = TickingClock()
+    service, _ = _service(repository, clock=clock)
+
+    if operation == "set_advance":
+        service.start_group(_config(FillingMode.ADVANCE))
+        trial_ids = _calculate_trials(service, (1005.0, 1006.0, 1004.0))
+        first = service.calculate_advance(trial_ids)
+        latest = service.calculate_advance(trial_ids)
+        clock.value = first.created_at + timedelta(seconds=30)
+        action = lambda: service.set_advance(first.result_id)
+    else:
+        service.start_group(_config())
+        trial_ids = _calculate_trials(service, (1001.0, 1002.0, 1003.0))
+        if operation == "calculate_trial":
+            service.add_trial()
+        latest = service.calculate_repeatability(trial_ids)
+        latest_trial = repository.get_filling_trial(trial_ids[-1])
+        assert latest_trial is not None and latest_trial.calculated_at is not None
+        if operation == "calculate_trial":
+            clock.value = latest.created_at - timedelta(seconds=30)
+            action = lambda: service.calculate_current_trial(1004.0)
+        elif operation == "add_trial":
+            clock.value = latest_trial.calculated_at + timedelta(seconds=30)
+            action = service.add_trial
+        else:
+            clock.value = latest_trial.calculated_at + timedelta(seconds=30)
+            action = lambda: service.calculate_repeatability(trial_ids)
+
+    before = service.snapshot()
+    with pytest.raises(ValueError, match="earlier"):
+        action()
+    assert service.snapshot() == before
+    assert max(
+        result.created_at
+        for result in repository.list_analysis_results(before.run_id)
+        if result.created_at is not None
+    ) == latest.created_at

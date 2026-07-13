@@ -324,7 +324,7 @@ class FillingTrialService:
         normalized_mass = _positive_number("Standard mass", standard_mass)
         calculated_at = self._event_time(
             "Trial calculation",
-            pending.started_at,
+            max(self._active_event_times()),
         )
         percent_error = calculate_trial_error(
             configuration.specified_mass,
@@ -394,11 +394,10 @@ class FillingTrialService:
             raise ValueError("Calculate the first trial before adding another.")
         if self._pending_trial is not None:
             raise ValueError("A trial is already pending.")
-        last_calculated_at = max(
-            _aware_utc("Trial calculated_at", trial.calculated_at)
-            for trial in self._trials
+        started_at = self._event_time(
+            "Add Trial",
+            max(self._active_event_times()),
         )
-        started_at = self._event_time("Add Trial", last_calculated_at)
         self._pending_trial = _PendingTrial(
             max(trial.trial_index for trial in self._trials) + 1,
             started_at,
@@ -504,11 +503,7 @@ class FillingTrialService:
 
         transition_at = self._event_time(
             "Set Advance",
-            max(
-                _aware_utc("Run started_at", run.started_at),
-                source_ended_at,
-                result_created_at,
-            ),
+            max((*self._active_event_times(), source_ended_at, result_created_at)),
         )
         notes = _combined_notes(source_trials)
         profile = FillingAdvanceProfileRecord(
@@ -696,7 +691,10 @@ class FillingTrialService:
     ) -> FillingAnalysisRecord:
         run, configuration = self._require_active_group()
         source_started_at, source_ended_at = _source_time_range(source_trials)
-        created_at = self._event_time("Filling analysis", source_ended_at)
+        created_at = self._event_time(
+            "Filling analysis",
+            max((*self._active_event_times(), source_ended_at)),
+        )
         step_id = self._new_id("filling-step")
         result_id = self._new_id("filling-result")
         analysis_configuration = _analysis_configuration(
