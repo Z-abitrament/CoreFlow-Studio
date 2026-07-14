@@ -173,8 +173,10 @@ def test_workbench_uses_shared_device_selector_and_has_stable_compact_controls(
         "Percent Error",
         "Status",
     ]
-    assert window.trialTable.horizontalHeader().sectionResizeMode(2) == (
-        QHeaderView.ResizeMode.Stretch
+    header = window.trialTable.horizontalHeader()
+    assert all(
+        header.sectionResizeMode(column) is QHeaderView.ResizeMode.Interactive
+        for column in range(window.trialTable.columnCount())
     )
     assert isinstance(window.standardMassEdit.validator(), QDoubleValidator)
     assert window.standardMassEdit.text() == ""

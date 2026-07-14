@@ -246,11 +246,13 @@ class FillingModuleWindow(QDialog):
         )
         self.trialTable.verticalHeader().setVisible(False)
         table_header = self.trialTable.horizontalHeader()
-        for column in range(9):
+        table_header.setMinimumSectionSize(48)
+        initial_column_widths = (56, 56, 160, 80, 96, 96, 96, 112, 96)
+        for column, width in enumerate(initial_column_widths):
             table_header.setSectionResizeMode(
-                column, QHeaderView.ResizeMode.ResizeToContents
+                column, QHeaderView.ResizeMode.Interactive
             )
-        table_header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+            table_header.resizeSection(column, width)
         table_header.setStretchLastSection(False)
         root.addWidget(self.trialTable, 1)
 
