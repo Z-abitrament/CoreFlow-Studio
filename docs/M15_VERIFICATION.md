@@ -118,7 +118,7 @@ The focused evidence above is complete. Final integration results are recorded
 separately rather than inferred from focused suite counts:
 
 - Full `conda run --no-capture-output -n coreflow-studio python -m pytest -q
-  --basetemp=.tmp/pytest-full-m15-final`: **369 passed in 166.08 seconds**.
+  --basetemp=.tmp/pytest-full-updater-lock-final`: **371 passed in 188.92 seconds**.
 - Final filling calculation/service/UI regression:
   `tests/test_analysis_filling.py tests/test_filling_service.py
   tests/test_ui_filling.py`: **123 passed in 53.23 seconds**.

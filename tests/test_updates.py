@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import subprocess
+import time
 import zipfile
 
 import coreflow.app.updates as updates
@@ -28,6 +31,82 @@ def test_updater_waits_for_all_coreflow_executable_locks_to_clear() -> None:
     assert "CoreFlowStudio.exe remains in use" in script
     assert "Update aborted:" in script
     assert "Wait-ForInstallUnlock -InstallDir $installPath.Path" in script
+
+
+def test_updater_waits_for_locked_executable_then_applies_patch(tmp_path) -> None:
+    install_dir = tmp_path / "CoreFlowStudio"
+    install_dir.mkdir()
+    executable = install_dir / "CoreFlowStudio.exe"
+    executable.write_bytes(b"old executable")
+    updated_executable = b"updated executable"
+
+    package_path = tmp_path / "update.zip"
+    with zipfile.ZipFile(package_path, "w") as archive:
+        archive.writestr(
+            "coreflow_patch_manifest.json",
+            json.dumps(
+                {
+                    "package_type": "patch",
+                    "changed_files": [
+                        {
+                            "path": "CoreFlowStudio.exe",
+                            "sha256": hashlib.sha256(updated_executable).hexdigest(),
+                        }
+                    ],
+                    "deleted_files": [],
+                }
+            ),
+        )
+        archive.writestr("CoreFlowStudio/CoreFlowStudio.exe", updated_executable)
+
+    script_path = tmp_path / "apply_update.ps1"
+    script_path.write_text(updates._UPDATER_SCRIPT, encoding="utf-8")
+    log_path = tmp_path / "update.log"
+    lock_command = (
+        "$handle = [System.IO.File]::Open("
+        f"'{executable}', "
+        "[System.IO.FileMode]::Open, "
+        "[System.IO.FileAccess]::Read, "
+        "[System.IO.FileShare]::Read); "
+        "Start-Sleep -Seconds 2; $handle.Dispose()"
+    )
+    locker = subprocess.Popen(
+        ["powershell.exe", "-NoProfile", "-Command", lock_command]
+    )
+    time.sleep(0.2)
+    try:
+        completed = subprocess.run(
+            [
+                "powershell.exe",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(script_path),
+                "-PackageZip",
+                str(package_path),
+                "-InstallDir",
+                str(install_dir),
+                "-RestartExe",
+                str(tmp_path / "not-started.exe"),
+                "-ExpectedSha256",
+                file_sha256(package_path),
+                "-LogPath",
+                str(log_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    finally:
+        locker.wait(timeout=10)
+
+    assert completed.returncode == 0, completed.stderr
+    assert executable.read_bytes() == updated_executable
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "Waiting for CoreFlowStudio.exe to be released" in log_text
+    assert "Patch update installed successfully." in log_text
 
 
 def test_update_manifest_selects_patch_then_full() -> None:
