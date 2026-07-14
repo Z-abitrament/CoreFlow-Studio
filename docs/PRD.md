@@ -6,7 +6,7 @@ CoreFlow Studio is a PC-side automation application for Coriolis flowmeter trans
 v1 is a Windows-first Python + Qt desktop application. It must run complete workflows against simulated transmitters before real hardware is available. The first concrete communication path is Modbus RTU over USB-to-serial, with architecture support for 4-8 simultaneous ports.
 
 The current delivered baseline is M15 at software version `0.7.0` and SQLite
-schema v4. M15 adds the independent Filling Trial Module as a manual-input,
+schema v5. M15 adds the independent Filling Trial Module as a manual-input,
 hardware-free workflow; it does not change the completed M12 packaging scope or
 the safety requirements for protocol-backed operations.
 

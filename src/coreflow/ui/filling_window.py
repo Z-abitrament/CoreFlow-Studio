@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -124,7 +125,12 @@ class FillingModuleWindow(QDialog):
         self.advanceProfileCombo = QComboBox()
         self.advanceProfileCombo.setObjectName("fillingAdvanceProfileCombo")
         self.advanceProfileCombo.setEditable(False)
-        header.addWidget(self.advanceProfileCombo, 2, 1, 1, 4)
+        header.addWidget(self.advanceProfileCombo, 2, 1, 1, 3)
+        self.deleteAdvanceProfileButton = QPushButton("Delete Profile")
+        self.deleteAdvanceProfileButton.setObjectName("fillingDeleteAdvanceProfileButton")
+        self.deleteAdvanceProfileButton.setMaximumWidth(160)
+        self.deleteAdvanceProfileButton.setEnabled(False)
+        header.addWidget(self.deleteAdvanceProfileButton, 2, 4)
         root.addLayout(header)
 
         mode_row = QHBoxLayout()
@@ -296,6 +302,7 @@ class FillingModuleWindow(QDialog):
         self.advanceProfileCombo.currentIndexChanged.connect(
             self._profile_changed
         )
+        self.deleteAdvanceProfileButton.clicked.connect(self._delete_advance_profile)
         self.calculateTrialButton.clicked.connect(self._calculate_current_trial)
         self.addTrialButton.clicked.connect(self._add_trial)
         self.calculateRepeatabilityButton.clicked.connect(
@@ -670,6 +677,7 @@ class FillingModuleWindow(QDialog):
             self.controlValveCombo,
             self.newLabelButton,
             self.advanceProfileCombo,
+            self.deleteAdvanceProfileButton,
             self.regularModeButton,
             self.advanceModeButton,
             self.pulseSwitchSpinBox,
@@ -799,6 +807,7 @@ class FillingModuleWindow(QDialog):
             and bool(profiles)
             and not snapshot.configuration_locked
         )
+        self._update_delete_profile_state(snapshot)
 
     def _profile_changed(self, index: int) -> None:
         if self._loading or index <= 0:
@@ -836,6 +845,36 @@ class FillingModuleWindow(QDialog):
         self._apply_mode_state()
         self._update_action_state(snapshot)
         self.statusLabel.setText(f"Advance profile loaded: {profile.profile_id}")
+
+    def _delete_advance_profile(self) -> None:
+        profile_id = self.advanceProfileCombo.currentData()
+        if not isinstance(profile_id, str) or not profile_id:
+            self.statusLabel.setText("Select an advance profile to delete.")
+            return
+        if QMessageBox.question(
+            self,
+            "Delete Advance Profile",
+            "Remove the selected advance profile from reuse? History is retained.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        ) is not QMessageBox.StandardButton.Yes:
+            return
+        try:
+            profile = self.service.delete_advance_profile(profile_id)
+        except Exception as exc:
+            self._set_error(exc)
+            return
+        self._refresh_profiles()
+        self.statusLabel.setText(f"Advance profile deleted: {profile.profile_id}")
+
+    def _update_delete_profile_state(self, snapshot: FillingGroupSnapshot) -> None:
+        selected = self.advanceProfileCombo.currentData()
+        self.deleteAdvanceProfileButton.setEnabled(
+            isinstance(selected, str)
+            and bool(selected)
+            and snapshot.run_id is None
+            and not snapshot.configuration_locked
+        )
 
     def _new_label(self) -> None:
         label, accepted = QInputDialog.getText(

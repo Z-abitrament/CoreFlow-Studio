@@ -496,18 +496,51 @@ class StorageRepository:
     def list_filling_advance_profiles(
         self,
         device_id: str,
+        *,
+        include_retired: bool = False,
     ) -> tuple[FillingAdvanceProfileRecord, ...]:
         with self._database.connect() as connection:
+            retired_clause = "" if include_retired else "AND retired_at IS NULL"
             rows = connection.execute(
-                """
+                f"""
                 SELECT *
                 FROM filling_advance_profiles
                 WHERE device_id = ?
+                {retired_clause}
                 ORDER BY created_at DESC, profile_id DESC
                 """,
                 (device_id,),
             ).fetchall()
         return tuple(_filling_advance_profile_from_row(row) for row in rows)
+
+    def retire_filling_advance_profile(
+        self,
+        *,
+        device_id: str,
+        profile_id: str,
+        retired_at: datetime,
+    ) -> FillingAdvanceProfileRecord:
+        with self._database.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                """
+                SELECT * FROM filling_advance_profiles
+                WHERE device_id = ? AND profile_id = ? AND retired_at IS NULL
+                """,
+                (device_id, profile_id),
+            ).fetchone()
+            if row is None:
+                raise ValueError("Advance profile is unknown or already deleted.")
+            connection.execute(
+                "UPDATE filling_advance_profiles SET retired_at = ? WHERE profile_id = ?",
+                (_dt(retired_at), profile_id),
+            )
+            return _filling_advance_profile_from_row(
+                connection.execute(
+                    "SELECT * FROM filling_advance_profiles WHERE profile_id = ?",
+                    (profile_id,),
+                ).fetchone()
+            )
 
     def save_filling_trial_transition(
         self,
@@ -1217,10 +1250,10 @@ def _insert_filling_advance_profile(
             profile_id, device_id, source_result_id, control_valve_label,
             pulse_frequency_switch_point_hz, mass_per_pulse, mass_unit,
             flow_point_g_per_s, specified_mass, advance_mass,
-            corrected_target_mass, source_trial_ids_json, created_at,
+            corrected_target_mass, source_trial_ids_json, created_at, retired_at,
             configuration_snapshot_json, notes
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             record.profile_id,
@@ -1236,6 +1269,7 @@ def _insert_filling_advance_profile(
             record.corrected_target_mass,
             _to_json(record.source_trial_ids),
             _dt(record.created_at or _utc_now()),
+            _dt(record.retired_at) if record.retired_at is not None else None,
             _to_json(record.configuration_snapshot),
             record.notes,
         ),
@@ -1341,6 +1375,7 @@ def _filling_advance_profile_from_row(
         corrected_target_mass=float(row["corrected_target_mass"]),
         source_trial_ids=tuple(_from_json(row["source_trial_ids_json"], [])),
         created_at=_parse_dt(row["created_at"]),
+        retired_at=_parse_dt(row["retired_at"]),
         configuration_snapshot=_from_json(
             row["configuration_snapshot_json"], {}
         ),

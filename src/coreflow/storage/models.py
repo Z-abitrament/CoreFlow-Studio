@@ -128,6 +128,7 @@ class FillingAdvanceProfileRecord:
     corrected_target_mass: float
     source_trial_ids: tuple[str, ...]
     created_at: datetime | None = None
+    retired_at: datetime | None = None
     configuration_snapshot: dict[str, Any] = field(default_factory=dict)
     notes: str | None = None
 

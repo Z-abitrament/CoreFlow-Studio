@@ -6,7 +6,7 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 class Database:
@@ -41,6 +41,11 @@ class Database:
                     "k_factor_parameter": "TEXT",
                     "original_k_factor": "REAL",
                 },
+            )
+            _ensure_columns(
+                connection,
+                "filling_advance_profiles",
+                {"retired_at": "TEXT"},
             )
             _backfill_modbus_profile_devices(connection)
             connection.execute(
@@ -307,6 +312,7 @@ SCHEMA_STATEMENTS = (
         corrected_target_mass REAL NOT NULL,
         source_trial_ids_json TEXT NOT NULL DEFAULT '[]',
         created_at TEXT NOT NULL,
+        retired_at TEXT,
         configuration_snapshot_json TEXT NOT NULL DEFAULT '{}',
         notes TEXT,
         FOREIGN KEY(device_id) REFERENCES devices(device_id),

@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 import pytest
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QDoubleValidator
-from PySide6.QtWidgets import QHeaderView
+from PySide6.QtWidgets import QHeaderView, QMessageBox
 
 from coreflow.app import FillingConfiguration, FillingMode, FillingTrialService
 from coreflow.storage import Database, DeviceRecord, StorageRepository
@@ -558,6 +558,38 @@ def test_multiple_same_condition_profiles_remain_distinct_and_load_full_snapshot
         assert window.massPerPulseSpinBox.value() == pytest.approx(0.1)
         assert window.standardMassEdit.text() == ""
     assert sorted(loaded_targets) == pytest.approx(sorted(expected_targets))
+
+
+def test_selected_advance_profile_can_be_deleted_without_erasing_history(
+    qtbot,
+    repository: StorageRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = FillingTrialService(repository)
+    service.select_device("CFM-UI-1")
+    service.start_group(_service_configuration(FillingMode.ADVANCE))
+    result = service.calculate_advance(
+        _service_trials(service, (1005.0, 1006.0, 1004.0))
+    )
+    profile = service.set_advance(result.result_id)
+    service.end_group()
+
+    window = FillingModuleWindow(service=service)
+    qtbot.addWidget(window)
+    window.show()
+    window.advanceProfileCombo.setCurrentIndex(1)
+    assert window.deleteAdvanceProfileButton.isEnabled()
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        staticmethod(lambda *_args, **_kwargs: QMessageBox.StandardButton.Yes),
+    )
+
+    _click(qtbot, window.deleteAdvanceProfileButton)
+
+    assert window.advanceProfileCombo.count() == 1
+    assert service.list_advance_profiles() == ()
+    assert any(entry.record_id == profile.profile_id for entry in service.list_history())
 
 
 def test_close_profile_conditions_remain_distinguishable_in_profile_summary(

@@ -41,7 +41,7 @@ def test_database_initialization_creates_schema(tmp_path) -> None:
                 "SELECT version FROM schema_migrations ORDER BY version"
             )
         ]
-    assert versions == [4]
+    assert versions == [5]
     assert (tmp_path / "coreflow.sqlite").exists()
 
 

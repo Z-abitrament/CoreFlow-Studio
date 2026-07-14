@@ -3,7 +3,7 @@
 ## Scope
 M15 implements the independent Filling Trial Module for manual operator-run
 filling trials. The delivered baseline is software version `0.7.3` with SQLite
-schema v4.
+schema v5.
 
 This milestone is calculation and record keeping only. No test in the M15
 implementation evidence opened pulse, controller, valve, serial, Modbus, or
@@ -16,7 +16,7 @@ Analysis and workflow models:
 - `src/coreflow/analysis/__init__.py`
 - `src/coreflow/workflows/models.py`
 
-Storage and schema v4:
+Storage and schema v5:
 
 - `src/coreflow/storage/database.py`
 - `src/coreflow/storage/models.py`
@@ -71,8 +71,9 @@ Canonical and operator documentation:
 ## Implemented Behavior
 - Device ID is selected from shared flowmeter devices. Explicit creation writes
   a neutral `future_adapter` record; Device ID is not a controller/valve ID.
-- Each Device ID can retain multiple control/valve labels and multiple immutable
-  advance profiles.
+- Each Device ID can retain multiple control/valve labels and multiple advance
+  profiles. Deleting a selected profile retires it from reuse while retaining
+  the immutable history record and source data.
 - Every new or reopened standard-mass input is blank. Other configuration fields
   restore from that Device ID's latest calculated trial.
 - Regular error, exactly-three-consecutive sample standard deviation, signed
@@ -118,7 +119,7 @@ The focused evidence above is complete. Final integration results are recorded
 separately rather than inferred from focused suite counts:
 
 - Full `conda run --no-capture-output -n coreflow-studio python -m pytest -q
-  --basetemp=.tmp/pytest-full-updater-lock-final`: **371 passed in 188.92 seconds**.
+  --basetemp=.tmp/pytest-full-profile-delete`: **373 passed in 184.46 seconds**.
 - Final filling calculation/service/UI regression:
   `tests/test_analysis_filling.py tests/test_filling_service.py
   tests/test_ui_filling.py`: **123 passed in 53.23 seconds**.

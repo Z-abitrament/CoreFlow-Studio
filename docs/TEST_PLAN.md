@@ -235,12 +235,12 @@ Scenarios:
 
 ID: TP-FILL-DATA-001
 
-Goal: Verify schema v4 Filling Trial persistence, migration, provenance, and
+Goal: Verify schema v5 Filling Trial persistence, migration, provenance, and
 atomic transitions.
 
 Scenarios:
 
-- Create a fresh schema v4 database with `filling_trial_records`,
+- Create a fresh schema v5 database with `filling_trial_records`,
   `filling_advance_profiles`, history indexes, unique trial indexes, and foreign
   keys to shared devices, runs, and analysis results.
 - Migrate an existing schema v3 database without data loss; backfill orphan

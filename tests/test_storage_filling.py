@@ -269,7 +269,7 @@ def _seed_result(
     return selected
 
 
-def test_schema_v4_preserves_v3_data_and_backfills_orphan_profiles(tmp_path) -> None:
+def test_schema_v5_preserves_v3_data_and_backfills_orphan_profiles(tmp_path) -> None:
     path = tmp_path / "coreflow.sqlite"
     _create_v3_database(path)
     database = Database(path)
@@ -297,10 +297,10 @@ def test_schema_v4_preserves_v3_data_and_backfills_orphan_profiles(tmp_path) -> 
             int(row["version"])
             for row in connection.execute("SELECT version FROM schema_migrations")
         }
-    assert versions == {3, 4}
+    assert versions == {3, 5}
 
 
-def test_fresh_schema_v4_is_idempotent_and_has_expected_indexes(tmp_path) -> None:
+def test_fresh_schema_v5_is_idempotent_and_has_expected_indexes(tmp_path) -> None:
     database = Database(tmp_path / "coreflow.sqlite")
 
     database.initialize()
@@ -319,7 +319,7 @@ def test_fresh_schema_v4_is_idempotent_and_has_expected_indexes(tmp_path) -> Non
                 "SELECT name FROM sqlite_master WHERE type = 'index'"
             )
         }
-    assert versions == [4]
+    assert versions == [5]
     assert {
         "idx_filling_trials_device_calculated",
         "idx_filling_advance_profiles_device_created",
@@ -334,10 +334,10 @@ def test_database_rejects_future_schema_version(tmp_path) -> None:
             "CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
         )
         connection.execute(
-            "INSERT INTO schema_migrations VALUES (5, '2026-07-13T00:00:00+00:00')"
+            "INSERT INTO schema_migrations VALUES (6, '2026-07-13T00:00:00+00:00')"
         )
 
-    with pytest.raises(RuntimeError, match=r"schema version 5.*supported version 4"):
+    with pytest.raises(RuntimeError, match=r"schema version 6.*supported version 5"):
         Database(path).initialize()
 
 

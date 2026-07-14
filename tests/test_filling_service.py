@@ -842,6 +842,25 @@ def test_multiple_advance_profiles_for_same_condition_are_preserved(
     assert {profile.source_result_id for profile in profiles} == set(source_result_ids)
 
 
+def test_delete_advance_profile_hides_it_but_preserves_history(
+    repository: StorageRepository,
+) -> None:
+    service, _ = _service(repository)
+    _, calculation = _advance_calculation(service)
+    profile = service.set_advance(calculation.result_id)
+    service.end_group()
+
+    deleted = service.delete_advance_profile(profile.profile_id)
+
+    assert deleted.profile_id == profile.profile_id
+    assert deleted.retired_at is not None
+    assert service.list_advance_profiles() == ()
+    assert any(
+        entry.record_id == profile.profile_id
+        for entry in service.list_history()
+    )
+
+
 def test_end_group_cancels_empty_and_completes_nonempty_while_retaining_selection(
     repository: StorageRepository,
 ) -> None:

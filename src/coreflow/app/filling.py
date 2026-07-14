@@ -589,6 +589,19 @@ class FillingTrialService:
         )
 
     @_synchronized
+    def delete_advance_profile(
+        self,
+        profile_id: str,
+    ) -> FillingAdvanceProfileRecord:
+        if self._run is not None:
+            raise ValueError("End Group before deleting an advance profile.")
+        return self._repository.retire_filling_advance_profile(
+            device_id=self._require_selected_device(),
+            profile_id=_nonempty_text("Advance profile ID", profile_id),
+            retired_at=self._now(),
+        )
+
+    @_synchronized
     def list_history(
         self,
         device_id: str | None = None,
@@ -600,7 +613,9 @@ class FillingTrialService:
             if self._repository.get_device(device_id) is None:
                 raise ValueError(f"Unknown device: {device_id}")
         trials = self._repository.list_filling_trials(device_id=device_id)
-        profiles = self._repository.list_filling_advance_profiles(device_id)
+        profiles = self._repository.list_filling_advance_profiles(
+            device_id, include_retired=True
+        )
         profile_by_result: dict[str, list[FillingAdvanceProfileRecord]] = {}
         for profile in profiles:
             profile_by_result.setdefault(profile.source_result_id, []).append(profile)

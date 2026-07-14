@@ -3,7 +3,7 @@
 ## Summary
 CoreFlow Studio stores structured metadata and results in SQLite and stores large or external artifacts as files. Every calibration, test, and experiment run must be traceable from device identity and configuration to raw data, processed results, reports, and audit logs.
 
-The current database version is schema v4. Schema v4 adds queryable Filling
+The current database version is schema v5. Schema v5 adds retireable Filling
 Trial records and immutable filling advance profiles while preserving the
 shared device, run, workflow-step, and analysis-result provenance model.
 
@@ -372,7 +372,7 @@ Foreign keys bind trials to runs and devices, including the matching
 analysis results. Database initialization enables foreign-key enforcement.
 
 ### Schema v3 To v4 Migration
-Initialization creates schema v4 for new databases and migrates schema v3 in
+Initialization creates schema v5 for new databases and migrates schema v3 in
 one transaction. The migration creates both filling tables and their indexes,
 preserves existing rows, converts legacy timestamps used for backfill to UTC,
 and inserts missing shared `devices` rows for orphan

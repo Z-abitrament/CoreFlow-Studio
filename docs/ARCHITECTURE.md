@@ -229,7 +229,7 @@ See `docs/SIMULATION.md` for details.
 The independent Filling Trial Module is split across four owned boundaries:
 
 - `coreflow.analysis` implements the pure formulas and numerical validation.
-- `coreflow.storage` persists schema v4 filling trials and advance profiles,
+- `coreflow.storage` persists schema v5 filling trials and advance profiles,
   reusing run sessions, workflow steps, and analysis results for provenance.
 - `coreflow.app.FillingTrialService` is the headless state machine and the only
   layer allowed to coordinate calculations and persistence.
