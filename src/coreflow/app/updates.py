@@ -818,6 +818,44 @@ function Write-UpdateLog {
     }
 }
 
+function Wait-ForInstallUnlock {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$InstallDir,
+        [int]$TimeoutSeconds = 90
+    )
+
+    $executable = Join-Path $InstallDir "CoreFlowStudio.exe"
+    if (-not (Test-Path -LiteralPath $executable)) {
+        return
+    }
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $handle = $null
+        try {
+            $handle = [System.IO.File]::Open(
+                $executable,
+                [System.IO.FileMode]::Open,
+                [System.IO.FileAccess]::Read,
+                [System.IO.FileShare]::None
+            )
+            return
+        } catch [System.IO.IOException] {
+            Write-UpdateLog "Waiting for CoreFlowStudio.exe to be released: $executable"
+            Start-Sleep -Seconds 1
+        } finally {
+            if ($null -ne $handle) {
+                $handle.Dispose()
+            }
+        }
+    } while ((Get-Date) -lt $deadline)
+
+    $message = "CoreFlowStudio.exe remains in use. Close all CoreFlow Studio windows and retry the update."
+    Write-UpdateLog "Update aborted: $message"
+    throw $message
+}
+
 function Assert-SafePatchPath {
     param([string]$RelativePath)
     if ([string]::IsNullOrWhiteSpace($RelativePath)) {
@@ -870,6 +908,7 @@ New-Item -ItemType Directory -Path $extract -Force | Out-Null
 $patchManifestName = "coreflow_patch_manifest.json"
 
 try {
+    Wait-ForInstallUnlock -InstallDir $installPath.Path
     Expand-Archive -LiteralPath $PackageZip -DestinationPath $extract -Force
     $patchManifestPath = Join-Path $extract $patchManifestName
 

@@ -80,6 +80,12 @@ On the target PC, operators do not need PowerShell commands. They open
 `Help > Check for Updates...`, paste or keep the Release manifest URL, click
 `Check`, then `Download`, then `Update and Restart`.
 
+Before applying an update, close every CoreFlow Studio window that uses the
+same installation folder. The external updater waits for the executable lock
+to clear for up to 90 seconds; if it remains locked, it preserves the current
+installation and writes the actionable reason to
+`%LOCALAPPDATA%\CoreFlow Studio\updates\update.log`.
+
 Recommended public Release manifest URL:
 
 ```text

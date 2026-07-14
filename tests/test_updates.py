@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import zipfile
 
+import coreflow.app.updates as updates
+
 from coreflow.app.updates import (
     UpdateCheckResult,
     UpdatePackage,
@@ -16,6 +18,16 @@ from coreflow.app.updates import (
     parse_update_manifest,
     select_update_package,
 )
+
+
+def test_updater_waits_for_all_coreflow_executable_locks_to_clear() -> None:
+    script = updates._UPDATER_SCRIPT
+
+    assert "function Wait-ForInstallUnlock" in script
+    assert "[System.IO.FileShare]::None" in script
+    assert "CoreFlowStudio.exe remains in use" in script
+    assert "Update aborted:" in script
+    assert "Wait-ForInstallUnlock -InstallDir $installPath.Path" in script
 
 
 def test_update_manifest_selects_patch_then_full() -> None:

@@ -12,7 +12,7 @@ from coreflow.__main__ import main
 
 
 def test_package_exposes_version() -> None:
-    assert coreflow.__version__ == "0.7.2"
+    assert coreflow.__version__ == "0.7.3"
 
 
 def test_main_returns_success(capsys) -> None:
@@ -35,7 +35,7 @@ def test_packaged_ui_startup_failure_writes_log(monkeypatch, tmp_path, capsys) -
     assert "UI startup failed" in captured.err
     assert str(log_path) in captured.err
     log_text = log_path.read_text(encoding="utf-8")
-    assert "build=version=0.7.2" in log_text
+    assert "build=version=0.7.3" in log_text
     assert "RuntimeError: qt dependency missing" in log_text
     assert "traceback:" in log_text
 
@@ -63,4 +63,4 @@ def test_module_entry_point_runs() -> None:
         text=True,
         env=env,
     )
-    assert "CoreFlow Studio 0.7.2" in completed.stdout
+    assert "CoreFlow Studio 0.7.3" in completed.stdout
