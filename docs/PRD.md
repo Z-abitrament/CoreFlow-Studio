@@ -5,6 +5,11 @@ CoreFlow Studio is a PC-side automation application for Coriolis flowmeter trans
 
 v1 is a Windows-first Python + Qt desktop application. It must run complete workflows against simulated transmitters before real hardware is available. The first concrete communication path is Modbus RTU over USB-to-serial, with architecture support for 4-8 simultaneous ports.
 
+The current delivered baseline is M15 at software version `0.7.0` and SQLite
+schema v4. M15 adds the independent Filling Trial Module as a manual-input,
+hardware-free workflow; it does not change the completed M12 packaging scope or
+the safety requirements for protocol-backed operations.
+
 ## Target Users
 - Factory test engineers who run repeatable calibration and outgoing inspection flows.
 - R&D engineers who run flexible experiments, signal-processing analysis, fixture-control experiments, and exploratory data workflows.
@@ -32,6 +37,8 @@ v1 must deliver the software foundation for:
 - A Modbus RTU master operator path for configurable variable maps, timestamped variable reads, zero calibration, K factor calibration, and manual mass-total repeatability tests.
 - Extension points for signal processing, fixture control, and machine learning experiments.
 - An ASIO-backed IIS frame I/O module for lab hardware tests, exposed through an independent UI window after the headless module is verified.
+- An independent Filling Trial Module for manual filling-error,
+  repeatability, valve-closing advance, and advance-profile record keeping.
 
 ## Out Of Scope For v1
 - Cloud services, central servers, or multi-user network databases.
@@ -41,6 +48,8 @@ v1 must deliver the software foundation for:
 - Regulatory certification tooling.
 - Full machine learning model lifecycle management.
 - Production use of a com0com/hub4com Modbus listener until virtual-port tooling is installed, tested, and approved on the lab PC.
+- Pulse acquisition, pulse-total calculation, valve or controller control, and
+  controller parameter writes from the Filling Trial Module.
 
 ## Primary Workflows
 
@@ -122,6 +131,42 @@ Acceptance criteria:
 - Raw capture files remain accessible from the run record.
 - Report generation can be tested against simulator-generated runs.
 
+### 8. Filling Trial Module
+The operator can run a manual Filling Trial workflow for one flowmeter Device
+ID without opening a protocol connection. Device ID is selected from the shared
+device store; when it does not yet exist, the operator may explicitly create a
+neutral `future_adapter` device record. Device ID identifies only the
+flowmeter. A separate control/valve label identifies the external controller
+and valve combination, and each flowmeter may retain multiple immutable advance
+profiles.
+
+Acceptance criteria:
+
+- The operator configures pulse frequency switch point in Hz, mass per pulse,
+  mass unit, flow point in g/s, specified mass, and target mass, then enters the
+  standard-scale mass separately for each trial.
+- A new or reopened trial, including one prepared by `Add Trial`, always has a
+  blank standard-mass input. Other fields restore from that Device ID's most
+  recent calculated filling trial, not from an unsaved draft.
+- Regular trial error is calculated as `(standard_mass - specified_mass) /
+  specified_mass * 100`. Repeatability is the sample standard deviation of
+  exactly three selected consecutive trial errors.
+- Advance calculation accepts at least three selected trials from the active
+  group; they need not be consecutive. It stores mean standard mass,
+  `advance_mass = mean_standard_mass - specified_mass`, and
+  `corrected_target_mass = specified_mass - advance_mass`. Negative advance is
+  valid and no pulse total is calculated.
+- Every repeatability and advance calculation is stored with source Trial IDs
+  and a full configuration snapshot. `Set Advance` creates an immutable
+  profile, completes the old group, and atomically opens a corrected regular
+  group at blank Trial 1 so uncorrected and corrected trials cannot be mixed.
+- Current-device history distinguishes Filling Trial, Filling Repeatability,
+  Filling Advance Calculation, and Filling Advance Profile Set records. It
+  records inputs, results, source IDs, timestamps, notes, and snapshots without
+  inventing pass/fail thresholds.
+- v1 uses manual entries only. It does not read pulses, control a valve, write
+  a controller, write a transmitter, or generate protocol traffic.
+
 ## Functional Requirements
 
 | ID | Requirement | First Implementation Milestone | Test Coverage |
@@ -140,6 +185,7 @@ Acceptance criteria:
 | PRD-FR-012 | Support an ASIO/IIS frame-stream module for USB sound-card hardware, including independent connection state, configurable frame format, output, input capture, status/log diagnostics, and loopback verification. | M13 | TP-ASIO-001, TP-ASIO-002, TP-UI-003 |
 | PRD-FR-013 | Support a Modbus master operator module with configurable variables, timestamped variable sampling, zero calibration, K factor calibration, and manual mass-total error/repeatability tests. | M3, M5, M7, M8, M11 | TP-PROTO-001, TP-DATA-001, TP-WF-003, TP-CALC-003, TP-SAFE-001 |
 | PRD-FR-014 | Support a read-only Modbus listener/sniffer workflow using com0com and hub4com for lab diagnostics after virtual-port tooling is installed and approved. | M14 | TP-PROTO-002 |
+| PRD-FR-015 | Provide an independent manual Filling Trial Module with shared flowmeter identity, regular error/repeatability, advance calculation, immutable advance profiles, atomic corrected-group transition, and device-filtered history without hardware communication. | M15 | TP-FILL-CALC-001, TP-FILL-DATA-001, TP-FILL-SVC-001, TP-FILL-UI-001 |
 
 ## Non-Functional Requirements
 - The UI must remain responsive during communication, capture, analysis, and report generation.

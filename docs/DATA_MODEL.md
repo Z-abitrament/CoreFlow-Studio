@@ -3,6 +3,10 @@
 ## Summary
 CoreFlow Studio stores structured metadata and results in SQLite and stores large or external artifacts as files. Every calibration, test, and experiment run must be traceable from device identity and configuration to raw data, processed results, reports, and audit logs.
 
+The current database version is schema v4. Schema v4 adds queryable Filling
+Trial records and immutable filling advance profiles while preserving the
+shared device, run, workflow-step, and analysis-result provenance model.
+
 ## Storage Principles
 - SQLite is the local source of truth for metadata, status, metrics, and artifact references.
 - Large raw captures and generated files are stored outside SQLite.
@@ -55,6 +59,11 @@ Fields:
 - Last known connection metadata.
 - Created and updated timestamps.
 
+For Filling Trial records, Device ID is the stable identity of the flowmeter
+only. It must not be used as the identity of an external controller, valve,
+Modbus unit, or COM port. Explicitly created filling-only devices use the
+neutral `future_adapter` device type until a real adapter contract exists.
+
 ### Run Session
 Represents one calibration, factory test, stability test, or experiment run.
 
@@ -66,7 +75,8 @@ Fields:
 - Device ID.
 - Operator or automation source.
 - Start time and end time.
-- Status: pending, running, passed, failed, canceled, error.
+- Status: pending, running, completed, passed, failed, canceled, error. The
+  neutral `completed` value is used when a workflow has no pass/fail threshold.
 - Configuration snapshot.
 - Register-map, workflow-template, simulator-scenario, and threshold snapshot references when used.
 - Software version.
@@ -132,6 +142,10 @@ Fields:
 - Configuration snapshot.
 - Summary metrics.
 - Pass/fail decision when applicable.
+
+Filling analyses use `filling_repeatability` and `filling_advance` result
+types. Their pass/fail decision is null because M15 defines no acceptance
+threshold.
 
 ### Calibration Record
 Stores calibration-specific outcomes.
@@ -275,6 +289,97 @@ include:
   connected device: `write_requested`, `write_status`, `write_verified`,
   `readback_k_factor`, and `audit_id`.
 
+### Filling Trial Record
+Stores each manually calculated filling trial in `filling_trial_records`. One
+trial belongs to one `filling_trial` run and one shared flowmeter Device ID.
+
+Fields:
+
+- Trial ID, run ID, and flowmeter Device ID.
+- Trial index and trial status.
+- Mode: regular or advance calculation.
+- Control/valve label identifying the external controller and valve
+  combination; this is separate from Device ID.
+- Pulse frequency switch point in Hz, mass per pulse, and mass unit.
+- Flow point in g/s, specified mass, and target mass.
+- Operator-entered standard-scale mass and calculated percent error.
+- Full immutable group-configuration snapshot.
+- `started_at`, the UTC time pending Trial 1 or an explicitly added trial was
+  prepared.
+- `calculated_at`, the UTC time the calculated trial was saved.
+- Notes.
+
+The regular error is `(standard_mass - specified_mass) / specified_mass * 100`.
+The table stores no pulse total. `UNIQUE(run_id, trial_index)` prevents duplicate
+indexes, and the device/calculated-time index supports current-device history
+ordered by UTC calculation time.
+
+### Filling Advance Profile
+Stores each reusable, immutable result of `Set Advance` in
+`filling_advance_profiles`. One flowmeter may have multiple profiles, including
+profiles with the same flow point and specified mass. The control/valve label,
+full parameter snapshot, source result, source trials, and creation time keep
+them distinguishable and traceable.
+
+Fields:
+
+- Profile ID and flowmeter Device ID.
+- Source `filling_advance` analysis-result ID.
+- Control/valve label.
+- Pulse frequency switch point, mass per pulse, and mass unit.
+- Flow point, specified mass, signed advance mass, and corrected target mass.
+- Source Trial IDs.
+- Full configuration snapshot and notes.
+- UTC creation timestamp.
+
+Profiles are append-only from the application perspective. Creating another
+profile never updates or deletes an earlier profile. Indexes support descending
+current-device creation history and lookup by source analysis-result ID.
+
+### Filling Trial Provenance And Transitions
+Every filling group reuses a `run_sessions` row with
+`run_type=filling_trial`, `workflow_name=filling_trial_group`, and workflow
+version `1`. Each calculated trial and each repeatability/advance calculation
+has a completed workflow step. Analysis metrics retain source Trial IDs, source
+indexes and timestamps, original input values, result values, full
+configuration snapshots, and notes where supplied.
+
+Current-device filling history exposes four record categories:
+
+- Filling Trial.
+- Filling Repeatability.
+- Filling Advance Calculation.
+- Filling Advance Profile Set.
+
+Repeatability records retain exactly three consecutive source Trial IDs, their
+errors, mean error, and sample standard deviation. Advance records retain at
+least three source Trial IDs, source standard masses, mean standard mass,
+specified mass, signed advance mass, and corrected target mass. Neither result
+stores a hidden pass/fail threshold.
+
+Repository transactions keep related rows atomic:
+
+- Trial calculation creates or updates the group run and inserts its completed
+  step and trial together.
+- Repeatability or advance calculation inserts its completed step and immutable
+  analysis result together.
+- `Set Advance` inserts the immutable profile, completes the old advance run,
+  and inserts the corrected pending regular run together. A failure rolls back
+  the whole transition, so old and corrected trial groups cannot be mixed.
+
+Foreign keys bind trials to runs and devices, including the matching
+`(run_id, device_id)` pair, and bind advance profiles to devices and source
+analysis results. Database initialization enables foreign-key enforcement.
+
+### Schema v3 To v4 Migration
+Initialization creates schema v4 for new databases and migrates schema v3 in
+one transaction. The migration creates both filling tables and their indexes,
+preserves existing rows, converts legacy timestamps used for backfill to UTC,
+and inserts missing shared `devices` rows for orphan
+`modbus_device_profiles.device_id` values as `modbus_rtu`. It records migration
+version 4 only after all steps succeed and rejects databases newer than the
+supported schema version.
+
 ### Artifact
 Represents a file linked to a run, step, or result.
 
@@ -366,6 +471,13 @@ The run ID must be unique even if multiple runs start in the same second.
   operation.
 - Modbus raw polling artifacts must be linked from the operation attempt or
   trial record that produced them.
+- Filling trials must reference the same Device ID as their run; advance
+  profiles must reference an advance analysis result owned by the same device
+  and source run.
+- Filling trial, analysis, and profile timestamps are stored as UTC-aware ISO
+  values. UI-local formatting must not rewrite persisted UTC provenance.
+- A Set Advance failure must leave no partial profile, completed old run, or
+  corrected new run.
 
 ## Backup And Portability
 v1 is local-first. A complete run package should be portable by copying:

@@ -269,6 +269,50 @@ Done when:
 - On a lab PC with approved virtual-port tooling, the listener can capture frames from a known test route and store a diagnostic artifact.
 - Listener mode cannot perform parameter writes or proxy/inject frames without an explicit future safety review.
 
+### M15: Filling Trial Module
+Implement the independent manual Filling Trial Module.
+
+Status: implementation complete at software version `0.7.0` and SQLite schema
+v4. Focused slice evidence is recorded in `docs/M15_VERIFICATION.md`; the final
+repository-wide pytest result and source UI smoke evidence are appended there by
+the final integration flow.
+
+Deliverables:
+
+- Pure filling-error, exactly-three-consecutive repeatability, and signed
+  valve-closing advance calculations under `coreflow.analysis`.
+- Schema v4 filling trial and immutable advance-profile records, indexes,
+  foreign keys, v3 migration, legacy orphan Modbus Device ID backfill, and
+  atomic persistence transitions.
+- Headless `FillingTrialService` for shared flowmeter selection, explicit
+  `future_adapter` device creation, group lifecycle, configuration restoration,
+  manual trial append, analysis, Set Advance, profiles, and history.
+- Embedded Qt Filling Trial workbench available from `Modules > Filling Module`,
+  with current-device history and no formula or SQL logic in Qt code.
+- Per-device restoration of the last calculated trial configuration while every
+  new or reopened standard-scale mass entry remains blank.
+- Multiple immutable advance profiles for one flowmeter, distinguished by
+  control/valve label and full operating-condition snapshot.
+- Manual-input-only operation with no pulse total, pulse acquisition, valve
+  control, controller/transmitter write, or protocol traffic.
+- English and Chinese operator documentation plus M15 verification evidence.
+
+Done when:
+
+- A shared flowmeter Device ID can be selected or explicitly created, and its
+  Device ID is not reused as a controller/valve identity.
+- Regular error and three-consecutive-trial repeatability are stored with source
+  Trial IDs, timestamps, notes, and full configuration snapshots.
+- At least three advance trials, including nonconsecutive selections, can create
+  signed advance results and multiple immutable profiles.
+- Set Advance completes the old group and atomically opens corrected regular
+  Trial 1 without mixing old and corrected target-mass trials.
+- Schema v4 migration, storage, service, UI, shell, packaging-import, and version
+  focused tests have passing evidence in `docs/M15_VERIFICATION.md`.
+- Final full-suite and source UI smoke results are recorded in
+  `docs/M15_VERIFICATION.md` by the final integration pass rather than inferred
+  from the focused suites.
+
 ## Implementation Defaults
 - Use PySide6 for Qt unless a documented blocker appears.
 - Use pytest for tests.

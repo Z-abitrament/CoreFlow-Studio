@@ -1,9 +1,12 @@
 # CoreFlow Studio User Manual
 
 ## Scope
-This manual describes the current M12 CoreFlow Studio build. The application is a Windows-first desktop tool for simulator-backed Coriolis flowmeter workflow development and packaging validation.
+This manual describes the current M15 CoreFlow Studio build, version `0.7.0`.
+The application is a Windows-first desktop tool; the M12 Windows packaging
+foundation remains in place and M15 adds the independent manual Filling Trial
+Module.
 
-The current desktop UI is module-centered. The main window keeps only the `Modules` menu and opens directly into the `Modbus Module` workspace by default. Use the menu to switch to another module such as `ASIO/IIS Module`. Headless simulator, replay, and export smoke paths remain available from the console diagnostics executable, but the old simulator dashboard is no longer shown in the main window.
+The current desktop UI is module-centered. The main window keeps only the `Modules` menu and opens directly into the `Modbus Module` workspace by default. Use the menu to switch to `Filling Module` or `ASIO/IIS Module`. Headless simulator, replay, and export smoke paths remain available from the console diagnostics executable, but the old simulator dashboard is no longer shown in the main window.
 
 ## Starting The Application
 From the packaged distribution folder, double-click:
@@ -59,6 +62,7 @@ artifacts/runs/<year>/<month>/<run_id>/
 The main window intentionally contains only the `Modules` menu and the active module workspace. On startup, the active workspace is `Modbus Module`.
 
 - `Modules > Modbus Module` returns to the Modbus master operator interface.
+- `Modules > Filling Module` shows the manual Filling Trial workbench.
 - `Modules > ASIO/IIS Module` shows the ASIO/IIS frame-stream interface in the main window.
 - Selecting another module replaces the central workspace instead of opening a new top-level module window.
 - `Help > Check for Updates...` opens the software update dialog. Paste the
@@ -101,6 +105,117 @@ Open `Modules > Modbus Module`. The module has its own connection state, device 
 The current module still uses the placeholder register-map template unless engineering supplies a validated map. Do not use the placeholder map as production transmitter documentation.
 
 For implementation-level operation sequences and history fields, see `docs/MODBUS_OPERATIONS.md`.
+
+## Filling Trial Module
+Open `Modules > Filling Module`. This module records manual filling trials and
+calculates regular error, three-trial repeatability, and valve-closing advance.
+It does not require or open a hardware connection.
+
+### Select The Flowmeter
+1. On first entry, select a flowmeter from the `Device ID` list and click
+   `Select`.
+2. If the flowmeter is absent, click `New Device...`, enter its stable Device ID
+   and optional model, then click `Create`. Duplicate IDs are rejected.
+3. Use `Change Device...` later only after ending the active group.
+
+Device ID identifies the flowmeter only. It is not a Modbus Unit ID, COM port,
+controller ID, or valve ID. A device created here is stored neutrally as a
+`future_adapter`; that label does not claim that a hardware adapter exists.
+
+### Set The Filling Condition
+1. Choose or enter the `Control / valve label`. Use `New Label...` for a new
+   controller-and-valve combination. This label is separate from Device ID.
+2. If a saved correction is needed, choose an `Advance profile`. One flowmeter
+   can retain multiple immutable profiles, including profiles for the same flow
+   and specified mass; use the label, operating values, advance, and timestamp
+   to distinguish them.
+3. Choose `Regular Test` for error/repeatability or `Calculate Advance` to
+   derive a closing correction.
+4. Enter `Pulse switch point (Hz)`, `Mass per pulse`, `Mass unit`, `Flow point
+   (g/s)`, `Specified mass`, and `Target mass`.
+
+`Specified mass` is the desired final mass. `Target mass` is the threshold used
+in the external controller. In Calculate Advance mode, target follows specified
+mass until an advance is set. `Standard mass` is the final standard-scale
+reading entered separately after each physical trial. The selected mass unit
+applies to all mass fields; the module does not convert units.
+
+For a selected device, fields restore from its most recent calculated trial.
+Unsaved drafts are not restored. `Standard mass` always opens blank. After the
+first trial is calculated, mode, label, pulse settings, unit, flow point,
+specified mass, and target mass are locked for that group.
+
+### Calculate And Add Trials
+1. Run the physical filling cycle outside CoreFlow Studio.
+2. Enter that trial's standard-scale result in `Standard mass`.
+3. Click `Calculate Current Trial Error`. The trial is saved immediately and
+   appears in the table; there is no separate Save action.
+4. To continue, click `Add Trial`. The next trial is prepared with a blank
+   standard-mass field. Run the next external cycle and repeat the calculation.
+
+Regular error is:
+
+```text
+(standard mass - specified mass) / specified mass * 100%
+```
+
+Target mass is not the denominator. A positive result is above specified mass,
+a negative result is below it, and zero is an exact match. These are calculated
+values, not automatic pass/fail decisions.
+
+### Calculate Repeatability
+In `Regular Test`, select exactly three calculated table rows with consecutive
+Trial numbers, then click `Calculate Repeatability`. The saved result is the
+sample standard deviation of their three percent errors. Another count or a gap
+in Trial numbers is rejected. The calculation is added to history with all
+three source Trial IDs and the full condition snapshot.
+
+### Calculate And Set Advance
+1. Choose `Calculate Advance` before calculating the first trial in the group.
+2. Calculate at least three trials. Select the rows to use; they do not need to
+   be consecutive.
+3. Click `Calculate Advance`. The calculation is saved immediately and displays
+   source trials, mean standard mass, specified mass, signed advance mass, and
+   corrected target mass.
+4. Review the result, then click `Set Advance` to keep it as a reusable profile.
+
+The calculation is:
+
+```text
+mean standard mass = average(selected standard masses)
+advance mass = mean standard mass - specified mass
+corrected target mass = specified mass - advance mass
+```
+
+Negative advance is valid and increases the corrected target. `Set Advance` is
+atomic: it creates a new immutable profile, completes the old advance group,
+and starts a new `Regular Test` group at corrected target and blank Trial 1.
+The old uncorrected trials are cleared from the current table so they cannot be
+mixed with corrected trials. Setting another calculation creates another
+profile; earlier profiles are not overwritten.
+
+### History And Group End
+Click `History...` to open records locked to the current Device ID. The four
+types are `Filling Trial`, `Filling Repeatability`, `Filling Advance
+Calculation`, and `Filling Advance Profile Set`. Select a row to inspect source
+Trial IDs, input/result values, full snapshots, timestamps, labels, and notes.
+
+Click `End Group` before changing Device ID, changing an active profile, or
+starting a different condition. Ending a group with saved trials completes it;
+ending an empty group cancels it. Closing the application discards an
+uncalculated standard-mass entry, but already calculated trials remain stored.
+
+### Filling Trial Errors And Limits
+- Select a Device ID before calculating or opening history.
+- Control/valve label and mass unit must be nonempty. Numeric configuration,
+  standard mass, and corrected target must be finite and greater than zero.
+- If controls are locked, end the current group before changing its condition.
+- If a save or Set Advance error is shown, do not assume the result was stored;
+  correct the problem and retry. The service keeps Set Advance all-or-nothing.
+- The module reads no pulses and has no pulse-total field. It does not control a
+  valve, write a controller/transmitter, or send Modbus, serial, or other
+  protocol traffic. The operator remains responsible for the external filling
+  cycle and standard-scale reading.
 
 ## ASIO/IIS Module
 Open `Modules > ASIO/IIS Module`. The module keeps its own connection state and does not create or connect transmitter channels.
@@ -194,3 +309,5 @@ $env:COREFLOW_DATA_ROOT = "D:\CoreFlowStudioData"
 - No customer-specific report templates.
 - No real ML model execution.
 - Replay file UI currently accepts a typed CSV path; it does not yet include a file browser.
+- Filling Trial v1 is manual-input only: no pulse acquisition or total, valve
+  control, controller/transmitter write, or production pass/fail threshold.

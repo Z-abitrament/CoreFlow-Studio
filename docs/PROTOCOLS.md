@@ -33,10 +33,39 @@ The first concrete hardware communication path is Modbus RTU over USB-to-serial.
 - Custom UART frame protocol.
 - Ethernet or TCP-based protocol.
 - Vendor DLL or SDK adapter.
+- Pulse-acquisition adapter for validated flowmeter pulse-output hardware.
+- Controller/valve adapter for a separately specified and safety-reviewed
+  closing-control protocol.
 
 Future adapters must implement the same application-level device interface.
 
 The ASIO/IIS frame stream is lower-level than the `FlowmeterDevice` interface until payload semantics are defined. It should expose a transport-style frame API and may later be wrapped by an experiment module or device adapter.
+
+### M15 Filling Trial Communication Boundary
+The Filling Trial Module performs no communication in M15. Its Device ID is
+selected from the shared device store and identifies only the flowmeter under
+test. A control/valve label is descriptive metadata for the external controller
+and valve combination; it is not a protocol endpoint or another Device ID.
+
+The operator manually enters the configured pulse context and the final
+standard-scale mass after running the physical cycle outside CoreFlow Studio.
+The module does not:
+
+- Open or reuse a Modbus, serial, ASIO/IIS, simulator-device, or replay
+  connection.
+- Read, count, calculate, or display pulse totals.
+- Detect a pulse switch point, valve-close command, or final valve closure.
+- Write target mass, advance mass, pulse settings, or any other value to a
+  controller, valve, flowmeter, or transmitter.
+- Add Modbus requests, serial frames, or any other protocol traffic.
+
+Future pulse acquisition or controller/valve control is a protocol-adapter TODO,
+not an extension of the M15 manual-input service. Before it is enabled, a
+separate design must define electrical and frame contracts, capability
+reporting, deterministic fake/simulator behavior, timeout/failure handling,
+write guard and audit requirements, operator arming, and real-hardware
+acceptance. Values or timing invented for a manual test or simulator must never
+silently become hardware defaults.
 
 ## Device Interface Expectations
 Protocol adapters must support these device-level operations where the transmitter and register map allow them:
@@ -221,6 +250,8 @@ Future protocol adapters must:
 - Reuse shared diagnostics and audit logging.
 - Avoid direct UI dependencies.
 - Include fake or simulator-backed tests before hardware tests.
+- Treat simulation values as labeled test inputs until approved hardware
+  documentation supplies the production contract.
 
 ## ASIO/IIS Frame Stream Contract
 The ASIO/IIS module must keep hardware settings explicit and traceable.
@@ -264,3 +295,8 @@ Signal semantics:
 - Whether com0com/hub4com will be installed globally on the target lab PC or packaged/documented as an external prerequisite.
 - Whether production high-rate signal capture uses Modbus, UART, ASIO/IIS frame streaming, or another path.
 - Whether BRAVO-HD ASIO sample formats, channel ordering, and stable device alias remain the same across driver revisions and other lab PCs.
+- Pulse-output electrical characteristics, acquisition hardware, counter
+  semantics, and switch-point timing for a future Filling Trial adapter.
+- Controller/valve protocol, write permissions, arming rules, acknowledgement,
+  timing, failure recovery, and audit requirements for a future automated
+  filling workflow.

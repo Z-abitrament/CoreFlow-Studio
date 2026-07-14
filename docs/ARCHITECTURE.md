@@ -1,7 +1,7 @@
 # Architecture
 
 ## Summary
-CoreFlow Studio is a modular Windows desktop application built with Python and Qt. The architecture separates UI, workflows, devices, protocols, simulation, data processing, and storage so that fixed factory procedures and flexible experiments can run against either simulated transmitters or real USB-serial Modbus RTU hardware.
+CoreFlow Studio is a modular Windows desktop application built with Python and Qt. The architecture separates UI, application services, workflows, devices, protocols, simulation, data processing, and storage so that fixed factory procedures and flexible experiments can run against either simulated transmitters or real USB-serial Modbus RTU hardware. The M15 Filling Trial Module follows the same layering but is deliberately manual-input and communication-free.
 
 ## Architectural Principles
 - Simulation-first: every core workflow must run without physical hardware.
@@ -23,6 +23,7 @@ The Qt desktop UI provides:
 - Historical run browser.
 - Report/export actions.
 - Experiment configuration views.
+- A single-page Filling Trial workbench and current-device filling history.
 
 The UI must not contain protocol logic, calibration formulas, direct database writes, or long-running blocking work.
 
@@ -37,6 +38,9 @@ Application services coordinate user actions and domain operations:
 - `ExperimentService`: manages flexible experiment definitions and module execution.
 - `WriteGuardService`: validates safety-sensitive device write requests before they reach any device adapter.
 - `VariableSamplingService`: reads configured device variables and stores timestamped values with device/run/step traceability.
+- `FillingTrialService`: owns shared-device selection, filling-group state,
+  validation, trial/analysis persistence, immutable advance profiles, history,
+  and the atomic Set Advance transition.
 
 ### Workflow Layer
 Workflows are explicit state machines or step graphs. Each workflow step declares:
@@ -177,6 +181,11 @@ Data processing handles:
 
 Processing modules must receive explicit input data and configuration and return structured outputs. They must not read directly from UI widgets or hidden global state.
 
+Filling calculations live in `coreflow.analysis` as pure functions. Trial error,
+three-trial sample standard deviation, mean standard mass, signed advance mass,
+and corrected target mass accept explicit values and have no Qt, storage,
+device, or protocol dependency.
+
 ### Storage Layer
 Storage uses SQLite for structured records and files for large data artifacts.
 
@@ -190,6 +199,7 @@ SQLite stores:
 - Timestamped low-rate variable samples.
 - File artifact references.
 - Audit log entries.
+- Filling trial records and immutable filling advance profiles.
 
 Files store:
 
@@ -214,6 +224,39 @@ Simulator capabilities:
 - Multi-device scenarios for load testing.
 
 See `docs/SIMULATION.md` for details.
+
+### Filling Trial Module Boundary
+The independent Filling Trial Module is split across four owned boundaries:
+
+- `coreflow.analysis` implements the pure formulas and numerical validation.
+- `coreflow.storage` persists schema v4 filling trials and advance profiles,
+  reusing run sessions, workflow steps, and analysis results for provenance.
+- `coreflow.app.FillingTrialService` is the headless state machine and the only
+  layer allowed to coordinate calculations and persistence.
+- `coreflow.ui` collects operator input and renders service snapshots/history.
+  Qt widgets do not calculate results or issue SQL.
+
+The selected Device ID always refers to a flowmeter in the shared `devices`
+table. It is not a controller ID, valve ID, Modbus unit ID, or COM-derived
+identifier. When a needed flowmeter is absent, the module can explicitly create
+a `future_adapter` device record. The independent control/valve label describes
+the external controller and valve combination; one Device ID may have several
+labels and multiple immutable advance profiles.
+
+Each group locks mode and the full parameter snapshot after its first calculated
+trial: pulse frequency switch point, mass per pulse, mass unit, flow point,
+specified mass, target mass, and control/valve label. The service stores each
+trial and each repeatability/advance analysis immediately. `Set Advance` uses
+one repository transaction to create a profile, complete the old advance group,
+and create a corrected regular group with a blank pending Trial 1. This boundary
+prevents trials from the old and corrected target masses from being mixed.
+
+M15 does not call `FlowmeterDevice`, Modbus, ASIO/IIS, serial, pulse, valve, or
+controller APIs. The operator conducts the physical filling cycle externally
+and manually enters the standard-scale mass. The module reads no pulse total,
+controls no valve, writes no controller or transmitter, and creates no protocol
+traffic. Any future pulse/controller adapter requires its own protocol,
+simulation, capability, safety, audit, and hardware-validation contract.
 
 ## Suggested Package Boundaries
 The exact file tree will be created during implementation, but the first code pass should preserve these boundaries:
@@ -241,6 +284,20 @@ Typical factory workflow:
 7. Storage records step results, metrics, and file references.
 8. UI receives progress events and displays status.
 9. Report service generates final artifacts from stored run data.
+
+Manual Filling Trial data flow:
+
+1. The UI asks `FillingTrialService` to select an existing shared flowmeter
+   Device ID or explicitly create a `future_adapter` record.
+2. The operator selects a control/valve label and enters the group configuration.
+3. The operator runs the physical cycle externally and enters one standard-scale
+   mass; the service calls pure analysis code and atomically stores the run,
+   completed step, and trial.
+4. The operator explicitly adds another blank trial when required.
+5. The service stores a repeatability result from exactly three consecutive
+   trials or an advance result from at least three selected trials.
+6. `Set Advance` atomically persists an immutable profile and returns a new
+   corrected regular group. The UI only renders the resulting service snapshot.
 
 ## Error Handling
 - Communication errors are attached to the affected channel and workflow step.

@@ -5,6 +5,11 @@ Simulation is the primary v1 development path. Every calibration, factory test, 
 
 The simulator must implement the same application-level device interface as real Modbus RTU transmitters.
 
+The M15 Filling Trial Module is also hardware-free, but it does not simulate a
+transmitter or controller connection. Its v1 test path uses deterministic
+manual inputs through a headless service and never promotes those inputs to
+hardware behavior.
+
 ## Goals
 - Enable full workflow development without physical instruments.
 - Make tests deterministic and repeatable.
@@ -130,6 +135,35 @@ The simulator is required for:
 - Error and stability calculation tests.
 - Report generation tests.
 - Regression tests for communication failure behavior.
+
+## Filling Trial Hardware-Free Scenarios
+Filling Trial tests use shared Device IDs, explicit configuration values, and
+operator-style standard-scale mass inputs. They do not read a simulator pulse
+stream and do not instantiate a simulated valve or controller.
+
+Deterministic scenarios cover:
+
+- Selecting an existing shared flowmeter or explicitly creating a neutral
+  `future_adapter` record.
+- Restoring pulse frequency switch point, mass per pulse, mass unit, flow point,
+  specified mass, target mass, and control/valve label from that Device ID's
+  latest calculated trial while leaving standard mass blank.
+- Regular trial errors for standard masses above, equal to, and below specified
+  mass.
+- Sample standard deviation from exactly three consecutive trial errors.
+- Advance calculations from at least three trials, including nonconsecutive
+  selections and negative advance mass.
+- Multiple immutable advance profiles for one flowmeter and condition.
+- Atomic Set Advance transition from the uncorrected advance group to a new
+  corrected regular group with blank Trial 1.
+- Storage and history replay from persisted UTC records, source Trial IDs, full
+  snapshots, and notes without a hidden pass/fail threshold.
+
+This boundary is deliberate: M15 performs manual calculation and record keeping
+only. It reads no pulse total, controls no valve, writes no controller or
+transmitter, and sends no protocol traffic. Any future pulse or control adapter
+must introduce its own explicitly labeled simulator/fake contract and hardware
+acceptance tests; these manual values are not production hardware defaults.
 
 ## Known Unknowns
 - Exact transmitter measurement set.

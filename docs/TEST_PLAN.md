@@ -214,6 +214,119 @@ Scenarios:
 - Store repeatability summary metrics for later review.
 - For the Modbus Simple-mode repeatability workflow, use the captured accumulated-mass change for `delta_m` and the operator-entered standard-scale mass for `standard_mass`.
 
+### M15 Filling Trial Tests
+ID: TP-FILL-CALC-001
+
+Goal: Verify the pure Filling Trial calculations independently from Qt,
+storage, devices, and protocols.
+
+Scenarios:
+
+- Calculate regular trial error as `(standard_mass - specified_mass) /
+  specified_mass * 100` for positive, zero, and negative results.
+- Calculate sample standard deviation from exactly three consecutive trial
+  errors and reject nonconsecutive or non-three selections.
+- Calculate advance from at least three selected trials, including
+  nonconsecutive indexes, as `mean_standard_mass - specified_mass`.
+- Preserve negative advance and calculate corrected target as
+  `specified_mass - advance_mass`.
+- Reject nonfinite, zero, negative, mismatched-unit, or mismatched-snapshot
+  inputs as applicable, and confirm no calculation uses a pulse total.
+
+ID: TP-FILL-DATA-001
+
+Goal: Verify schema v4 Filling Trial persistence, migration, provenance, and
+atomic transitions.
+
+Scenarios:
+
+- Create a fresh schema v4 database with `filling_trial_records`,
+  `filling_advance_profiles`, history indexes, unique trial indexes, and foreign
+  keys to shared devices, runs, and analysis results.
+- Migrate an existing schema v3 database without data loss; backfill orphan
+  Modbus profile Device IDs into shared devices as `modbus_rtu`, normalize
+  backfill timestamps to UTC, and record version 4 only after success.
+- Reject databases whose schema version is newer than v4.
+- Persist and query trials by run and Device ID, the latest calculated trial,
+  and multiple immutable same-condition profiles for one flowmeter.
+- Preserve source Trial IDs, source analysis-result IDs, full configuration
+  snapshots, notes, and UTC timestamps.
+- Roll back trial, analysis, profile, old-run completion, and corrected-new-run
+  writes when any atomic transition step fails.
+- Reject cross-device run/trial and analysis/profile provenance mismatches.
+
+ID: TP-FILL-SVC-001
+
+Goal: Verify the headless Filling Trial lifecycle and device-centered rules.
+
+Scenarios:
+
+- Select an existing shared flowmeter Device ID or explicitly create a unique
+  `future_adapter` device; do not treat the control/valve label as a Device ID.
+- Restore configuration from the selected Device ID's latest calculated trial,
+  but leave standard mass blank after opening, calculating, and `Add Trial`.
+- Lock mode, label, pulse settings, unit, flow point, specified mass, and target
+  mass after the first calculation in a group.
+- Save each calculated trial immediately and append the next one only through
+  explicit `Add Trial`.
+- Require exactly three consecutive source trials for repeatability and at
+  least three, not necessarily consecutive, source trials for advance.
+- Store every repeatability and advance calculation with source Trial IDs,
+  snapshots, UTC timestamps, and no pass/fail threshold.
+- Create multiple immutable advance profiles per device.
+- Make `Set Advance` atomically complete the old group and create a corrected
+  regular group at blank Trial 1 without mixing old and new trials.
+- Return current-device history in four categories: trial, repeatability,
+  advance calculation, and advance profile set.
+- Complete nonempty groups, cancel empty groups, and retain retryable state when
+  close or persistence fails.
+
+ID: TP-FILL-UI-001
+
+Goal: Verify the operator path through the embedded Filling Trial workbench.
+
+Scenarios:
+
+- Open `Modules > Filling Module`, choose a shared Device ID from a noneditable
+  selector, or use the explicit new-device dialog.
+- Confirm Device ID, control/valve label, and advance-profile controls are
+  visually distinct and module switching preserves the workbench state.
+- Configure pulse switch point, mass per pulse, unit, flow point, specified
+  mass, target mass, mode, and label; confirm Advance mode mirrors specified
+  mass until an advance is set.
+- Calculate a trial, confirm persisted table values and blank standard mass,
+  then use `Add Trial` to prepare the next blank input.
+- Enforce checkbox selection rules for repeatability and advance actions.
+- Set an advance, confirm the old table clears, corrected target appears in a
+  new regular group, and Trial 1 standard mass is blank.
+- Add/select multiple advance profiles and inspect all four current-device
+  history record types with source IDs, snapshots, results, and notes.
+- Confirm validation errors are visible and no Filling Trial action changes
+  Modbus or ASIO/IIS connection state or emits protocol traffic.
+
+Focused commands:
+
+```powershell
+conda run -n coreflow-studio python -m pytest tests/test_analysis_filling.py tests/test_workflows_storage_models.py -q
+conda run -n coreflow-studio python -m pytest tests/test_storage_filling.py tests/test_storage_foundation.py -q
+conda run -n coreflow-studio python -m pytest tests/test_filling_service.py tests/test_storage_filling.py tests/test_analysis_filling.py -q
+conda run -n coreflow-studio python -m pytest tests/test_ui_filling.py tests/test_filling_service.py -q
+conda run -n coreflow-studio python -m pytest tests/test_ui_main_window.py tests/test_packaging.py tests/test_bootstrap.py tests/test_version_policy.py -q
+conda run -n coreflow-studio python scripts/check_version_update.py
+```
+
+Final integration commands:
+
+```powershell
+conda run -n coreflow-studio python -m pytest -q
+conda run -n coreflow-studio python -m coreflow --ui
+```
+
+The source UI smoke must open the Filling Module, select or create a Device ID,
+calculate regular and advance trials, calculate repeatability, set an advance,
+and inspect history. It must not connect to or operate pulse, controller, valve,
+serial, Modbus, or ASIO/IIS hardware.
+
 ### Data Integrity Tests
 ID: TP-DATA-001
 

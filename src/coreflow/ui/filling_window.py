@@ -39,6 +39,13 @@ from coreflow.ui.filling_dialogs import FillingDeviceSelectionDialog
 from coreflow.ui.filling_history import FillingHistoryDialog
 
 
+class _CompactDoubleSpinBox(QDoubleSpinBox):
+    """Retain input precision without exposing binary-float display noise."""
+
+    def textFromValue(self, value: float) -> str:  # noqa: N802 - Qt override
+        return _format_number(value)
+
+
 class FillingModuleWindow(QDialog):
     """Coordinate the operator-facing Filling workbench with its service."""
 
@@ -93,9 +100,10 @@ class FillingModuleWindow(QDialog):
         self.changeDeviceButton = QPushButton("Change Device...")
         self.changeDeviceButton.setObjectName("fillingChangeDeviceButton")
         header.addWidget(self.changeDeviceButton, 0, 2)
-        header.setColumnStretch(3, 1)
+        header.setColumnStretch(1, 1)
         self.historyButton = QPushButton("History...")
         self.historyButton.setObjectName("fillingHistoryButton")
+        self.historyButton.setMaximumWidth(160)
         header.addWidget(self.historyButton, 0, 4)
 
         header.addWidget(QLabel("Control / valve label"), 1, 0)
@@ -110,6 +118,7 @@ class FillingModuleWindow(QDialog):
         header.addWidget(self.controlValveCombo, 1, 1, 1, 2)
         self.newLabelButton = QPushButton("New Label...")
         self.newLabelButton.setObjectName("fillingNewLabelButton")
+        self.newLabelButton.setMaximumWidth(160)
         header.addWidget(self.newLabelButton, 1, 3)
         header.addWidget(QLabel("Advance profile"), 2, 0)
         self.advanceProfileCombo = QComboBox()
@@ -299,7 +308,7 @@ class FillingModuleWindow(QDialog):
 
     @staticmethod
     def _number_spin_box(object_name: str, value: float) -> QDoubleSpinBox:
-        field = QDoubleSpinBox()
+        field = _CompactDoubleSpinBox()
         field.setObjectName(object_name)
         field.setDecimals(15)
         field.setRange(0.0, 1.0e18)
@@ -374,7 +383,9 @@ class FillingModuleWindow(QDialog):
         if not checked or self._loading:
             return
         if mode is FillingMode.ADVANCE:
-            self.targetMassSpinBox.setValue(self.specifiedMassSpinBox.value())
+            self.targetMassSpinBox.setValue(
+                _visible_spin_value(self.specifiedMassSpinBox)
+            )
         self._apply_mode_state()
         self._clear_analysis_result()
 
@@ -382,7 +393,9 @@ class FillingModuleWindow(QDialog):
         if self._loading:
             return
         if self.advanceModeButton.isChecked():
-            self.targetMassSpinBox.setValue(value)
+            self.targetMassSpinBox.setValue(
+                _visible_spin_value(self.specifiedMassSpinBox)
+            )
 
     def _current_mode(self) -> FillingMode:
         return (
@@ -393,19 +406,21 @@ class FillingModuleWindow(QDialog):
 
     def _configuration_from_fields(self) -> FillingConfiguration:
         mode = self._current_mode()
-        specified_mass = self.specifiedMassSpinBox.value()
+        specified_mass = _visible_spin_value(self.specifiedMassSpinBox)
         target_mass = (
             specified_mass
             if mode is FillingMode.ADVANCE
-            else self.targetMassSpinBox.value()
+            else _visible_spin_value(self.targetMassSpinBox)
         )
         return FillingConfiguration(
             mode=mode,
             control_valve_label=self.controlValveCombo.currentText(),
-            pulse_frequency_switch_point_hz=self.pulseSwitchSpinBox.value(),
-            mass_per_pulse=self.massPerPulseSpinBox.value(),
+            pulse_frequency_switch_point_hz=_visible_spin_value(
+                self.pulseSwitchSpinBox
+            ),
+            mass_per_pulse=_visible_spin_value(self.massPerPulseSpinBox),
             mass_unit=self.massUnitEdit.text(),
-            flow_point_g_per_s=self.flowPointSpinBox.value(),
+            flow_point_g_per_s=_visible_spin_value(self.flowPointSpinBox),
             specified_mass=specified_mass,
             target_mass=target_mass,
         )
@@ -893,6 +908,10 @@ class FillingModuleWindow(QDialog):
 
 def _format_number(value: float) -> str:
     return f"{value:.15g}"
+
+
+def _visible_spin_value(field: QDoubleSpinBox) -> float:
+    return float(field.valueFromText(field.cleanText()))
 
 
 def _format_profile_number(value: float, *, signed: bool = False) -> str:

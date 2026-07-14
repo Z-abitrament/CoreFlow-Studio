@@ -154,8 +154,11 @@ def _mean_and_sample_stddev(values: tuple[float, ...]) -> tuple[float, float]:
 
 
 def _stable_mean(values: tuple[float, ...]) -> float:
-    scale = max(values)
-    mean = scale * (fsum(value / scale for value in values) / len(values))
+    try:
+        mean = fsum(values) / len(values)
+    except OverflowError:
+        scale = max(values)
+        mean = scale * (fsum(value / scale for value in values) / len(values))
     _finite("mean standard mass", mean)
     return mean
 

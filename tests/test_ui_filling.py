@@ -906,3 +906,38 @@ def test_real_close_ends_group_but_embedded_hide_preserves_state(
     embedded.show()
     embedded.close()
     assert service.snapshot().run_id is None
+
+
+def test_filling_window_keeps_header_actions_compact_on_wide_screens(
+    qtbot,
+    repository: StorageRepository,
+) -> None:
+    window = FillingModuleWindow(repository=repository, embedded=True)
+    qtbot.addWidget(window)
+    window.resize(1600, 800)
+    window.show()
+
+    assert window.newLabelButton.width() < 220
+    assert window.historyButton.width() < 220
+    assert window.controlValveCombo.width() > window.newLabelButton.width()
+
+
+def test_numeric_inputs_display_compact_and_persist_visible_values(
+    qtbot,
+    repository: StorageRepository,
+) -> None:
+    window = FillingModuleWindow(repository=repository)
+    qtbot.addWidget(window)
+    window.show()
+    _select_device(qtbot, window)
+    window.controlValveCombo.setEditText("CTRL-A + VALVE-2")
+
+    assert window.specifiedMassSpinBox.decimals() == 15
+    assert window.specifiedMassSpinBox.cleanText() == "1000"
+    assert window.massPerPulseSpinBox.cleanText() == "0.1"
+
+    window.standardMassEdit.setText("1005")
+    _click(qtbot, window.calculateTrialButton)
+    trial = window.service.snapshot().trials[0]
+    assert trial.specified_mass == 1000.0
+    assert trial.target_mass == 1000.0

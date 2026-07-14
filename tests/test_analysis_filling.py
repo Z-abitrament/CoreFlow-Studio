@@ -139,6 +139,20 @@ def test_advance_calculates_positive_advance_for_nonconsecutive_trials() -> None
     assert result.corrected_target_mass == pytest.approx(996.0)
 
 
+def test_advance_preserves_exact_ordinary_decimal_results() -> None:
+    trials = (
+        _trial("T-1", 1, standard_mass=1005.0, error_percent=0.5),
+        _trial("T-2", 2, standard_mass=1006.0, error_percent=0.6),
+        _trial("T-3", 3, standard_mass=1004.0, error_percent=0.4),
+    )
+
+    result = calculate_advance(trials)
+
+    assert result.mean_standard_mass == 1005.0
+    assert result.advance_mass == 5.0
+    assert result.corrected_target_mass == 995.0
+
+
 def test_advance_allows_negative_advance() -> None:
     trials = (
         _trial("T-1", 1, standard_mass=998.0, error_percent=-0.2),
