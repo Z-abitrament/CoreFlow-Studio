@@ -2,7 +2,7 @@
 
 ## Scope
 M15 implements the independent Filling Trial Module for manual operator-run
-filling trials. The delivered baseline is software version `0.7.0` with SQLite
+filling trials. The delivered baseline is software version `0.7.1` with SQLite
 schema v4.
 
 This milestone is calculation and record keeping only. No test in the M15
@@ -100,8 +100,8 @@ counts below are the final passing results reported by those slices.
 
 Version evidence:
 
-- `pyproject.toml` contains version `0.7.0`.
-- `src/coreflow/__init__.py` contains `__version__ = "0.7.0"`.
+- `pyproject.toml` contains version `0.7.1`.
+- `src/coreflow/__init__.py` contains `__version__ = "0.7.1"`.
 - The 34-test Task 5 result includes the version-policy coverage.
 - `conda run -n coreflow-studio python scripts/check_version_update.py` exited
   successfully during the final integration pass.
