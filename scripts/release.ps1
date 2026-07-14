@@ -118,8 +118,17 @@ function Assert-ReleaseDoesNotExist {
         }
     }
 
-    & $Gh release view $Tag --repo $Repository *> $null
-    if ($LASTEXITCODE -eq 0) {
+    $ReleaseViewExitCode = 1
+    $PreviousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        & $Gh release view $Tag --repo $Repository *> $null
+        $ReleaseViewExitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $PreviousErrorActionPreference
+    }
+    if ($ReleaseViewExitCode -eq 0) {
         throw "GitHub Release $Tag already exists."
     }
 }
