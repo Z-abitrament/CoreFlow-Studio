@@ -313,6 +313,108 @@ Done when:
   `docs/M15_VERIFICATION.md` by the final integration pass rather than inferred
   from the focused suites.
 
+### M16: Modbus Real-Time Zero Monitor
+
+Add a read-only zero-monitor operation inside the existing Modbus Module.
+
+Status: Phase 1-3 application implementation and Phase 4 read-only test code
+are complete at software version `0.8.0`. Local deterministic, storage, history,
+and Qt evidence is recorded in `docs/M16_VERIFICATION.md`; real-device Phase 4
+execution remains pending.
+
+Deliverables:
+
+- Configurable logical map for the coherent 18-register DSP zero snapshot,
+  with configurable absolute start and strict validation of fixed relative
+  offsets, types, word counts, scale, units, ownership, and one merged
+  FC04/FC03 read. The reviewed Krohne ABCD baseline is versioned at
+  `config/register_maps/krohne_prj_main.json`.
+- Optional 16-bit device ByteOrder preflight with exact four-enum mapping,
+  mismatch blocking, diagnostic-only behavior when unavailable, and no
+  automatic device/profile mutation.
+- Headless zero-monitor service for 100 ms polling, cancellation,
+  sequence/timestamp unwrapping, data-gap detection, continuous segments, and
+  streaming partial CSV persistence, bounded in-memory windows, atomic artifact
+  finalization, and interrupted-run recovery.
+- Read-only display and persistence of the fixed 100 ms target plus observed
+  monotonic poll-period distribution and achieved rate; no per-device interval
+  setting in M16.
+- Pure zero-monitor analysis for non-overlapping 600 ms candidates, short and
+  long metrics, configurable thresholds, states, and reason codes.
+- Explicit continuity recovery for hard gaps, zero-calibration activity,
+  reserved status bits, duplicate frames, and non-breaking overruns, with
+  persistent counters and deterministic new-segment behavior.
+- A diagnostic production baseline with threshold values intentionally blank
+  and pending bench approval; synthetic thresholds are test-only and cannot be
+  persisted as production defaults.
+- A custom long-decision window validated within 12 through 86400 seconds;
+  capture duration remains unbounded until Stop while analysis memory remains
+  bounded by the rolling window.
+- `Operations > Zero Monitor` non-modal UI with zero-flow context, live plots,
+  status/quality counters, metric table, per-device configuration, and a link
+  to the existing guarded `Zero Cal` operation.
+- Test Records integration, including plot/data reopen and portable JSON
+  export/import of the snapshot artifact.
+- Fake-transport fixtures followed by separate read-only real-device evidence.
+
+Done when:
+
+- A normal or transport-failed logical poll is proven to issue one coherent
+  18-register request rather than per-variable reads; only a torn snapshot may
+  issue one bounded full-block reread.
+- Invalid, torn, duplicate, missing, wrapped, and restarted snapshot sequences
+  produce deterministic states and preserved evidence.
+- Failed logical polls are stored without stale measurement values; long runs
+  remain memory-bounded, and an interrupted partial capture is recovered as an
+  explicitly incomplete artifact and error run.
+- Live and persisted curves can be reviewed through the existing Modbus UI and
+  Test Records infrastructure.
+- Missing thresholds or unconfirmed zero-flow context cannot produce a
+  `STABLE` result.
+- No zero-monitor path writes a device; formal calibration remains guarded and
+  audited by the existing workflow.
+- Hardware claims are limited to the validation stage actually executed.
+
+### M17: Modbus Register Map Library
+
+Separate reusable, versioned register maps from Device Profiles without
+rewriting historical register-map snapshots.
+
+Status: local implementation complete at software version `0.9.0` and SQLite
+schema v6. Real-device validation is not required for catalog management;
+future DSP discovery-register validation remains pending.
+
+Deliverables:
+
+- SQLite schema v6 register-map catalog keyed by stable map ID and version.
+- Deterministic migration of existing inline Device Profile maps into shared
+  legacy catalog entries, deduplicated by normalized content checksum.
+- Device Profile binding to one map ID and version while retaining an effective
+  inline snapshot for compatibility and recovery.
+- Disconnected-only UI for selecting an existing list or creating a named list,
+  with change preview and immutable official versions.
+- Packaged official map discovery so client updates can install new catalog
+  versions without silently rebinding existing Device IDs.
+- A checked-in Krohne DSP extractor that validates active address, width,
+  register-kind, and access declarations, then generates the complete
+  `krohne-prj-main` official list with reviewed client semantics and source
+  commit metadata.
+- Future fixed DSP discovery-block contract documented but not implemented
+  until addresses and encodings are approved.
+
+Done when:
+
+- Existing profiles reopen with the same effective register definitions after
+  migration and identical legacy maps are shared.
+- Multiple Device IDs can bind the same list version, while editing one profile
+  creates or selects another version without rewriting the other profile.
+- Runtime sessions and operation attempts still store the complete effective
+  map snapshot used for communication.
+- Official same-ID/same-version content conflicts are rejected, and packaged
+  maps are present in the Windows distribution.
+- Local storage, runtime, Qt, packaging, and regression tests pass without
+  opening serial hardware or issuing device writes.
+
 ## Implementation Defaults
 - Use PySide6 for Qt unless a documented blocker appears.
 - Use pytest for tests.

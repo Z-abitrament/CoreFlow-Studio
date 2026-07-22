@@ -5,10 +5,13 @@ CoreFlow Studio is a PC-side automation application for Coriolis flowmeter trans
 
 v1 is a Windows-first Python + Qt desktop application. It must run complete workflows against simulated transmitters before real hardware is available. The first concrete communication path is Modbus RTU over USB-to-serial, with architecture support for 4-8 simultaneous ports.
 
-The current delivered baseline is M15 at software version `0.7.0` and SQLite
-schema v5. M15 adds the independent Filling Trial Module as a manual-input,
-hardware-free workflow; it does not change the completed M12 packaging scope or
-the safety requirements for protocol-backed operations.
+The current delivered baseline is M17 at software version `0.9.0` and SQLite
+schema v6. M17 adds the reusable, versioned Modbus register-map catalog,
+legacy-profile migration, Device ID bindings, selection UI, and packaged
+official-map synchronization. The bundled `krohne-prj-main` list is extracted
+from the active Modbus map at DSP commit `f0a1b39`; this is source-contract
+evidence, not real-device approval. M16 real-device Phase 4 evidence is still
+pending and is not implied by the local software baseline.
 
 ## Target Users
 - Factory test engineers who run repeatable calibration and outgoing inspection flows.
@@ -35,6 +38,9 @@ v1 must deliver the software foundation for:
 - Data capture, storage, and export using SQLite plus linked files.
 - Protocol abstraction that allows real Modbus RTU transmitters to replace simulated devices later.
 - A Modbus RTU master operator path for configurable variable maps, timestamped variable reads, zero calibration, K factor calibration, and manual mass-total repeatability tests.
+- A read-only Modbus real-time zero-monitor operation that consumes one coherent
+  firmware snapshot per poll, records raw evidence, displays live zero behavior,
+  and calculates configurable short- and long-window stability indicators.
 - Extension points for signal processing, fixture control, and machine learning experiments.
 - An ASIO-backed IIS frame I/O module for lab hardware tests, exposed through an independent UI window after the headless module is verified.
 - An independent Filling Trial Module for manual filling-error,
@@ -110,6 +116,11 @@ Acceptance criteria:
 - Stability metrics are computed from the stored data, not only from live memory.
 - Long-running capture does not block the UI.
 - Simulator scenarios can inject drift, noise, communication delay, and dropouts.
+- The Modbus Module can monitor a configured DSP zero snapshot without writing
+  the device, preserve sequence/timestamp/data-gap evidence, and calculate
+  independent-window zero repeatability and drift metrics.
+- A zero-monitor result cannot be reported as stable unless zero-flow context is
+  explicitly confirmed and all required thresholds are configured.
 
 ### 6. Flexible Experiments
 R&D users can define experiment-like runs that collect raw signals, apply signal-processing modules, control future fixtures, and optionally run machine-learning models.
@@ -186,6 +197,8 @@ Acceptance criteria:
 | PRD-FR-013 | Support a Modbus master operator module with configurable variables, timestamped variable sampling, zero calibration, K factor calibration, and manual mass-total error/repeatability tests. | M3, M5, M7, M8, M11 | TP-PROTO-001, TP-DATA-001, TP-WF-003, TP-CALC-003, TP-SAFE-001 |
 | PRD-FR-014 | Support a read-only Modbus listener/sniffer workflow using com0com and hub4com for lab diagnostics after virtual-port tooling is installed and approved. | M14 | TP-PROTO-002 |
 | PRD-FR-015 | Provide an independent manual Filling Trial Module with shared flowmeter identity, regular error/repeatability, advance calculation, immutable advance profiles, atomic corrected-group transition, and device-filtered history without hardware communication. | M15 | TP-FILL-CALC-001, TP-FILL-DATA-001, TP-FILL-SVC-001, TP-FILL-UI-001 |
+| PRD-FR-016 | Add a read-only real-time zero-monitor operation inside the existing Modbus Module, using coherent configured register-block reads, live plots, raw artifact storage, data-quality checks, independent-window long-term analysis, and no automatic calibration write. | M16 | TP-ZMON-001 |
+| PRD-FR-017 | Manage reusable versioned Modbus register lists independently from device models, bind Device IDs to explicit list versions, migrate legacy inline maps, and install official list versions with client updates without rewriting active bindings or history. | M17 | TP-RMAP-001 |
 
 ## Non-Functional Requirements
 - The UI must remain responsive during communication, capture, analysis, and report generation.
@@ -227,6 +240,14 @@ This repository is considered ready for first implementation when:
 - Final addresses, data types, scaling, and writable ranges for `mass_rate`, `mass_acc`, `temperature`, `delta_t`, `zero_offset`, `frequency`, `k_factor`, `low_threshold`, and zero-calibration start/status.
 - Whether zero calibration completion is represented by the same start coil returning to zero or by a separate status register on production firmware.
 - Whether K factor calibration must verify the written value by readback or by an additional transmitter commit/apply action.
+- Approved zero-monitor short/long stability thresholds, minimum confirmation
+  duration, zero-flow confirmation source, and acceptable 10 Hz snapshot loss
+  rate on production serial settings.
+  M16 intentionally leaves the production zero-monitor limits and minimum
+  stable duration blank with `pending_bench_approval`; this permits diagnostic
+  capture but blocks production `STABLE`/pass-fail conclusions until approved
+  multi-device bench evidence exists. Firmware zero values use `us`, slope uses
+  `us/s`, and duration uses seconds.
 - Lab permission to install and configure com0com/hub4com virtual serial ports and permission to open serial devices for listener diagnostics.
 - Exact ASIO driver capabilities for the BRAVO-HD USB sound-card module, including supported sample rates, channel layout, sample formats, and whether the Python audio backend exposes the vendor ASIO driver directly.
 - Final production meaning of IIS frame payloads beyond loopback transport validation.

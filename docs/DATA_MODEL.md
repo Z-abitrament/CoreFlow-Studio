@@ -3,9 +3,10 @@
 ## Summary
 CoreFlow Studio stores structured metadata and results in SQLite and stores large or external artifacts as files. Every calibration, test, and experiment run must be traceable from device identity and configuration to raw data, processed results, reports, and audit logs.
 
-The current database version is schema v5. Schema v5 adds retireable Filling
-Trial records and immutable filling advance profiles while preserving the
-shared device, run, workflow-step, and analysis-result provenance model.
+The current database version is schema v6. Schema v5 added retireable Filling
+Trial records and immutable filling advance profiles. Schema v6 adds a
+versioned Modbus register-map catalog and Device Profile bindings while
+preserving inline and historical map snapshots.
 
 ## Storage Principles
 - SQLite is the local source of truth for metadata, status, metrics, and artifact references.
@@ -179,9 +180,37 @@ Fields:
 - Tube model.
 - Transmitter model.
 - Connection settings snapshot, including serial port and Modbus unit ID.
-- Register-map configuration snapshot.
+- Bound register-map ID and version.
+- Effective register-map configuration snapshot retained for compatibility
+  and recovery.
 - Notes.
 - Created and updated timestamps.
+
+### Modbus Register Map Catalog Entry
+
+Stores one immutable reusable register-map version independently from devices.
+
+Fields:
+
+- Stable register-map ID.
+- Version.
+- Display name.
+- Source: official, custom, legacy, or template.
+- Normalized-content SHA-256 checksum.
+- Complete register-map JSON.
+- Created and updated timestamps.
+
+The primary key is `(register_map_id, version)`. One version may be referenced
+by multiple Device Profiles. A client update may add an official version but
+must reject different content under an existing ID/version pair.
+
+### Schema v5 To v6 Migration
+
+Initialization creates the catalog and adds nullable map-ID/version bindings
+to existing Device Profiles. Every unbound profile with a valid inline map is
+assigned a deterministic legacy catalog entry derived from its normalized
+content checksum. Identical maps are deduplicated. Inline profile maps and all
+run/session/attempt snapshots remain unchanged.
 
 ### Modbus Test Session
 Groups flexible Modbus operation attempts for one device ID.
@@ -214,7 +243,7 @@ Fields:
 - Run ID when the attempt belongs to a stored run.
 - Device ID.
 - Operation type, such as `zero_calibration`,
-  `k_factor_calibration_capture`, `k_factor_calibration`,
+  `modbus_zero_monitor`, `k_factor_calibration_capture`, `k_factor_calibration`,
   `manual_error_repeatability_trial`, or `manual_error_repeatability`.
 - Status.
 - Start and end time.
@@ -224,6 +253,229 @@ Fields:
 - Raw artifact ID when available.
 - Summary metrics.
 - Notes.
+
+### Modbus Zero Monitor Record
+
+M16 reuses `ModbusOperationAttempt`, `AnalysisResult`, and `Artifact`; it does
+not add a new SQLite table. A `modbus_zero_monitor` attempt with at least one
+logical poll row references one long-form read-only capture and one reproducible
+analysis result. Pre-start failures and runs stopped before the first poll have
+no artifact or analysis result.
+
+Each monitor session that passes pre-start validation owns one `RunSession`
+with `run_type=stability`, `workflow_name=modbus_zero_monitor`, and
+`workflow_version=1`. It also owns a `zero_monitor_capture` capture step and a
+`zero_monitor_analysis` analysis step. The run, capture step, and operation
+attempt are created as running, while the analysis step starts as pending. A
+pre-start validation failure is stored as an error operation attempt without a
+run ID and does not create an empty run or artifact.
+
+The operation summary stores:
+
+- Device metadata, connection settings, and register-map snapshot.
+- Byte-order verification status, observed device enum/order, configured
+  byte/word order, verification timestamp, and error when applicable.
+- Zero-flow confirmation value, actor, and confirmation timestamp when present.
+- Fixed `target_poll_interval_ms=100` plus observed start-to-start period mean,
+  P50, P95, P99, maximum, and achieved poll rate calculated from monotonic
+  logical-poll start times.
+- Start/end time, logical poll count, physical request count, accepted count,
+  duplicate count, gap count, invalid count, restart count, torn-snapshot
+  reread count, transport-failure count, poll-overrun count, and missed
+  schedule-slot count.
+- Official zero offset read at operation start when available.
+- Analysis-window and threshold snapshot, including the source of every
+  threshold.
+- Final state and reason codes.
+- Raw snapshot artifact ID and analysis-result ID.
+
+The configured long decision window is one of 30, 60, or 300 seconds, or a
+custom value in the inclusive range 12 through 86400 seconds. A separate
+10-second plot range is display state only and must not be stored or interpreted
+as the long decision window.
+Long-window decisions require both a continuous segment covering the selected
+window and at least 20 independent 600 ms candidates.
+
+The 24-hour maximum bounds the rolling decision deque, not capture duration.
+Capture may continue until Stop while raw CSV rows keep streaming; after the
+window fills, analysis evicts candidates older than the selected `Tlong`.
+
+The 100 ms target is a versioned zero-monitor protocol constant, not per-device
+configuration. The UI may display it but cannot edit it. Independent 600 ms
+candidates remain sequence-based every six device publications regardless of
+observed host poll timing; timing degradation is recorded without silently
+changing the target or analysis thresholds.
+
+Zero-flow confirmation is immutable run provenance, not per-device
+configuration. The run snapshot stores `confirmed`, operator, confirmation
+time, Device ID, profile ID, and register-map checksum. An unconfirmed run
+stores `confirmed=false` and remains diagnostic-only. Confirmation is accepted
+only before Start, is locked while running, and is cleared after every terminal
+outcome, reconnect, Device ID/profile/register-map change, or dialog reopen.
+Changing from diagnostic capture to confirmed evaluation therefore requires a
+new run; samples from the earlier run are never reused.
+
+When `modbus_byte_order` is configured, pre-start reads its unaffected 16-bit
+enum and maps 0/1/2/3 to ABCD/BADC/CDAB/DCBA. Matching order is stored as
+`verified`. Mismatch, invalid enum, or read failure creates only an unlinked
+error attempt and no run. If the logical register is absent, a diagnostic run
+stores `unavailable` plus `BYTE_ORDER_UNVERIFIED`, remains `EVALUATING`, and
+cannot produce pass/fail. The service never changes device or profile order.
+
+The threshold snapshot stores seven stability criteria: short standard
+deviation, short range, raw peak-to-peak, repeatability standard deviation,
+long robust range, trend span, and maximum step. Each criterion stores
+`enabled`, `limit`, and `source`. All seven default to enabled; disabling one
+must be explicit. Every enabled criterion requires a finite nonnegative limit
+and nonempty source. With no enabled criteria or any incomplete enabled
+criterion, analysis remains `EVALUATING` and pass/fail remains null.
+`minimum_stable_duration_s` is also required and must be finite and
+nonnegative.
+
+Firmware zero-monitor amplitudes and `ZeroOffset` share the configured `us`
+engineering unit. Stability/offset limits and trend span are stored in `us`,
+slope in `us/s`, and windows/durations in seconds; M16 performs no implicit
+unit conversion. A configured threshold cannot participate in a decision when
+its saved unit does not match the snapshot/register-map unit.
+Unit mismatch is stored as `THRESHOLD_UNIT_MISMATCH` and cannot be treated as a
+disabled criterion.
+
+The initial production threshold snapshot deliberately has null limits and
+`status=pending_bench_approval`, including null minimum stable duration and
+optional offset limit. It produces `EVALUATING` with null pass/fail. Synthetic
+test thresholds carry `test_only=true` and must never be persisted as
+production profile defaults. A future approved value records its unit, source,
+approval identifier, and effective time.
+
+The optional offset limit and source are stored separately from stability
+criteria. Offset status is `UNAVAILABLE`, `WITHIN_LIMIT`, or `EXCEEDED` and is
+recorded as an advisory, not as an input to the overall stability state. A
+result may therefore be `STABLE` with an `OFFSET_EXCEEDED` advisory. A missing
+offset limit does not block a stability decision.
+
+Long-window calculation uses candidates in the current continuous segment
+whose inclusive age from the latest device timestamp is at most the configured
+window. Sample standard deviation uses `ddof=1`; P5/P95 use NumPy linear
+interpolation. Least-squares slope uses seconds centered on the window's mean
+device time, and trend span is the absolute slope multiplied by the configured
+window duration. Threshold equality passes and no hidden comparison epsilon is
+stored or applied.
+
+The result stores `stable_since_device_time` and `stable_duration_s`. The timer
+starts when confirmed zero-flow context, complete configuration, window
+readiness, and every enabled criterion first hold together. It resets on a data
+gap, restart, invalid/internal-error sample, or enabled-criterion violation.
+Duplicate sequence values do not advance or reset it. Poll overrun alone and
+offset advisories do not reset it when device sequence and data remain
+continuous.
+
+Continuity state stores `segment_break_pending`, segment ID, break reason,
+state reason codes, advisory codes, and cumulative counters. Hard transport,
+coherence, sequence, tick, ready-bit inconsistency, invalid-data, and internal
+errors mark the event row `DATA_GAP`; the next unique valid row starts a new
+segment at `NOT_READY` and is accepted as that segment's first statistical
+sample/candidate anchor. A ready-bit drop after an active segment also breaks
+the segment. `ZERO_CAL_RUNNING` and nonzero reserved bits end the old segment
+but remain diagnostic `EVALUATING` until clear, after which a new segment starts.
+Duplicate sequence and continuity-preserving overrun are advisories and do not
+advance/reset continuity state. Cumulative evidence never resets when the live
+state recovers.
+
+Sequence delta uses unsigned 16-bit modular arithmetic: 0 is a duplicate only
+when tick and all 18 raw words are unchanged, 1 is next, 2 through 32767 is a
+forward gap, and the upper half is rollback/restart territory. Device tick uses
+unsigned 32-bit modular delta; the lower nonzero half unwraps forward and the
+upper half is rollback/restart. For forward sequence delta `d`, the firmware
+baseline requires exactly `d * 100 ms`; mismatch is
+`DEVICE_TIME_DISCONTINUITY`. Unwrapped tick is monotonic within a segment only.
+
+The raw CSV stores one row for every logical poll attempt, including timeout,
+CRC, exception-response, torn-reread failure, and program-error rows, rather
+than only accepted statistical samples. To reuse the existing Test Records
+curve and data viewer, its first columns are `captured_at`, `elapsed_s`, and
+`sample_index`. `captured_at` is the UTC poll-completion time and is always
+present; `elapsed_s` is monotonic time from run start; `sample_index` equals the
+one-based logical poll index. `host_receive_time` is nullable and present only
+when at least one response arrived.
+
+Additional evidence includes scheduled elapsed time, schedule lag, request
+start/duration, physical-request and torn-reread counts, response status, error
+code/message, initial and reread raw words, raw/unwrapped device time,
+continuous segment, sequence and sequence delta, status bits, valid count, DSP
+statistics, official zero offset, zero drift, snapshot consistency,
+communication gap, poll overrun, missed schedule slots, and the
+statistics-acceptance flag. Rows also store reserved status bits, segment-break
+reason, analysis state, state reason codes, and advisory codes. Failed rows
+leave device and measurement fields null rather than copying the previous
+snapshot.
+
+The raw artifact uses `curve_type=zero_monitor_samples`,
+`flow_rate_parameter=live_zero_600ms`, `variable_names`, `units`, and the other
+existing generic curve metadata fields. `variable_names` contains only numeric
+series exposed by the shared viewer. The loader accepts the new curve type but
+continues to use the existing CSV parser, plot, data table, and JSON package
+path; no separate zero-monitor history viewer or synonymous primary/sample
+variable metadata fields are introduced.
+
+Optional generic curve metadata sets
+`x_axis_variable=device_tick_ms_unwrapped`, `x_axis_unit=ms`,
+`x_axis_scope=continuous_segment`, and
+`segment_variable=continuous_segment`. The shared viewer splits traces at
+segment boundaries, defaults to the latest segment, never bridges missing/error
+rows, and retains all rows in the data table. Older artifacts without these
+keys keep the captured-at/single-segment fallback.
+
+Capture writes a same-directory `.csv.partial` file under the run artifact
+folder and stores its relative path in the running RunSession snapshot. The
+writer flushes and fsyncs at least once per second and on every terminal path.
+Finalization closes and atomically renames it to `.csv` before checksum and
+artifact metadata are saved. Runtime memory contains only the visible plot
+ring and independent candidates inside `Tlong`, never all raw poll rows.
+
+Startup recovery inspects only recorded partial paths inside the artifact root
+for zero-monitor runs left in `running`. A nonempty partial becomes an artifact
+with `complete=false`, `recovered=true`, and
+`recovery_reason=unclean_shutdown`, plus a diagnostic analysis result with null
+pass/fail whenever any poll row exists; if every row failed, numeric metrics
+remain null while error counts are retained. Empty partials create neither
+artifact nor analysis. The capture/attempt/run finish as error and cannot
+resume. The design loss window for an unclean process or power failure is less
+than one second.
+
+The analysis result uses result type `modbus_zero_monitor_stability` and stores
+independent-window candidate count, long mean, sample repeatability standard
+deviation, full max-min range, separate linear P95-P5 robust range, trend,
+trend span, maximum step,
+adjacent-difference RMS, configured thresholds, final state, state reason
+codes, offset-check status, and advisory codes.
+It also stores the final stable-duration value and calculation-method version.
+Its pass/fail decision remains null while required thresholds are absent or
+unit-incompatible, zero-flow context is unconfirmed, or ByteOrder is unverified.
+
+Final lifecycle mapping is fixed as follows:
+
+- A normal operator Stop is not cancellation.
+- `STABLE` produces a passed run, passed analysis step, passed attempt, and
+  `pass_fail_decision=passed`.
+- `UNSTABLE` produces a failed run, failed analysis step, failed attempt, and
+  `pass_fail_decision=failed`.
+- A normal Stop ending in `NOT_READY`, `EVALUATING`, or `DATA_GAP` produces a
+  completed run, completed analysis step, completed attempt, and null pass/fail.
+- Operator close/cancel produces a canceled run and attempt. Existing rows are
+  retained and analyzed diagnostically with null pass/fail; with no rows, the
+  analysis step is skipped and no analysis result or artifact is created.
+- Disconnect, communication failure, or program error produces an error run,
+  capture step, and attempt. Existing rows are retained with a diagnostic
+  analysis result and null pass/fail; with no rows, analysis is skipped and no
+  analysis result or artifact is created.
+
+On finalization, the artifact is stored first, then the analysis result and
+step outcomes, then the operation attempt, and the terminal RunSession status
+is written last. This ordering prevents a normally completed run from becoming
+visible without its required evidence references.
+
+Ten-hertz snapshot rows remain in the CSV artifact instead of
+`variable_samples`; SQLite stores structured summary and provenance only.
 
 ### Modbus Trial Record
 Stores each manual error/repeatability trial independently from the final
@@ -371,14 +623,15 @@ Foreign keys bind trials to runs and devices, including the matching
 `(run_id, device_id)` pair, and bind advance profiles to devices and source
 analysis results. Database initialization enables foreign-key enforcement.
 
-### Schema v3 To v4 Migration
-Initialization creates schema v5 for new databases and migrates schema v3 in
-one transaction. The migration creates both filling tables and their indexes,
-preserves existing rows, converts legacy timestamps used for backfill to UTC,
-and inserts missing shared `devices` rows for orphan
-`modbus_device_profiles.device_id` values as `modbus_rtu`. It records migration
-version 4 only after all steps succeed and rejects databases newer than the
-supported schema version.
+### Schema Migration Compatibility
+
+Initialization creates schema v6 for new databases and upgrades supported
+schema v3-v5 databases in one transaction. It creates both filling tables and
+their indexes, preserves existing rows, converts legacy timestamps used for
+backfill to UTC, inserts missing shared `devices` rows for orphan
+`modbus_device_profiles.device_id` values as `modbus_rtu`, and migrates inline
+profile maps into the v6 register-map catalog. It records version 6 only after
+all steps succeed and rejects databases newer than the supported schema.
 
 ### Artifact
 Represents a file linked to a run, step, or result.
@@ -439,6 +692,8 @@ Initial formats:
 - CSV for simple tabular exports.
 - JSON for configuration snapshots, simulator scenarios, and workflow templates.
 - JSON for standalone Modbus calibration-history transfer packages between lab PCs.
+- CSV for Modbus zero-monitor snapshots, with JSON-serializable artifact
+  metadata for units, primary series, threshold snapshot, and continuity.
 - JSON for ASIO/IIS loopback diagnostics.
 - SQLite for metadata and small structured results.
 - Plain text or JSON lines for diagnostic logs.

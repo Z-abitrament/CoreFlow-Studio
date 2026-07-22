@@ -11,9 +11,10 @@ independent from the main simulator/replay device list and keeps its own
 connection state, variable map, operation dialogs, communication-frame log, and
 test-record browser.
 
-This document covers implemented operation logic only. It does not define
-production transmitter register maps, production calibration acceptance
-thresholds, fixture timing, or customer report templates.
+This document covers implemented operation logic and clearly labeled approved
+designs that are pending implementation. It does not define production
+transmitter register maps, production calibration acceptance thresholds,
+fixture timing, or customer report templates.
 
 ## Shared Operation Context
 
@@ -51,10 +52,12 @@ The operator first creates or selects a `Device Profile`. The main Modbus
 window keeps this compact: it shows the profile selector, `New Profile`,
 `Edit Profile`, `Delete`, connection controls, and a `Live Variables` table.
 The global `All Test Records` browser remains available from the `Operations`
-menu. The profile dialog owns the stable device ID,
-device metadata, and full register-map configuration. Selecting a saved profile
-loads its device metadata, connection settings, and register-map configuration
-into the Modbus window. When the module opens, it automatically selects the
+menu. The profile dialog owns the stable device ID, device metadata, and
+binding to a versioned register list. Selecting a saved profile loads its
+device metadata, connection settings, and resolved register-map configuration
+into the Modbus window. Register lists are independent from transmitter, tube,
+and device models and may be shared by multiple Device IDs. When the module
+opens, it automatically selects the
 most recently used saved profile when that profile still exists, so operators
 do not need to reselect the same device every time. Deleting a profile removes
 only the reusable profile
@@ -86,6 +89,13 @@ disconnected. It defines:
 - scale
 - unit
 - writable flag
+
+The profile dialog can select an existing list ID/version or create a named
+list. Editing an existing custom or legacy list creates a new version for the
+current Device ID. Official versions are immutable and must be cloned before
+editing. Client updates install new official versions without silently
+switching existing Device IDs. Existing inline profile maps migrate into
+deduplicated legacy list entries; historical snapshots are never rewritten.
 
 The main window's `Live Variables` table deliberately hides the register kind,
 address, word count, data type, scale, unit, and writable columns because those
@@ -199,6 +209,148 @@ modbus_variable_sampling
 
 Workflow operations continue to read configured variables internally and store
 operation-specific raw Modbus polling curves as artifacts.
+
+## Real-Time Zero Monitor
+
+Implementation status: Phase 1-3 and the Phase 4 online test harness are
+implemented in version `0.8.0`; real-device evidence remains pending. See
+`docs/MODBUS_ZERO_MONITOR.zh-CN.md` for the complete register, analysis, UI,
+storage, and validation contract.
+
+`Operations > Zero Monitor` will open a non-modal read-only operation inside
+the existing Modbus Module. It reuses the active Device Profile and connection,
+but validates a dedicated set of zero-snapshot logical variables before start.
+Each 100 ms poll reads the complete snapshot as one contiguous 18-register
+request. The current generic Variable Sampling loop is not used directly
+because it performs per-variable reads and cannot guarantee snapshot coherence.
+
+The monitor uses a narrow Modbus block-reader capability and overrides
+transport retries to zero for this operation. Success and transport failure use
+one physical request per logical poll; only a begin/end sequence mismatch may
+trigger one immediate full-block reread. Requests never overlap, and late polls
+skip elapsed schedule slots instead of issuing catch-up bursts. Other Modbus
+operations continue to use the connection retry setting.
+
+The block's absolute address and register kind come from the Device Profile,
+but its 11 field offsets, order, types, and word counts are fixed protocol
+invariants covering exactly 18 unique words. Start-time validation rejects any
+gap, overlap, alias, unrelated block mapping, mixed kind, writable field, or
+wrong type/count/scale/unit before device I/O. Missing `zero_offset` disables
+only the offset advisory. The reviewed ABCD-default firmware map is
+`config/register_maps/krohne_prj_main.json`.
+
+When mapped, the 16-bit device ByteOrder enum is read before run creation and
+must match all 32-bit snapshot fields and `zero_offset`. Mismatch, invalid enum,
+or read failure blocks start without changing either side. If the register is
+absent, diagnostic capture is allowed with `BYTE_ORDER_UNVERIFIED`, but
+`STABLE` and pass/fail are disabled.
+The current DSP exposes this enum as a readable/writable holding register. Zero
+Monitor accepts that accurate profile flag but invokes only the read path.
+
+M16 fixes the target interval at 100 ms. The UI displays it read-only and does
+not save a per-device poll interval. Test records store the target plus observed
+monotonic mean/P50/P95/P99/maximum periods and achieved rate. Slow polling is
+reported; it never silently changes the interval, sequence-based candidate
+selection, or thresholds.
+
+The operation will:
+
+1. Read `zero_offset` once as the official baseline when available.
+2. Pause normal table polling and block conflicting Modbus operations.
+3. Check matching snapshot sequences, readiness/validity status, valid count,
+   finite values, sequence gaps, device-time wrap/restart, and poll overruns.
+4. Plot live zero, official zero, offset drift, and selected short-window
+   dispersion metrics using the shared live-plot behavior.
+5. Build non-overlapping 600 ms candidates and calculate configurable
+   long-window repeatability and drift metrics.
+6. Stream every logical poll, including failures, to the partial CSV, then
+   finalize the artifact, analysis result, and `modbus_zero_monitor` Test Record
+   when stopped.
+
+Hard communication/coherence/data faults mark their row `DATA_GAP` and force
+the next unique valid row to start a `NOT_READY` segment. Device zero
+calibration or unknown reserved status bits pause statistics in `EVALUATING`
+and isolate pre/post samples. Duplicate snapshots and continuity-preserving
+overruns are advisories that do not break the segment; cumulative quality
+counters remain visible after recovery.
+
+Live and historical zero-monitor traces use unwrapped device tick and split at
+continuous-segment boundaries; they never connect across a gap or restart. The
+shared viewer defaults to the latest segment and can show one or all segments,
+while the data table retains every host-timestamped logical poll. Legacy curve
+artifacts keep their existing captured-at fallback.
+
+The CSV keeps the shared curve artifact prefix columns `captured_at`,
+`elapsed_s`, and `sample_index`. Its metadata uses
+`curve_type=zero_monitor_samples`, `flow_rate_parameter=live_zero_600ms`,
+`variable_names`, and `units`, allowing the existing Test Records plot, data
+table, and JSON package path to be reused without a dedicated history viewer.
+
+Capture streams one row per logical poll, including failed polls, to a
+same-directory partial CSV. It flushes and fsyncs at least once per second and
+atomically finalizes before artifact registration. UI and analysis buffers are
+window-bounded. On the next startup, a nonempty partial belonging to an
+interrupted running monitor is preserved as an incomplete/recovered artifact
+and error run rather than silently discarded or presented as complete.
+
+A validated monitor start creates a stability `RunSession`, capture and
+analysis steps, and one operation attempt. Normal Stop maps `STABLE` to passed,
+`UNSTABLE` to failed, and inconclusive states to neutral completed with null
+pass/fail. Operator cancellation maps to canceled; disconnect, communication
+failure, and program failure map to error. Partial evidence is retained, while
+zero-row endings create neither an empty curve nor a fabricated analysis
+result. Artifact and analysis references are saved before the run is finalized.
+
+Long-decision presets are 30, 60, and 300 seconds; a custom value must be in the
+inclusive range 12 through 86400 seconds. A long decision is not ready until
+the continuous device-time span covers the selected window and contains at
+least 20 independent 600 ms
+candidates. A separate 10-second plot range is display-only. The 24-hour
+maximum bounds the rolling analysis window, not session duration; capture and
+CSV streaming continue until Stop.
+
+Long calculations use an inclusive device-time window, sample standard
+deviation, NumPy linear percentiles, and a device-time-centered least-squares
+slope projected across the configured window. Threshold equality passes with
+no hidden state-comparison tolerance. Stable-duration timing uses unwrapped
+device time and resets on discontinuity, invalid data, internal error, or a
+stability-criterion violation; duplicate samples, continuity-preserving poll
+overruns, and offset advisories do not reset it.
+
+The operator may collect diagnostics without confirming zero flow, but the
+state cannot become `STABLE` until zero-flow context is explicitly confirmed
+and every enabled stability criterion has a finite nonnegative limit and a
+recorded source. Seven stability criteria default to enabled; disabling one is
+explicit rather than represented by a blank limit. Thresholds are
+configuration, not hidden constants.
+
+The initial production configuration intentionally leaves all stability
+limits, optional offset limit, and minimum stable duration blank with status
+`pending_bench_approval`. Zero magnitudes/limits use `us`, slope uses `us/s`,
+and durations use seconds. Until approved bench values are entered, sessions
+remain diagnostic `EVALUATING` with null pass/fail. Test-only values can drive
+automated tests but cannot become production defaults.
+
+The optional official-zero offset limit is an independent advisory. It may
+report `OFFSET_EXCEEDED` together with `STABLE`; an unavailable offset check
+does not block the stability decision.
+
+Zero-flow confirmation is a one-run operator assertion. It is set before
+Start, locked while the monitor runs, captured with operator/time/device,
+profile, and register-map identity, and cleared after any terminal outcome or
+context change. It is never restored from per-device settings. Moving from an
+unconfirmed diagnostic capture to confirmed evaluation requires a new run, so
+earlier samples cannot affect a stable conclusion.
+
+The monitor never writes `ZeroOffset` and never sends a calibration trigger.
+Its `Zero Cal...` command only opens the existing guarded Zero Calibration
+dialog after monitoring has stopped.
+
+Test-record operation name:
+
+```text
+modbus_zero_monitor
+```
 
 ## Zero Calibration
 
@@ -525,6 +677,7 @@ are derived from Modbus operation-attempt rows and remain compatible with older
 run/analysis history rows. These operation names are shown:
 
 - `zero_calibration`
+- `modbus_zero_monitor`
 - `k_factor_calibration_capture`
 - `k_factor_calibration`
 - `manual_error_repeatability_trial`
@@ -653,6 +806,8 @@ Excel export is reserved for a later release.
 Future edits must preserve these rules:
 
 - Do not write device parameters without write guard and audit logging.
+- Do not convert a zero-monitor value or stability state into an automatic
+  `ZeroOffset` write or calibration trigger.
 - Do not silently treat placeholder register maps as production maps.
 - Keep operation metadata snapshots stable for the history entry being written.
 - Keep runtime logic testable without the Qt UI.

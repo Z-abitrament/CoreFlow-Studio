@@ -149,11 +149,23 @@ class ModbusRtuFlowmeterDevice(FlowmeterDevice):
         parameter_names: tuple[str, ...],
         *,
         merge_adjacent: bool = False,
+        transport_retry_count: int | None = None,
     ) -> tuple[ConfigurationParameter, ...]:
         """Read only selected configured parameters."""
 
         if merge_adjacent:
-            return self._read_configuration_parameters_merged(parameter_names)
+            return self._read_configuration_parameters_merged(
+                parameter_names,
+                transport_retry_count=transport_retry_count,
+            )
+        if transport_retry_count is not None:
+            return tuple(
+                self._configuration_parameter_with_retry(
+                    self._register_map.by_name(name),
+                    transport_retry_count=transport_retry_count,
+                )
+                for name in parameter_names
+            )
         return tuple(
             self._configuration_parameter(self._register_map.by_name(name))
             for name in parameter_names
@@ -314,11 +326,39 @@ class ModbusRtuFlowmeterDevice(FlowmeterDevice):
         value = self._read_register(register)
         return self._configuration_parameter_from_value(register, value)
 
+    def _configuration_parameter_with_retry(
+        self,
+        register: ModbusRegister,
+        *,
+        transport_retry_count: int,
+    ) -> ConfigurationParameter:
+        words = self._read_words(
+            register.kind,
+            register.address,
+            register.word_count,
+            transport_retry_count=transport_retry_count,
+        )
+        return self._configuration_parameter_from_value(
+            register,
+            decode_registers(register, words),
+            raw_words=words,
+        )
+
     def _configuration_parameter_from_value(
         self,
         register: ModbusRegister,
         value: Any,
+        *,
+        raw_words: list[int] | None = None,
     ) -> ConfigurationParameter:
+        metadata: dict[str, Any] = {
+            "register_kind": register.kind.value,
+            "address": register.address,
+            "word_count": register.word_count,
+            "data_type": register.data_type.value,
+        }
+        if raw_words is not None:
+            metadata["raw_words"] = list(raw_words)
         return ConfigurationParameter(
             name=register.name,
             value=value,
@@ -326,32 +366,37 @@ class ModbusRtuFlowmeterDevice(FlowmeterDevice):
             writable=register.writable,
             minimum=register.minimum,
             maximum=register.maximum,
-            metadata={
-                "register_kind": register.kind.value,
-                "address": register.address,
-                "word_count": register.word_count,
-                "data_type": register.data_type.value,
-            },
+            metadata=metadata,
         )
 
     def _read_configuration_parameters_merged(
         self,
         parameter_names: tuple[str, ...],
+        *,
+        transport_retry_count: int | None = None,
     ) -> tuple[ConfigurationParameter, ...]:
         registers = [self._register_map.by_name(name) for name in parameter_names]
         values: dict[str, Any] = {}
+        raw_values: dict[str, list[int]] = {}
         for group in _contiguous_register_groups(registers):
             start = group[0].address
             end = max(register.address + register.word_count for register in group)
-            words = self._read_words(group[0].kind, start, end - start)
+            words = self._read_words(
+                group[0].kind,
+                start,
+                end - start,
+                transport_retry_count=transport_retry_count,
+            )
             for register in group:
                 offset = register.address - start
                 raw_words = words[offset : offset + register.word_count]
                 values[register.name] = decode_registers(register, raw_words)
+                raw_values[register.name] = raw_words
         return tuple(
             self._configuration_parameter_from_value(
                 self._register_map.by_name(name),
                 values[name],
+                raw_words=raw_values[name],
             )
             for name in parameter_names
         )
@@ -361,9 +406,18 @@ class ModbusRtuFlowmeterDevice(FlowmeterDevice):
         kind: RegisterKind,
         address: int,
         count: int,
+        *,
+        transport_retry_count: int | None = None,
     ) -> list[int]:
         last_error: str | None = None
-        for _attempt in range(self._config.retry_count + 1):
+        retry_count = (
+            self._config.retry_count
+            if transport_retry_count is None
+            else transport_retry_count
+        )
+        if retry_count < 0:
+            raise ValueError("transport_retry_count must be nonnegative.")
+        for _attempt in range(retry_count + 1):
             self._request_count += 1
             response = self._transport.read_registers(
                 kind,

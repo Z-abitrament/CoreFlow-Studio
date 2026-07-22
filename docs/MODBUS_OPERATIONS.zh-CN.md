@@ -6,7 +6,7 @@
 
 独立 `Modbus Module` 是一个直接操作 Modbus RTU 从机的主站窗口。它独立于主窗口中的模拟器/回放设备列表，并维护自己的连接状态、变量映射、操作弹窗、通信帧日志和测试记录浏览器。
 
-本文档只覆盖已经实现的操作逻辑。它不定义生产用变送器寄存器表、生产校准合格阈值、夹具时序或客户报告模板。
+本文档覆盖已经实现的操作逻辑，以及明确标记为尚待实现的已批准设计。它不定义生产用变送器寄存器表、生产校准合格阈值、夹具时序或客户报告模板。
 
 ## 共享操作上下文
 
@@ -143,6 +143,106 @@ modbus_variable_sampling
 ```
 
 工作流操作仍会在内部读取配置变量，并把与该操作相关的原始 Modbus 轮询曲线保存为 artifact。
+
+## 实时零点监视
+
+实现状态：M16 Phase 1-3及Phase 4只读联机测试代码已在`0.8.0`实现；真实设备证据仍待执行。完整的寄存器、分析、界面、存储和验证约定见 `docs/MODBUS_ZERO_MONITOR.zh-CN.md`。
+
+`Operations > Zero Monitor` 将在现有 Modbus Module 中打开独立的非模态只读操作。它复用当前 Device Profile 和连接，但启动前会校验专用零点快照逻辑变量。每个100 ms周期必须通过一次连续18寄存器请求读取完整快照。现有通用 Variable Sampling 逐变量读取循环不能直接承担该操作，因为它无法保证快照一致性。
+
+监视服务通过小型Modbus块读取capability复用合并读取，并把本操作的传输重试
+覆盖为0。正常响应和传输失败每个逻辑周期都只有一次物理请求；只有首尾序号不
+一致时允许立即完整重读一次。请求不得重叠，超时的调度点直接跳过，不进行突发
+追赶；其他Modbus操作继续使用连接配置的重试次数。
+
+块绝对地址和register kind来自Device Profile，但11个字段的相对offset、顺序、
+类型和字数固定，必须恰好覆盖18个唯一字。任何空洞、重叠、别名、块内无关映射、
+混合kind、可写快照字段或错误类型/字数/scale/unit都在设备I/O前拒绝。缺少
+`zero_offset` 只会使offset advisory不可用，不阻止快照采集。已审查的ABCD默认
+完整主映射位于 `config/register_maps/krohne_prj_main.json`。
+
+配置了16位设备ByteOrder枚举时，在创建Run前读取并与全部32位快照字段及
+`zero_offset` 核对。不一致、非法枚举或读取失败会阻止启动且不修改任一侧；
+缺少该寄存器时允许诊断采集，但显示 `BYTE_ORDER_UNVERIFIED`，禁止
+`STABLE` 和pass/fail。
+当前DSP把ByteOrder定义为可读写holding寄存器；Profile如实标记可写不会阻止
+监视启动，但Zero Monitor始终只调用读取路径。
+
+M16目标周期固定为100 ms，界面只读显示，不保存每设备poll interval。测试记录
+保存目标值以及单调时钟实际周期mean/P50/P95/P99/max和实际频率。轮询变慢只
+报告时序质量，不静默修改目标周期、按sequence选候选的规则或阈值。
+
+操作流程：
+
+1. 可用时读取一次 `zero_offset` 作为正式零点基准。
+2. 暂停主表普通轮询，并阻止其他相互冲突的 Modbus 操作。
+3. 检查首尾序号、就绪/有效状态、有效点数、有限数值、漏读、设备时间回绕/重启和轮询超时。
+4. 复用实时曲线显示实时零点、正式零点、偏差和短期离散度。
+5. 每6个连续有效快照构造一个不重叠600 ms候选值，计算可配置的长期重复性和漂移指标。
+6. 运行中把每次逻辑轮询（包括失败轮询）持续写入partial CSV；Stop后完成artifact、analysis result和 `modbus_zero_monitor` 测试记录。
+
+通信/一致性/数据硬故障在发生行显示 `DATA_GAP`，下一条唯一有效帧以
+`NOT_READY` 新段恢复。设备零点校准或未知reserved状态位使统计暂停在
+`EVALUATING`，并隔离前后样本。重复帧和连续数据下的overrun只是advisory，
+不打断连续段；累计质量计数在状态恢复后仍保留。
+
+实时和历史零点曲线使用展开设备tick，并按continuous segment断线，绝不跨gap或
+重启连线。共享查看器默认最新段，可选择单段或全部段；数据表仍保留每个带主机
+时间的逻辑轮询行。旧曲线artifact继续使用原captured-at fallback。
+
+CSV沿用通用曲线artifact的前三列 `captured_at`、`elapsed_s` 和
+`sample_index`；元数据使用 `curve_type=zero_monitor_samples`、
+`flow_rate_parameter=live_zero_600ms`、`variable_names` 和 `units`。
+因此现有Test Records曲线、数据表和JSON导入导出路径可直接复用，不新增专用
+零点监视历史查看器。
+
+采集按每个逻辑轮询（包括失败轮询）持续追加同目录partial CSV，至少每秒
+flush并fsync一次，完成后原子重命名再登记artifact。UI和分析内存只保留各自
+窗口。下次启动发现中断run的非空partial时，将其保存为明确的incomplete/
+recovered artifact和error run，不静默丢弃，也不显示为正常完成。
+
+通过启动前校验后，每次监视创建一个stability RunSession、capture和analysis
+步骤以及一个operation attempt。正常Stop时，`STABLE` 映射为passed，
+`UNSTABLE` 映射为failed，不能形成结论的状态映射为completed且pass/fail为空；
+操作者取消映射为canceled，设备断开、通信或程序故障映射为error。已有部分证据
+必须保留，无通信记录时不创建空曲线或伪造analysis result。artifact和analysis
+引用保存完成后才能写入run终态。
+
+长期判定预设为30、60和300秒，自定义值必须在闭区间12至86400秒。连续设备
+时间覆盖所选窗口且至少存在20个独立600 ms候选后，长期判定才就绪。10秒范围
+仅用于曲线快速观察，不改变候选集合和稳定状态。24小时只限制滚动分析窗口，
+不限制采集时长；CSV持续写到Stop。
+
+长期计算采用包含边界的设备时间窗口、样本标准差、NumPy线性百分位和以设备
+时间均值为中心的最小二乘趋势，并投影到配置窗口。阈值相等视为通过，不加入
+隐藏状态容差。持续稳定计时使用展开后的设备时间；数据不连续、无效、内部错误
+或稳定性判据超限时清零，重复帧、连续数据下的poll overrun和offset advisory
+不清零。
+
+未确认零流量时允许采集诊断数据，但不能显示 `STABLE`。七项稳定性判据默认
+启用，每个启用判据必须配置有限非负limit和来源；停用必须明确保存，不能用空值
+隐式表示。所有阈值都来自配置，不能隐藏为代码常量。
+
+初始生产配置明确把全部稳定limit、可选offset limit和最小持续稳定时间留空，
+状态为 `pending_bench_approval`。零点幅值/limit单位为 `us`，slope为 `us/s`，
+时间为秒。在台架审批值录入前，会话保持诊断 `EVALUATING` 且pass/fail为空；
+test-only值不得成为生产默认值。
+
+正式零点偏差阈值是独立advisory。界面允许同时显示 `STABLE` 和
+`OFFSET_EXCEEDED`；偏差检查不可用时不阻止稳定性结论。
+
+零流量确认只绑定单次Run：操作者在Start前设置，运行期间锁定，并把操作者、
+时间、Device ID、profile和register-map身份写入Run快照。任何结束或上下文变化
+后均清除，不从每设备配置恢复。从未确认诊断切换为确认判定必须新建Run，旧样本
+不得参与稳定结论。
+
+监视操作不会写入 `ZeroOffset`，也不会发送校准触发。`Zero Cal...` 只会在监视停止后打开现有受保护零点校准界面。
+
+测试记录 operation name：
+
+```text
+modbus_zero_monitor
+```
 
 ## 零点校准
 
@@ -343,6 +443,7 @@ manual_error_repeatability_final_k
 `Test Records` 替代旧的 `Calibration History` UI 标签。测试记录来自 Modbus operation-attempt 行，并兼容旧的 run/analysis history 行。当前展示这些 operation names：
 
 - `zero_calibration`
+- `modbus_zero_monitor`
 - `k_factor_calibration_capture`
 - `k_factor_calibration`
 - `manual_error_repeatability_trial`
@@ -382,6 +483,7 @@ Excel 导出预留给后续版本。
 后续修改必须保留以下规则：
 
 - 未经过 write guard 和 audit logging，不得写入设备参数。
+- 不得把零点监视值或稳定状态转换为自动 `ZeroOffset` 写入或校准触发。
 - 不得静默地把 placeholder register map 当成生产 map 使用。
 - 已写入历史记录的 operation metadata snapshots 必须保持稳定。
 - runtime 逻辑必须保持可在没有 Qt UI 的情况下测试。

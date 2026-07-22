@@ -151,6 +151,39 @@ def build_parser() -> argparse.ArgumentParser:
         help="Append Modbus CRC16 to --modbus-raw before sending.",
     )
     parser.add_argument(
+        "--zero-monitor-online-test",
+        action="store_true",
+        help="Run the bounded read-only M16 online acceptance stage.",
+    )
+    parser.add_argument(
+        "--zero-monitor-register-map",
+        type=Path,
+        default=None,
+        help="Register-map JSON for --zero-monitor-online-test.",
+    )
+    parser.add_argument(
+        "--zero-monitor-device-id",
+        default="",
+        help="Stable Device ID for --zero-monitor-online-test.",
+    )
+    parser.add_argument(
+        "--zero-monitor-duration",
+        type=float,
+        default=30.0,
+        help="Read-only zero-monitor test duration in seconds.",
+    )
+    parser.add_argument(
+        "--zero-monitor-evidence",
+        type=Path,
+        default=None,
+        help="JSON evidence path for --zero-monitor-online-test.",
+    )
+    parser.add_argument(
+        "--zero-monitor-confirm-zero-flow",
+        action="store_true",
+        help="Record operator zero-flow confirmation for this one online test run.",
+    )
+    parser.add_argument(
         "--asio-list-devices",
         action="store_true",
         help="List ASIO driver registrations and audio devices for IIS diagnostics.",
@@ -298,6 +331,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_replay_smoke(args.replay_smoke, data_root=args.data_root)
     elif args.modbus_raw is not None:
         return run_modbus_raw_cli(args)
+    elif args.zero_monitor_online_test:
+        return run_zero_monitor_online_test_cli(args)
     elif args.asio_list_devices:
         return list_asio_devices(backend_name=args.asio_backend)
     elif args.asio_probe_native:
@@ -327,6 +362,7 @@ def should_launch_packaged_ui_by_default(args: argparse.Namespace) -> bool:
             args.write_replay_template is not None,
             args.replay_smoke is not None,
             args.modbus_raw is not None,
+            args.zero_monitor_online_test,
             args.asio_list_devices,
             args.asio_probe_native,
             args.asio_loopback_smoke,
@@ -518,6 +554,92 @@ def run_modbus_raw_cli(args: argparse.Namespace) -> int:
         return 2
     print(bytes_to_hex(response))
     return 0
+
+
+def run_zero_monitor_online_test_cli(args: argparse.Namespace) -> int:
+    """Run the M16 online stage through the same read-only runtime as the UI."""
+
+    from coreflow.app.modbus_runtime import (
+        ModbusConnectionSettings,
+        ModbusModuleRuntime,
+        ModbusOperationMetadata,
+    )
+    from coreflow.app.paths import default_user_data_root
+    from coreflow.hardware.register_map import register_map_from_json
+    from coreflow.hardware.zero_monitor_acceptance import (
+        ZeroMonitorHardwareAcceptanceRunner,
+    )
+    from coreflow.storage import Database, StorageRepository
+
+    if args.zero_monitor_register_map is None:
+        print("--zero-monitor-register-map is required.", file=sys.stderr)
+        return 2
+    device_id = str(args.zero_monitor_device_id).strip()
+    if not device_id:
+        print("--zero-monitor-device-id is required.", file=sys.stderr)
+        return 2
+    try:
+        register_map = register_map_from_json(
+            args.zero_monitor_register_map.read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError) as exc:
+        print(f"Unable to load zero-monitor register map: {exc}", file=sys.stderr)
+        return 2
+    data_root = args.data_root or default_user_data_root()
+    database = Database(data_root / "coreflow.sqlite3")
+    database.initialize()
+    runtime = ModbusModuleRuntime(
+        StorageRepository(database),
+        register_map=register_map,
+        operator="zero_monitor_online_test",
+        data_root=data_root,
+    )
+    settings = ModbusConnectionSettings(
+        port=args.modbus_port,
+        unit_id=args.modbus_unit,
+        baudrate=args.modbus_baudrate,
+        parity=args.modbus_parity,
+        stop_bits=args.modbus_stop_bits,
+        read_timeout_s=args.modbus_timeout,
+        write_timeout_s=args.modbus_timeout,
+        retry_count=args.modbus_retries,
+    )
+    runtime.save_device_profile(
+        device_id=device_id,
+        metadata=ModbusOperationMetadata(),
+        register_map=register_map,
+        connection_settings=settings,
+        display_name=device_id,
+    )
+    evidence_path = args.zero_monitor_evidence or (
+        data_root
+        / "verification"
+        / f"zero_monitor_online_{datetime.now(UTC):%Y%m%d_%H%M%S}.json"
+    )
+    try:
+        runtime.connect(settings)
+        result = ZeroMonitorHardwareAcceptanceRunner(
+            runtime,
+            evidence_path=evidence_path,
+        ).run(
+            duration_s=args.zero_monitor_duration,
+            zero_flow_confirmed=args.zero_monitor_confirm_zero_flow,
+        )
+    except Exception as exc:
+        print(f"Zero-monitor online test failed: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        if runtime.status.connected:
+            try:
+                runtime.disconnect()
+            except Exception:
+                pass
+    for check in result.checks:
+        verdict = "PASS" if check.passed else "INCOMPLETE"
+        print(f"[{verdict}] {check.check_id}: {check.message}")
+    print(f"Evidence: {result.evidence_path}")
+    print(f"Status: {result.status}")
+    return 0 if result.passed else 2
 
 
 def list_asio_devices(*, backend_name: str = "auto") -> int:

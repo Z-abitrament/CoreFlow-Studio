@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "test_only": true,
+  "scenarios": [
+    {"id": "sequence_wrap", "sequences": [65534, 65535, 0, 1], "expected": "continuous"},
+    {"id": "sequence_gap", "sequences": [10, 11, 14], "expected": "SEQUENCE_GAP"},
+    {"id": "sequence_rollback", "sequences": [300, 10], "expected": "DEVICE_RESTART"},
+    {"id": "tick_wrap", "ticks_ms": [4294967195, 4294967295, 99], "expected": "continuous"},
+    {"id": "duplicate", "sequences": [50, 50], "ticks_ms": [5000, 5000], "expected": "DUPLICATE_SNAPSHOT"},
+    {"id": "torn_then_valid", "begin_end": [[60, 61], [62, 62]], "expected_physical_requests": 2},
+    {"id": "transport_timeout", "responses": ["timeout"], "expected_physical_requests": 1}
+  ]
+}

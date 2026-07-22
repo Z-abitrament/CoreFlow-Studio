@@ -29,6 +29,7 @@ class FakeModbusTransport:
     write_errors: dict[int, str] = field(default_factory=dict)
     writes: list[tuple[int, list[int], int]] = field(default_factory=list)
     coil_writes: list[tuple[int, bool, int]] = field(default_factory=list)
+    reads: list[tuple[RegisterKind, int, int, int]] = field(default_factory=list)
 
     def connect(self) -> bool:
         self.connected = True
@@ -44,6 +45,7 @@ class FakeModbusTransport:
         count: int,
         unit_id: int,
     ) -> TransportResponse:
+        self.reads.append((kind, address, count, unit_id))
         if address in self.transient_read_errors and self.transient_read_errors[address]:
             return TransportResponse(error=self.transient_read_errors[address].pop(0))
         if address in self.read_errors:
@@ -344,3 +346,37 @@ def test_modbus_device_retries_transient_read_errors() -> None:
     assert measurement.mass_flow == 12.3
     assert diagnostics.timeout_count == 1
     assert diagnostics.successful_response_count >= 2
+
+
+def test_modbus_device_merged_read_can_disable_transport_retries_and_keeps_raw_words() -> None:
+    transport = _transport()
+    transport.registers[0] = [123, 9982, 215, 1]
+    transport.transient_read_errors[0] = ["timeout"]
+    device = _device(transport)
+    device.connect()
+
+    try:
+        device.read_configuration_parameters(
+            ("mass_flow", "density", "temperature", "device_status"),
+            merge_adjacent=True,
+            transport_retry_count=0,
+        )
+    except TimeoutError:
+        pass
+    else:
+        raise AssertionError("Expected retry-disabled read to fail once.")
+    assert transport.reads == [(RegisterKind.INPUT, 0, 4, 7)]
+
+    parameters = device.read_configuration_parameters(
+        ("mass_flow", "density", "temperature", "device_status"),
+        merge_adjacent=True,
+        transport_retry_count=0,
+    )
+
+    assert transport.reads[-1] == (RegisterKind.INPUT, 0, 4, 7)
+    assert [item.metadata["raw_words"] for item in parameters] == [
+        [123],
+        [9982],
+        [215],
+        [1],
+    ]

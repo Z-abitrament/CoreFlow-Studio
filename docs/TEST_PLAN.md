@@ -235,18 +235,48 @@ Scenarios:
 
 ID: TP-FILL-DATA-001
 
-Goal: Verify schema v5 Filling Trial persistence, migration, provenance, and
+Goal: Verify schema v6 persistence, including Filling Trial provenance and
 atomic transitions.
 
 Scenarios:
 
-- Create a fresh schema v5 database with `filling_trial_records`,
+- Create a fresh schema v6 database with `filling_trial_records`,
   `filling_advance_profiles`, history indexes, unique trial indexes, and foreign
   keys to shared devices, runs, and analysis results.
 - Migrate an existing schema v3 database without data loss; backfill orphan
   Modbus profile Device IDs into shared devices as `modbus_rtu`, normalize
   backfill timestamps to UTC, and record version 4 only after success.
-- Reject databases whose schema version is newer than v4.
+- Reject databases whose schema version is newer than v6.
+
+### M17 Modbus Register Map Library Tests
+
+ID: TP-RMAP-001
+
+Goal: Verify reusable register lists, Device ID bindings, migration, update
+installation, and history compatibility without hardware access.
+
+Scenarios:
+
+- Migrate inline profile maps into deterministic legacy catalog rows and
+  deduplicate identical definitions by normalized SHA-256.
+- Bind multiple Device IDs to one list ID/version and preserve inline effective
+  snapshots for compatibility.
+- Edit one custom or legacy binding into a new version without changing another
+  Device ID or any completed session/attempt snapshot.
+- Reject different content under an existing official ID/version and require a
+  custom clone before editing an official list.
+- Install packaged official JSON versions idempotently without rebinding an
+  existing Device ID.
+- Parse active Krohne DSP address/access/kind declarations while ignoring
+  commented-out mappings; fail extraction for unmodeled symbols or width/table
+  disagreements, and reproduce the checked-in `krohne-prj-main` JSON exactly.
+- Confirm the generated Krohne main list covers every active DSP mapping plus
+  the reviewed client `mass_rate` alias, records the DSP source commit, and
+  contains the zero-monitor block without a separate specialized list.
+- Open Device Profile through the operator path, select an existing list or
+  create a new list ID/name/version, and preview added/removed/modified rows.
+- Confirm all catalog/profile changes are disconnected-only and generate no
+  Modbus requests or device writes.
 - Persist and query trials by run and Device ID, the latest calculated trial,
   and multiple immutable same-condition profiles for one flowmeter.
 - Preserve source Trial IDs, source analysis-result IDs, full configuration
@@ -327,6 +357,194 @@ calculate regular and advance trials, calculate repeatability, set an advance,
 and inspect history. It must not connect to or operate pulse, controller, valve,
 serial, Modbus, or ASIO/IIS hardware.
 
+### M16 Modbus Zero Monitor Tests
+
+ID: TP-ZMON-001
+
+Goal: Verify the read-only Modbus zero-monitor operation from coherent protocol
+snapshot through live UI, stored artifact, and reproducible analysis.
+
+Scenarios:
+
+- Load committed fixtures only from
+  `tests/fixtures/modbus_zero_monitor/`. Verify their schema and provenance
+  identify the approved `Krohne_prj` PC tests, map definition, and upload code;
+  CI must not require the external firmware worktree.
+- Assert the literal firmware vectors cover PDU address `0x005F`, 18 words,
+  input/holding readability, write rejection, unchanged 16-bit fields, and the
+  four documented raw-word encodings of float32 `12.5`. Do not generate golden
+  raw words with the decoder/encoder under test.
+- Keep host-generated wrap, gap, torn-read, invalid-value, timing, metric, and
+  state fixtures separate and mark all synthetic thresholds as test-only.
+  Firmware source/hash or expected-value changes require an explicit fixture
+  review; tests must never refresh golden values automatically.
+- Validate the exact relative layout while allowing a configurable absolute
+  block start. Reject missing or duplicate variables, wrong relative order,
+  gaps, overlaps, aliases/unrelated mappings inside the block, incorrect data
+  types, word counts, scales or units, mixed register kinds, and writable
+  snapshot fields. Validate an available `zero_offset` as float32/2 words,
+  scale 1.0, unit `us`, and matching byte/word order. Assert each
+  failure returns all applicable structured errors, emits no device request,
+  and stores only an unlinked error attempt.
+- Accept an exact-layout block configured wholly as input or wholly as holding,
+  but never auto-switch FC03/FC04. Verify missing `zero_offset` still allows
+  capture and reports offset checking unavailable.
+- Map device ByteOrder enum 0/1/2/3 exactly to big-big, little-big, big-little,
+  and little-little. Verify all four matches, all mismatch combinations, invalid
+  enum, and read failure. Mismatch/invalid/failure emits no snapshot request,
+  creates no run, records an unlinked error attempt, and never edits device or
+  profile configuration. Accept the current DSP's FC03 holding/RW ByteOrder
+  register because the monitor only reads it.
+- With no `modbus_byte_order` logical register, allow diagnostic capture but
+  persist/display `BYTE_ORDER_UNVERIFIED`, remain `EVALUATING`, and produce no
+  pass/fail. Verify the startup byte-order read uses normal connection retries,
+  while 10 Hz block reads still override transport retries to zero.
+- Use a fake block reader to prove a normal poll and each timeout/CRC/exception
+  failure perform exactly one contiguous 18-register request even when the
+  connection retry count is nonzero. Verify other Modbus operations retain
+  their configured retry behavior.
+- Prove only a begin/end sequence mismatch permits one immediate complete-block
+  reread: a successful reread uses two physical requests in one logical poll,
+  while a failed or still-torn reread stops at two and records a gap.
+- Verify logical-poll, physical-request, torn-reread, transport-failure,
+  overrun, and missed-slot counters. Assert requests never overlap and a late
+  poll skips elapsed schedule points without a catch-up burst.
+- Verify the M16 target interval is the fixed 100 ms service constant, appears
+  read-only in the UI, and is absent from per-device configuration. Persist
+  `target_poll_interval_ms=100` plus monotonic start-to-start mean, P50, P95,
+  P99, maximum, and achieved-rate statistics, including null rate with fewer
+  than two poll starts.
+- Under deliberately slow fake responses, verify timing quality degrades and
+  missed slots increase without changing the target interval, selecting
+  candidates by host elapsed time, or modifying thresholds.
+- Decode the snapshot under supported byte/word-order combinations.
+- Accept only matching begin/end sequences with `BASE_READY`, `LIVE_READY`,
+  `DATA_VALID`, valid count 60, finite floating-point fields, no zero-calibration
+  or internal-error bit, and zero reserved bits. Treat LIVE-ready without
+  BASE-ready as inconsistent data.
+- Verify startup BASE/LIVE not-ready yields `NOT_READY`; invalid/count/nonfinite/
+  internal-error, failed torn reread, sequence gap, transport failure, restart,
+  or ready-bit inconsistency yields `DATA_GAP` on the event row. The next unique
+  valid row starts a new segment at `NOT_READY`, becomes its first accepted
+  sample/candidate anchor, and does not reuse old candidates. Dropping BASE or
+  LIVE readiness after an active segment also breaks that segment.
+- While `ZERO_CAL_RUNNING` is set, preserve rows and time/sequence evidence but
+  return `EVALUATING + ZERO_CAL_ACTIVE`, accept no statistics, and end the old
+  segment. Apply the same segment isolation to nonzero reserved bits with
+  `UNSUPPORTED_STATUS_BITS`; after either clears, restart from `NOT_READY`.
+- Verify duplicate sequence preserves the previous live state, does not advance
+  candidates/timer or break the segment, and adds `DUPLICATE_SNAPSHOT` advisory.
+  A continuity-preserving poll overrun behaves similarly with `POLL_OVERRUN`;
+  cumulative counters remain visible after state recovery.
+- Handle duplicate sequence, missing sequence, 16-bit sequence wrap, 32-bit
+  device-tick wrap, unexplained tick rollback, timeout, invalid data, immediate
+  torn-snapshot retry, and poll overrun deterministically.
+- Apply exact modular half-range rules for 16-bit sequence and 32-bit tick.
+  Accept a duplicate only when tick and all 18 words are unchanged; treat a
+  changed same-sequence payload as `DUPLICATE_PAYLOAD_CHANGED`. Require forward
+  tick delta to equal sequence delta times 100 ms and report
+  `DEVICE_TIME_DISCONTINUITY` otherwise. Never fabricate a cross-restart
+  unwrapped device time.
+- Select one independent 600 ms candidate every six valid published snapshots;
+  skip missing candidates and do not substitute overlapping windows.
+- Calculate live offset drift, long mean, repeatability standard deviation, full
+  `max-min` range, separate linear P95-P5 robust range, least-squares trend,
+  trend span, maximum step, and adjacent-difference RMS
+  `sqrt(0.5 * mean(diff^2))` from device time and persisted data.
+- Verify the inclusive long-window boundary, sample standard deviation with
+  `ddof=1`, NumPy linear P5/P95 interpolation, centered device-time slope in
+  value-per-second units, configured-window trend span, and threshold equality
+  as passing. Metric assertions use explicit test tolerances, while state
+  comparisons use no hidden epsilon.
+- Offer 30, 60, and 300 second long-decision presets, accept inclusive custom
+  boundaries 12 and 86400 seconds, reject 11.999 and 86400.001 seconds, and
+  keep a 10-second plot range independent from analysis.
+  Assert `NOT_READY` with 19 independent candidates and long-window readiness
+  only after both the selected device-time span and at least 20 candidates are
+  present; never fill a missing candidate with an overlapping window.
+- Return `NOT_READY`, `DATA_GAP`, `EVALUATING`, `STABLE`, or `UNSTABLE` with
+  reason codes; never return `STABLE` without confirmed zero-flow context and
+  configured required thresholds.
+- Default all seven stability criteria to enabled; require finite nonnegative
+  limits and nonempty sources for every enabled criterion. Assert that missing
+  enabled configuration or zero enabled criteria yields `EVALUATING`, while an
+  explicitly disabled criterion is omitted from evaluation and reason codes.
+- Verify the initial production configuration has null limits,
+  `status=pending_bench_approval`, and no minimum stable duration, producing
+  diagnostic `EVALUATING` with null pass/fail. Reject test-only thresholds from
+  production-profile persistence and never synthesize missing defaults.
+- Verify zero magnitude limits and trend span use `us`, slope uses `us/s`, and
+  durations use seconds. A unit mismatch prevents decision evaluation; no
+  implicit unit conversion is performed, and `THRESHOLD_UNIT_MISMATCH` is
+  persisted rather than treating the criterion as disabled.
+- Keep offset checking independent: assert all enabled stability criteria may
+  produce `STABLE` together with an `OFFSET_EXCEEDED` advisory, and assert a
+  missing offset limit reports `UNAVAILABLE` without blocking `STABLE`.
+- Require finite nonnegative `minimum_stable_duration_s`. Assert the timer uses
+  unwrapped device time, reports `EVALUATING` immediately below the duration
+  boundary, and reaches `STABLE` exactly at the boundary. Reset it on gap,
+  restart, invalid/internal-error data, or enabled-criterion violation; do not
+  advance it on duplicates or reset it for a continuity-preserving overrun or
+  offset advisory.
+- Open `Operations > Zero Monitor`, start and stop from the operator path, show
+  status/quality counters and live curves, inspect point details, and preserve
+  per-device configuration without persisting the zero-flow confirmation.
+- Allow zero-flow confirmation only before Start, persist its operator, time,
+  Device ID, profile ID, and register-map checksum in the run snapshot, and
+  lock it while monitoring. Clear it after Stop/cancel/error, reconnect,
+  Device ID/profile/register-map change, and dialog reopen.
+- Verify an unconfirmed run remains diagnostic and never reaches `STABLE`.
+  Switching to confirmed evaluation must create a new run and must not reuse
+  candidates or stable-duration time from the unconfirmed run.
+- Pause normal polling and disable conflicting Modbus operations while the
+  monitor owns the channel; restore controls after stop, disconnect, or error.
+- Save `modbus_zero_monitor` Test Records with raw CSV and analysis metadata,
+  verify the CSV begins with `captured_at`, `elapsed_s`, and `sample_index`, and
+  verify metadata uses `curve_type=zero_monitor_samples`,
+  `flow_rate_parameter=live_zero_600ms`, `variable_names`, and `units`.
+- Stream one CSV row per logical poll to a same-directory partial file,
+  including timeout/CRC/exception/torn-reread failures with nullable measurement
+  fields and non-null completion timestamps. Verify raw-word evidence, request
+  timing/count fields, and that previous measurement values are never copied
+  into failure rows.
+- With fake clock and writer hooks, verify flush plus fsync occurs within every
+  one-second interval and on all terminal paths; finalization is an atomic
+  same-directory rename followed by checksum/artifact registration.
+- Run a long deterministic capture and assert raw-row memory does not grow with
+  run duration: the UI ring is bounded by its display range and the analysis
+  deque by `Tlong`. Simulate capture beyond 24 hours and verify CSV output
+  continues while the rolling candidate deque does not exceed the 86400-second
+  window.
+- Recover nonempty partial files for interrupted running zero-monitor runs as
+  incomplete/recovered artifacts with diagnostic null-pass/fail results and
+  error lifecycle states. A failure-only file keeps error counts with null
+  numeric metrics. A partial with no logical-poll rows produces no artifact or
+  analysis; invalid/out-of-root paths are rejected, and recovered runs cannot
+  resume.
+- Reuse the existing Test Records generic plot/data viewer for the saved
+  zero-monitor artifact, then preserve and reopen the same artifact through
+  JSON export/import without a dedicated zero-monitor history parser or view.
+- Verify optional generic viewer metadata selects unwrapped device time as the
+  x-axis, splits traces by continuous segment, defaults to the latest segment,
+  permits selecting one/all segments, omits failure rows from curves, and never
+  draws across a gap/restart. The data table still contains every logical poll;
+  legacy artifacts retain captured-at/single-segment fallback behavior.
+- Verify lifecycle persistence for normal Stop with `STABLE`, `UNSTABLE`,
+  `NOT_READY`, `EVALUATING`, and `DATA_GAP`; assert the specified run, capture
+  step, analysis step, attempt, and nullable pass/fail states.
+- Verify normal Stop after failure-only logical poll rows preserves a CSV and
+  diagnostic `DATA_GAP` analysis with null numeric metrics. Stop before the
+  first logical poll creates no artifact or analysis and ends as error.
+- Verify operator cancel and transport/program error both preserve partial CSV
+  evidence and a diagnostic analysis result when rows exist, but create no
+  empty artifact or fabricated analysis result when no logical poll row was
+  written. Verify pre-start validation failure creates only an unlinked error
+  attempt, and verify the terminal run state is persisted after evidence links.
+- Confirm `Zero Cal...` opens the existing guarded operation only after monitor
+  stop and that no monitor calculation or UI action writes `ZeroOffset`.
+- On a real device, first run read-only mapping, timing, and no-state-change
+  checks; run zero-flow bench capture as a separate, explicitly labeled stage.
+
 ### Data Integrity Tests
 ID: TP-DATA-001
 
@@ -337,11 +555,18 @@ Scenarios:
 - Create a run with raw data, processed metrics, and reports.
 - Confirm every artifact referenced in SQLite exists on disk.
 - Confirm missing artifacts are reported clearly.
+- Recover an interrupted zero-monitor partial artifact without presenting it as
+  complete or passed, and keep its checksum, recovery metadata, and error run
+  mutually consistent.
 - Confirm audit log records parameter-write attempts.
 - Store timestamped variable samples with device identity, variable name, value, unit, source channel, and optional run/step references.
 - Store standalone Modbus device profiles, test sessions, operation attempts,
   repeatability trial records, and raw Modbus polling artifact references with
   device metadata snapshots.
+- Create schema v6 register-map catalog rows, migrate and deduplicate legacy
+  inline profile maps by checksum, and preserve every historical map snapshot.
+- Bind multiple Device IDs to one map ID/version, create a new version without
+  rebinding other profiles, and reject same-ID/same-version content conflicts.
 - Export standalone Modbus test records to a portable JSON package with
   optional operation and started-at time-range filters, include operation
   attempts, trial records, artifact metadata, and embedded artifact file
@@ -385,6 +610,9 @@ Scenarios:
 - For every bug fix that changes data shown in history, reports, or detail
   panels, assert both the persisted record and the user-visible table/detail
   text.
+- Open Device Profile through the operator path, select an existing register
+  list or create a new list ID/version, preview map changes, and confirm list
+  controls are unavailable while connected.
 
 ID: TP-UI-002
 
@@ -521,6 +749,9 @@ Planned scenarios:
 - Run read-only factory test steps.
 - Validate write guards before calibration parameter writes.
 - Perform a controlled parameter write only after approval and audit logging are implemented.
+- Read the configured zero-monitor snapshot block without writes, verify the
+  observed publication rate and byte order, and preserve raw frame/artifact
+  evidence before any zero-calibration trigger is considered.
 - Enumerate the BRAVO-HD ASIO device.
 - Run the ASIO/IIS headless loopback smoke test with the paired IIS master output and slave input wiring.
 

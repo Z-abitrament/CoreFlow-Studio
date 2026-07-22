@@ -182,7 +182,23 @@ class ModbusDeviceProfileRecord:
     transmitter_model: str | None = None
     connection_settings: dict[str, Any] = field(default_factory=dict)
     register_map: dict[str, Any] = field(default_factory=dict)
+    register_map_id: str | None = None
+    register_map_version: str | None = None
     notes: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ModbusRegisterMapRecord:
+    """One immutable reusable Modbus register-map version."""
+
+    register_map_id: str
+    version: str
+    display_name: str
+    source: str
+    checksum: str
+    register_map: dict[str, Any] = field(default_factory=dict)
     created_at: datetime | None = None
     updated_at: datetime | None = None
 

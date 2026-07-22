@@ -1,10 +1,9 @@
 # CoreFlow Studio User Manual
 
 ## Scope
-This manual describes the current M15 CoreFlow Studio build, version `0.7.0`.
-The application is a Windows-first desktop tool; the M12 Windows packaging
-foundation remains in place and M15 adds the independent manual Filling Trial
-Module.
+This manual describes the current M17 CoreFlow Studio build, version `0.9.0`.
+The application is a Windows-first desktop tool. M17 adds reusable, versioned
+Modbus register lists while retaining the earlier module and packaging paths.
 
 The current desktop UI is module-centered. The main window keeps only the `Modules` menu and opens directly into the `Modbus Module` workspace by default. Use the menu to switch to `Filling Module` or `ASIO/IIS Module`. Headless simulator, replay, and export smoke paths remain available from the console diagnostics executable, but the old simulator dashboard is no longer shown in the main window.
 
@@ -78,10 +77,13 @@ The main window intentionally contains only the `Modules` menu and the active mo
 Open `Modules > Modbus Module`. The module has its own connection state, device profiles, connection dialog, variable map, Operations menu, communication-frame view, and log.
 
 - Create or select a `Device Profile` before connecting. Use `New Profile` to create a new device profile and `Edit Profile` to modify the selected one. The `Device ID` is a stable asset ID for the tested device and is independent from the Modbus RTU unit ID. Do not use simple numeric unit addresses such as `01` as device IDs. When the Modbus Module opens, it automatically selects the most recently used saved profile if it still exists.
-- A saved profile stores the device metadata, connection settings, and register map. Selecting a profile loads those fields back into the Modbus window.
-- Edit the full register map inside the profile dialog before connecting. It sets each variable's register kind, address, word count, data type, scale, unit, and writable flag. `Delete` removes the selected reusable profile, but existing device records and test records remain stored under that Device ID.
+- A saved profile stores device metadata and connection settings, and binds the Device ID to one register-list ID and version. Register lists are independent from device, transmitter, and tube models and may be shared by multiple Device IDs.
+- In the profile dialog, select an existing `Register List` or use `New List` and enter a stable list ID, display name, and version. `Preview Changes` reports added, removed, and modified rows. Editing a custom or imported list creates a new version for the current Device ID; an official list must be cloned with `New List` before editing.
+- Edit the full register list inside the profile dialog before connecting. It sets each variable's register kind, address, word count, data type, scale, unit, and writable flag. `Delete` removes only the selected reusable device profile; register lists, device records, and test records remain stored.
+- Application updates install new official register-list versions but do not silently switch existing Device IDs. Completed test records retain the full list snapshot used when they ran.
+- The package currently supplies `krohne-prj-main @ 1.0.0+f0a1b39`, extracted from the active addresses, widths, kinds, and access permissions at the corresponding DSP commit. It includes measurements, parameters, communication settings, coils, zero-monitor data, and PI drive gain. Select it explicitly for a new Device Profile; the client does not infer a binding from model text.
 - Click `Connection...` after selecting a profile to open the Modbus connection dialog. The port list is discovered automatically from connected serial adapters. Use `Refresh Ports` after plugging in or removing a USB-to-serial adapter. Use `Order` for 32-bit byte/word order such as `ABCD`, `BADC`, `CDAB`, or `DCBA`. Use `Timeout` and `Retries` to tolerate slower or occasionally missed device responses.
-- The default map includes `mass_rate`, `mass_acc`, `temperature`, `delta_t`, `zero_offset`, `k_factor`, `low_threshold`, and `zero_calibration_start`.
+- `krohne-prj-main` contains the client workflow names `mass_flow`, `mass_rate`, `mass_acc`, `temperature`, `delta_t`, `zero_offset`, `k_factor`, `low_threshold`, and `zero_calibration_start`, plus the remaining active DSP mappings.
 - The module shows a compact `Live Variables` table for runtime work. It hides register-map configuration columns and keeps variable name, poll checkbox, value, write value, and row read/write actions visible.
 - Use `Add`, `Delete`, and `Reset` in the profile dialog to maintain custom variable rows while disconnected. Saving the profile persists edited addresses, types, scales, units, writable flags, and row order with that device ID.
 - The editable profile map covers sampled variables plus the zero-calibration start coil. Disconnect before changing the map for a new connection.
@@ -266,7 +268,7 @@ Replay CSV files require a `mass_flow` column. Optional columns are `captured_at
 - Calibration Preview does not write device parameters.
 - The Modbus Module can open the selected COM port when the operator clicks `Connect` in its connection dialog.
 - Write-capable Modbus operations must go through explicit write-guard and audit behavior.
-- Real transmitter register maps, calibration formulas, fixture behavior, and acceptance thresholds must be supplied before hardware use.
+- Before using source-extracted `krohne-prj-main`, confirm the firmware commit, device byte order, and read-only online results; calibration formulas, fixture behavior, and acceptance thresholds still require separate confirmation.
 - Do not use the placeholder register map for production transmitter writes.
 
 ## Troubleshooting
@@ -304,7 +306,7 @@ $env:COREFLOW_DATA_ROOT = "D:\CoreFlowStudioData"
 ## Current Limits
 - No signed installer or MSI.
 - No production calibration formulas.
-- No production-approved hardware register map.
+- A complete DSP-source-extracted main register map is available, but it has not yet passed real-device online acceptance and does not approve production writes.
 - No armed production calibration-parameter write workflow.
 - No customer-specific report templates.
 - No real ML model execution.

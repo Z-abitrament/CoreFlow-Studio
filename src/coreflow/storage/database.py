@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 class Database:
@@ -47,6 +49,15 @@ class Database:
                 "filling_advance_profiles",
                 {"retired_at": "TEXT"},
             )
+            _ensure_columns(
+                connection,
+                "modbus_device_profiles",
+                {
+                    "register_map_id": "TEXT",
+                    "register_map_version": "TEXT",
+                },
+            )
+            _migrate_modbus_register_map_catalog(connection)
             _backfill_modbus_profile_devices(connection)
             connection.execute(
                 """
@@ -191,10 +202,29 @@ SCHEMA_STATEMENTS = (
         transmitter_model TEXT,
         connection_settings_json TEXT NOT NULL DEFAULT '{}',
         register_map_json TEXT NOT NULL DEFAULT '{}',
+        register_map_id TEXT,
+        register_map_version TEXT,
         notes TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
     )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS modbus_register_maps (
+        register_map_id TEXT NOT NULL,
+        version TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        source TEXT NOT NULL,
+        checksum TEXT NOT NULL,
+        register_map_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(register_map_id, version)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_modbus_register_maps_checksum
+    ON modbus_register_maps(checksum)
     """,
     """
     CREATE TABLE IF NOT EXISTS modbus_test_sessions (
@@ -380,6 +410,70 @@ def _backfill_modbus_profile_devices(connection: sqlite3.Connection) -> None:
             for profile in profiles
         ),
     )
+
+
+def _migrate_modbus_register_map_catalog(connection: sqlite3.Connection) -> None:
+    """Bind legacy inline profile maps without altering their saved snapshots."""
+
+    profiles = connection.execute(
+        """
+        SELECT profile_id, register_map_json, register_map_id, register_map_version
+        FROM modbus_device_profiles
+        WHERE register_map_id IS NULL OR register_map_version IS NULL
+        """
+    ).fetchall()
+    now = datetime.now(UTC).isoformat()
+    for profile in profiles:
+        try:
+            payload = json.loads(profile["register_map_json"] or "{}")
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        registers = payload.get("registers")
+        if not isinstance(registers, list) or not registers:
+            continue
+        canonical_registers = json.dumps(
+            registers,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        checksum = hashlib.sha256(canonical_registers.encode("utf-8")).hexdigest()
+        register_map_id = f"legacy-{checksum}"
+        version = "1.0.0"
+        map_name = str(payload.get("name") or "register map").strip()
+        normalized_payload = json.dumps(
+            payload,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO modbus_register_maps (
+                register_map_id, version, display_name, source, checksum,
+                register_map_json, created_at, updated_at
+            ) VALUES (?, ?, ?, 'legacy', ?, ?, ?, ?)
+            """,
+            (
+                register_map_id,
+                version,
+                f"Imported {map_name}",
+                checksum,
+                normalized_payload,
+                now,
+                now,
+            ),
+        )
+        connection.execute(
+            """
+            UPDATE modbus_device_profiles
+            SET register_map_id = ?, register_map_version = ?
+            WHERE profile_id = ?
+            """,
+            (register_map_id, version, profile["profile_id"]),
+        )
 
 
 def _legacy_timestamp_as_utc(value: str) -> str:

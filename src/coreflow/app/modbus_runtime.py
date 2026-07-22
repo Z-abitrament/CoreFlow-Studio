@@ -26,6 +26,24 @@ from coreflow.analysis.calibration import (
     calculate_k_factor,
 )
 from coreflow.app.variable_sampling import VariableSample
+from coreflow.app.modbus_zero_monitor import (
+    ModbusZeroMonitorService,
+    ZeroFlowConfirmation,
+    ZeroMonitorAnalysisConfig,
+    ZeroMonitorLiveUpdate,
+    ZeroMonitorRunResult,
+    recover_interrupted_zero_monitor_runs,
+)
+from coreflow.app.modbus_register_maps import (
+    ModbusRegisterMapCatalogEntry,
+    catalog_entry_from_record,
+    default_bundled_register_map_paths,
+    official_record_from_path,
+    register_map_checksum,
+    register_map_record,
+    suggest_custom_register_map_id,
+    validate_register_map_identity,
+)
 from coreflow.app.write_guard import WriteGuardService
 from coreflow.devices import (
     CommunicationDiagnostic,
@@ -59,6 +77,7 @@ from coreflow.storage.models import (
     DeviceRecord,
     ModbusDeviceProfileRecord,
     ModbusOperationAttemptRecord,
+    ModbusRegisterMapRecord,
     ModbusTestSessionRecord,
     ModbusTrialRecord,
     VariableSampleRecord,
@@ -254,6 +273,10 @@ class ModbusFlowSampleSeries:
     variable_names: tuple[str, ...] = ()
     units: dict[str, str] = field(default_factory=dict)
     points: tuple[ModbusTrialSamplePoint, ...] = ()
+    x_axis_variable: str | None = None
+    x_axis_unit: str | None = None
+    x_axis_scope: str | None = None
+    segment_variable: str | None = None
 
     def __post_init__(self) -> None:
         variable_names = self.variable_names
@@ -291,6 +314,28 @@ class ModbusFlowSampleSeries:
         if variable_name == self.flow_rate_parameter:
             return tuple(sample.value for sample in self.samples)
         return tuple(None for _sample in self.samples)
+
+    def x_values(self) -> tuple[float | None, ...]:
+        if self.x_axis_variable:
+            return tuple(
+                _optional_float(point.values.get(self.x_axis_variable))
+                for point in self.points
+            )
+        if not self.points:
+            return ()
+        start = self.points[0].captured_at
+        return tuple((point.captured_at - start).total_seconds() for point in self.points)
+
+    def segment_values(self) -> tuple[str, ...]:
+        if not self.segment_variable:
+            return tuple("1" for _point in self.points)
+        return tuple(
+            str(point.values.get(self.segment_variable, ""))
+            for point in self.points
+        )
+
+    def segment_ids(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(value for value in self.segment_values() if value))
 
 
 @dataclass(frozen=True, slots=True)
@@ -504,6 +549,9 @@ class ModbusDeviceProfile:
     display_name: str = ""
     connection_settings: dict[str, Any] = field(default_factory=dict)
     register_map: ModbusRegisterMap | None = None
+    register_map_id: str = ""
+    register_map_version: str = ""
+    register_map_source: str = ""
     notes: str = ""
     created_at: datetime | None = None
     updated_at: datetime | None = None
@@ -558,11 +606,19 @@ _CALIBRATION_HISTORY_WORKFLOWS = {
     "k_factor_calibration",
     "k_factor_calibration_capture",
     "modbus_variable_sampling",
+    "modbus_zero_monitor",
     "manual_error_repeatability",
     "manual_error_repeatability_final_k",
     "manual_error_repeatability_trial",
 }
-_CALIBRATION_HISTORY_STATUSES = {"passed", "captured", "failed", "canceled", "error"}
+_CALIBRATION_HISTORY_STATUSES = {
+    "passed",
+    "captured",
+    "completed",
+    "failed",
+    "canceled",
+    "error",
+}
 _RAW_CAPTURE_IMPORT_STATUS_FALLBACKS = {
     "accepted": RunStatus.PASSED,
     "captured": RunStatus.PASSED,
@@ -590,6 +646,7 @@ class ModbusModuleRuntime:
         zero_calibration_wait_s: float = 3.0,
         k_factor_post_start_sample_s: float = 3.0,
         k_factor_post_stop_delay_s: float = 3.0,
+        bundled_register_map_paths: tuple[Path, ...] | None = None,
     ) -> None:
         self._repository = repository
         default_data_root = getattr(
@@ -601,7 +658,17 @@ class ModbusModuleRuntime:
             data_root
             or (Path(default_data_root).parent if default_data_root is not None else Path.cwd())
         )
+        self._zero_monitor_recovered_run_ids = recover_interrupted_zero_monitor_runs(
+            repository,
+            self._artifact_store,
+        )
         self._register_map = register_map or build_placeholder_register_map()
+        self._register_map_install_errors: list[str] = []
+        self._install_bundled_register_maps(
+            default_bundled_register_map_paths()
+            if bundled_register_map_paths is None
+            else bundled_register_map_paths
+        )
         self._transport_factory = transport_factory
         self._frame_logger: FrameLogger | None = None
         self._operator = operator
@@ -628,8 +695,16 @@ class ModbusModuleRuntime:
         )
 
     @property
+    def zero_monitor_recovered_run_ids(self) -> tuple[str, ...]:
+        return self._zero_monitor_recovered_run_ids
+
+    @property
     def register_map(self) -> ModbusRegisterMap:
         return self._register_map
+
+    @property
+    def register_map_install_errors(self) -> tuple[str, ...]:
+        return tuple(self._register_map_install_errors)
 
     def configure_register_map(self, register_map: ModbusRegisterMap) -> None:
         if self._device is not None:
@@ -648,9 +723,23 @@ class ModbusModuleRuntime:
 
     def list_device_profiles(self) -> tuple[ModbusDeviceProfile, ...]:
         return tuple(
-            _profile_from_record(record)
+            self._profile_from_record(record)
             for record in self._repository.list_modbus_device_profiles()
         )
+
+    def list_register_maps(self) -> tuple[ModbusRegisterMapCatalogEntry, ...]:
+        return tuple(
+            catalog_entry_from_record(record)
+            for record in self._repository.list_modbus_register_maps()
+        )
+
+    def get_register_map(
+        self,
+        register_map_id: str,
+        version: str,
+    ) -> ModbusRegisterMapCatalogEntry | None:
+        record = self._repository.get_modbus_register_map(register_map_id, version)
+        return catalog_entry_from_record(record) if record is not None else None
 
     def delete_legacy_port_profiles(self) -> int:
         if self._device is not None:
@@ -668,7 +757,7 @@ class ModbusModuleRuntime:
         record = self._repository.get_modbus_device_profile(device_id)
         if record is None:
             return None
-        return _profile_from_record(record)
+        return self._profile_from_record(record)
 
     def select_device_profile(self, device_id: str) -> ModbusDeviceProfile:
         if self._device is not None:
@@ -693,6 +782,9 @@ class ModbusModuleRuntime:
         display_name: str | None = None,
         notes: str | None = None,
         select: bool = True,
+        register_map_id: str | None = None,
+        register_map_version: str | None = None,
+        register_map_display_name: str | None = None,
     ) -> ModbusDeviceProfile:
         if self._device is not None:
             raise RuntimeError("Disconnect before saving a device profile.")
@@ -700,6 +792,14 @@ class ModbusModuleRuntime:
         existing = self._repository.get_modbus_device_profile(normalized_device_id)
         metadata = metadata or self._operation_metadata
         register_map = register_map or self._register_map
+        binding = self._save_or_resolve_register_map(
+            register_map=register_map,
+            existing_profile=existing,
+            register_map_id=register_map_id,
+            register_map_version=register_map_version,
+            display_name=register_map_display_name,
+        )
+        register_map = binding.register_map
         connection_payload = (
             _connection_settings_to_payload(connection_settings)
             if connection_settings is not None
@@ -737,6 +837,8 @@ class ModbusModuleRuntime:
                 transmitter_model=metadata.transmitter_model or None,
                 connection_settings=connection_payload,
                 register_map=_register_map_payload(register_map),
+                register_map_id=binding.register_map_id,
+                register_map_version=binding.version,
                 notes=notes if notes is not None else (existing.notes if existing else None),
                 created_at=existing.created_at if existing is not None else None,
             )
@@ -751,6 +853,125 @@ class ModbusModuleRuntime:
             if saved.register_map is not None:
                 self._register_map = saved.register_map
         return saved
+
+    def _install_bundled_register_maps(self, paths: tuple[Path, ...]) -> None:
+        for path in paths:
+            try:
+                self._repository.save_modbus_register_map(
+                    official_record_from_path(path)
+                )
+            except Exception as exc:
+                self._register_map_install_errors.append(f"{path.name}: {exc}")
+
+    def _profile_from_record(
+        self,
+        record: ModbusDeviceProfileRecord,
+    ) -> ModbusDeviceProfile:
+        catalog_record = None
+        if record.register_map_id and record.register_map_version:
+            catalog_record = self._repository.get_modbus_register_map(
+                record.register_map_id,
+                record.register_map_version,
+            )
+        return _profile_from_record(record, catalog_record=catalog_record)
+
+    def _save_or_resolve_register_map(
+        self,
+        *,
+        register_map: ModbusRegisterMap,
+        existing_profile: ModbusDeviceProfileRecord | None,
+        register_map_id: str | None,
+        register_map_version: str | None,
+        display_name: str | None,
+    ) -> ModbusRegisterMapCatalogEntry:
+        requested_id = (
+            str(register_map_id).strip()
+            if register_map_id is not None
+            else str(existing_profile.register_map_id or "").strip()
+            if existing_profile is not None
+            else ""
+        )
+        requested_version = (
+            str(register_map_version).strip()
+            if register_map_version is not None
+            else str(existing_profile.register_map_version or "").strip()
+            if existing_profile is not None
+            else ""
+        )
+        checksum = register_map_checksum(register_map)
+        if bool(requested_id) != bool(requested_version):
+            raise ValueError("Register list ID and version must be supplied together.")
+        if not requested_id:
+            requested_id = suggest_custom_register_map_id(register_map)
+            requested_version = "1.0.0"
+        requested_id, requested_version = validate_register_map_identity(
+            requested_id,
+            requested_version,
+        )
+        existing_map = self._repository.get_modbus_register_map(
+            requested_id,
+            requested_version,
+        )
+        if existing_map is not None and existing_map.checksum == checksum:
+            return catalog_entry_from_record(existing_map)
+        if existing_map is not None:
+            if existing_map.source in {"official", "template"}:
+                raise ValueError(
+                    "Official register lists are immutable. Use New List before editing."
+                )
+            matching_version = next(
+                (
+                    item
+                    for item in self._repository.list_modbus_register_maps()
+                    if item.register_map_id == requested_id
+                    and item.checksum == checksum
+                ),
+                None,
+            )
+            if matching_version is not None:
+                return catalog_entry_from_record(matching_version)
+            requested_version = self._new_register_map_version(
+                requested_id,
+                requested_version,
+            )
+        normalized_map = ModbusRegisterMap(
+            name=requested_id,
+            version=requested_version,
+            registers=register_map.registers,
+        )
+        record = register_map_record(
+            register_map_id=requested_id,
+            version=requested_version,
+            display_name=(
+                str(display_name).strip()
+                if display_name not in (None, "")
+                else existing_map.display_name
+                if existing_map is not None
+                else register_map.name
+            ),
+            source="custom",
+            register_map=normalized_map,
+        )
+        self._repository.save_modbus_register_map(record)
+        return catalog_entry_from_record(record)
+
+    def _new_register_map_version(
+        self,
+        register_map_id: str,
+        base_version: str,
+    ) -> str:
+        parts = base_version.split(".")
+        if len(parts) == 3 and all(part.isdigit() for part in parts):
+            major, minor, patch = (int(part) for part in parts)
+            while True:
+                patch += 1
+                version = f"{major}.{minor}.{patch}"
+                if self._repository.get_modbus_register_map(register_map_id, version) is None:
+                    return version
+        while True:
+            version = datetime.now(UTC).strftime("%Y.%m.%d.%H%M%S%f")
+            if self._repository.get_modbus_register_map(register_map_id, version) is None:
+                return version
 
     def delete_device_profile(self, device_id: str) -> bool:
         if self._device is not None:
@@ -799,6 +1020,10 @@ class ModbusModuleRuntime:
                 "unit_id": settings.unit_id,
                 "register_map": self._register_map.name,
                 "register_map_version": self._register_map.version,
+                "register_map_id": self._selected_profile.register_map_id,
+                "register_map_catalog_version": (
+                    self._selected_profile.register_map_version
+                ),
                 "order": settings.order,
             },
         )
@@ -921,6 +1146,49 @@ class ModbusModuleRuntime:
             samples.extend(result.samples)
             errors.extend(result.errors)
         return ModbusVariableSampleResult(samples=tuple(samples), errors=tuple(errors))
+
+    def run_zero_monitor(
+        self,
+        analysis_config: ZeroMonitorAnalysisConfig,
+        *,
+        zero_flow_confirmed: bool,
+        zero_flow_confirmed_at: datetime | None = None,
+        stop_requested: Callable[[], bool] | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
+        update_callback: Callable[[ZeroMonitorLiveUpdate], None] | None = None,
+        max_polls: int | None = None,
+    ) -> ZeroMonitorRunResult:
+        """Run the specialized coherent, read-only DSP zero monitor."""
+
+        device = self._require_device()
+        if not callable(getattr(device, "read_configuration_parameters", None)):
+            raise RuntimeError(
+                "The active Modbus device does not support coherent configuration-block reads."
+            )
+        identity = self._require_identity()
+        service = ModbusZeroMonitorService(
+            repository=self._repository,
+            artifact_store=self._artifact_store,
+            reader=device,  # type: ignore[arg-type]
+            register_map=self._register_map,
+            device_id=identity.device_id,
+            operator=self._operator,
+            analysis_config=analysis_config,
+            zero_flow_confirmation=ZeroFlowConfirmation(
+                confirmed=zero_flow_confirmed,
+                operator=self._operator,
+                confirmed_at=zero_flow_confirmed_at,
+            ),
+            session_id=self._start_modbus_test_session(),
+            profile_id=self._profile_id,
+            device_metadata=self._device_metadata_snapshot(),
+        )
+        return service.run(
+            stop_requested=stop_requested,
+            cancel_requested=cancel_requested,
+            update_callback=update_callback,
+            max_polls=max_polls,
+        )
 
     def run_variable_sampling(
         self,
@@ -2841,6 +3109,7 @@ class ModbusModuleRuntime:
         if artifact.metadata.get("curve_type") not in {
             "flow_rate_samples",
             "variable_samples",
+            "zero_monitor_samples",
         }:
             raise ValueError(
                 f"Artifact is not a flow-sample curve: {normalized_artifact_id}"
@@ -2882,6 +3151,26 @@ class ModbusModuleRuntime:
             variable_names=variable_names,
             units=units,
             points=points,
+            x_axis_variable=(
+                str(artifact.metadata.get("x_axis_variable"))
+                if artifact.metadata.get("x_axis_variable")
+                else None
+            ),
+            x_axis_unit=(
+                str(artifact.metadata.get("x_axis_unit"))
+                if artifact.metadata.get("x_axis_unit")
+                else None
+            ),
+            x_axis_scope=(
+                str(artifact.metadata.get("x_axis_scope"))
+                if artifact.metadata.get("x_axis_scope")
+                else None
+            ),
+            segment_variable=(
+                str(artifact.metadata.get("segment_variable"))
+                if artifact.metadata.get("segment_variable")
+                else None
+            ),
         )
 
     def export_calibration_history(
@@ -3892,6 +4181,8 @@ class ModbusModuleRuntime:
                 transmitter_model=metadata.get("transmitter_model") or None,
                 connection_settings=_connection_settings_to_payload(settings),
                 register_map=_register_map_payload(self._register_map),
+                register_map_id=existing.register_map_id,
+                register_map_version=existing.register_map_version,
                 notes=existing.notes if existing is not None else None,
                 created_at=existing.created_at if existing is not None else None,
             )
@@ -3950,7 +4241,7 @@ class ModbusModuleRuntime:
         }
 
     def _register_map_snapshot(self) -> dict[str, object]:
-        return {
+        snapshot: dict[str, object] = {
             "name": self._register_map.name,
             "version": self._register_map.version,
             "registers": [
@@ -3971,6 +4262,17 @@ class ModbusModuleRuntime:
                 for register in self._register_map.registers
             ],
         }
+        if self._selected_profile is not None:
+            snapshot.update(
+                {
+                    "register_map_id": self._selected_profile.register_map_id,
+                    "register_map_catalog_version": (
+                        self._selected_profile.register_map_version
+                    ),
+                    "register_map_source": self._selected_profile.register_map_source,
+                }
+            )
+        return snapshot
 
     def _save_modbus_operation_attempt(
         self,
@@ -5642,7 +5944,12 @@ def _register_map_from_payload(
         return None
 
 
-def _profile_from_record(record: ModbusDeviceProfileRecord) -> ModbusDeviceProfile:
+def _profile_from_record(
+    record: ModbusDeviceProfileRecord,
+    *,
+    catalog_record: ModbusRegisterMapRecord | None = None,
+) -> ModbusDeviceProfile:
+    payload = catalog_record.register_map if catalog_record is not None else record.register_map
     return ModbusDeviceProfile(
         device_id=record.device_id,
         display_name=record.display_name or "",
@@ -5650,7 +5957,10 @@ def _profile_from_record(record: ModbusDeviceProfileRecord) -> ModbusDeviceProfi
         tube_model=record.tube_model or "",
         transmitter_model=record.transmitter_model or "",
         connection_settings=dict(record.connection_settings),
-        register_map=_register_map_from_payload(record.register_map),
+        register_map=_register_map_from_payload(payload),
+        register_map_id=record.register_map_id or "",
+        register_map_version=record.register_map_version or "",
+        register_map_source=catalog_record.source if catalog_record is not None else "",
         notes=record.notes or "",
         created_at=record.created_at,
         updated_at=record.updated_at,

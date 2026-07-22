@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "provenance": {
+    "source_project": "E:/CFM DSP - Digital Driving/visualdsppp_/Krohne_prj",
+    "observed_source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+    "random_seed": "0xC0FFEE12",
+    "source_hashes": {
+      "tests/zero_monitor/pc/test_zero_monitor.c": "59e600c469f214fb53d6daaeacc87a2198ad542276af5cad5ab161df852b6fd5",
+      "tests/zero_monitor/pc/test_zero_monitor_modbus.c": "0407bfa99f8b43c38ae49cf74cda0ebc8a819e762d95c7df65ce08734cbc3147",
+      "module/modbus_handler/mb_map_def.h": "f93a4707f67d63f4cea240627bd384aaa19bbbb368475b0c3e312367011874e0",
+      "application/flow_interaction/flow_interaction.c": "2aa077c2ca753ba05cde8fc47bab3407f719fd0fef7304523f48cc5a05f8d87b"
+    }
+  },
+  "map_index_start": "0x60",
+  "map_index_end": "0x71",
+  "pdu_start_address": "0x005F",
+  "word_count": 18,
+  "vectors": [
+    {
+      "id": "valid_abcd",
+      "order": "ABCD",
+      "raw_words": [1, 7, 0, 100, 16712, 0, 16000, 0, 16712, 0, 16128, 0, 16256, 0, 16384, 0, 60, 1],
+      "expected": {"sequence": 1, "status": 7, "tick_ms": 100, "base_mean_100ms": 12.5, "live_zero_600ms": 12.5, "valid_count": 60}
+    },
+    {
+      "id": "float_12_5_badc",
+      "order": "BADC",
+      "raw_words": [2, 7, 0, 200, 18497, 0, 18497, 0, 18497, 0, 18497, 0, 18497, 0, 18497, 0, 60, 2],
+      "expected": {"base_mean_100ms": 12.5, "live_zero_600ms": 12.5}
+    },
+    {
+      "id": "float_12_5_cdab",
+      "order": "CDAB",
+      "raw_words": [3, 7, 300, 0, 0, 16712, 0, 16712, 0, 16712, 0, 16712, 0, 16712, 0, 16712, 60, 3],
+      "expected": {"base_mean_100ms": 12.5, "live_zero_600ms": 12.5}
+    },
+    {
+      "id": "float_12_5_dcba",
+      "order": "DCBA",
+      "raw_words": [4, 7, 11265, 0, 0, 18497, 0, 18497, 0, 18497, 0, 18497, 0, 18497, 0, 18497, 60, 4],
+      "expected": {"base_mean_100ms": 12.5, "live_zero_600ms": 12.5}
+    }
+  ]
+}

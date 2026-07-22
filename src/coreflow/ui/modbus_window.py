@@ -79,6 +79,15 @@ from coreflow.protocols.modbus import (
 )
 from coreflow.storage import StorageRepository
 from coreflow.ui.workers import WorkflowTask
+from coreflow.ui.modbus_zero_monitor import ZeroMonitorDialog
+from coreflow.app.modbus_zero_monitor import (
+    ZeroMonitorLiveUpdate,
+    ZeroMonitorRunResult,
+)
+from coreflow.app.modbus_register_maps import (
+    ModbusRegisterMapCatalogEntry,
+    suggest_custom_register_map_id,
+)
 
 
 PLOT_LAYOUT_OVERLAY = "overlay"
@@ -293,6 +302,9 @@ class DeviceProfileDialog(QDialog):
         _fit_dialog_to_screen(self, 920, 640, 620, 460)
         self._last_order = "ABCD"
         self._initial_register_map: ModbusRegisterMap | None = None
+        self._catalog_entries: dict[
+            tuple[str, str], ModbusRegisterMapCatalogEntry
+        ] = {}
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -321,6 +333,38 @@ class DeviceProfileDialog(QDialog):
 
         map_group = QGroupBox("Register Map")
         map_layout = QVBoxLayout(map_group)
+        map_selector = QHBoxLayout()
+        self.registerMapCombo = QComboBox()
+        self.registerMapCombo.setObjectName("modbusProfileRegisterMapCombo")
+        self.newRegisterMapButton = QPushButton("New List")
+        self.newRegisterMapButton.setObjectName("modbusProfileNewRegisterMapButton")
+        self.previewMapChangesButton = QPushButton("Preview Changes")
+        self.previewMapChangesButton.setObjectName(
+            "modbusProfilePreviewRegisterMapChangesButton"
+        )
+        map_selector.addWidget(QLabel("Register List"))
+        map_selector.addWidget(self.registerMapCombo, 1)
+        map_selector.addWidget(self.newRegisterMapButton)
+        map_selector.addWidget(self.previewMapChangesButton)
+        map_layout.addLayout(map_selector)
+
+        map_identity = QFormLayout()
+        self.registerMapIdLineEdit = QLineEdit()
+        self.registerMapIdLineEdit.setObjectName("modbusProfileRegisterMapIdLineEdit")
+        self.registerMapIdLineEdit.setPlaceholderText("e.g. krohne_prj_main")
+        self.registerMapNameLineEdit = QLineEdit()
+        self.registerMapNameLineEdit.setObjectName(
+            "modbusProfileRegisterMapNameLineEdit"
+        )
+        self.registerMapVersionLineEdit = QLineEdit("1.0.0")
+        self.registerMapVersionLineEdit.setObjectName(
+            "modbusProfileRegisterMapVersionLineEdit"
+        )
+        map_identity.addRow("List ID", self.registerMapIdLineEdit)
+        map_identity.addRow("List Name", self.registerMapNameLineEdit)
+        map_identity.addRow("Version", self.registerMapVersionLineEdit)
+        map_layout.addLayout(map_identity)
+
         self.mapTable = VariableMapTableWidget(0, 8)
         self.mapTable.setObjectName("modbusProfileRegisterMapTable")
         self.mapTable.row_move_requested = self._move_register_row
@@ -366,6 +410,11 @@ class DeviceProfileDialog(QDialog):
         self.addVariableButton.clicked.connect(self._add_register_row)
         self.deleteVariableButton.clicked.connect(self._delete_selected_register_row)
         self.resetMapButton.clicked.connect(self._reset_register_map)
+        self.registerMapCombo.currentIndexChanged.connect(
+            self._register_map_selection_changed
+        )
+        self.newRegisterMapButton.clicked.connect(self._prepare_new_register_map)
+        self.previewMapChangesButton.clicked.connect(self._preview_register_map_changes)
         map_actions.addWidget(self.addVariableButton)
         map_actions.addWidget(self.deleteVariableButton)
         map_actions.addWidget(self.resetMapButton)
@@ -395,14 +444,43 @@ class DeviceProfileDialog(QDialog):
         metadata: ModbusOperationMetadata,
         register_map: ModbusRegisterMap,
         order: str,
+        register_maps: tuple[ModbusRegisterMapCatalogEntry, ...] = (),
+        register_map_id: str = "",
+        register_map_version: str = "",
     ) -> None:
         self._last_order = order
-        self._initial_register_map = register_map
         self.deviceIdLineEdit.setText(device_id)
         self.deviceModelLineEdit.setText(metadata.device_model)
         self.tubeModelLineEdit.setText(metadata.tube_model)
         self.transmitterModelLineEdit.setText(metadata.transmitter_model)
-        self._populate_register_map(register_map)
+        self._catalog_entries = {
+            (entry.register_map_id, entry.version): entry for entry in register_maps
+        }
+        self.registerMapCombo.blockSignals(True)
+        self.registerMapCombo.clear()
+        self.registerMapCombo.addItem("Create new register list...", None)
+        for entry in register_maps:
+            self.registerMapCombo.addItem(
+                entry.label,
+                _register_map_combo_key(entry.register_map_id, entry.version),
+            )
+        selected_key = (register_map_id, register_map_version)
+        selected_index = self.registerMapCombo.findData(
+            _register_map_combo_key(*selected_key)
+        )
+        self.registerMapCombo.setCurrentIndex(selected_index if selected_index >= 0 else 0)
+        self.registerMapCombo.blockSignals(False)
+        if selected_index >= 0:
+            self._apply_catalog_entry(self._catalog_entries[selected_key])
+        else:
+            self._initial_register_map = register_map
+            self._populate_register_map(register_map)
+            self._set_register_map_identity(
+                register_map_id=suggest_custom_register_map_id(register_map),
+                display_name=register_map.name,
+                version="1.0.0",
+                editable=True,
+            )
         self.statusLabel.setText("")
 
     def device_id(self) -> str:
@@ -418,11 +496,97 @@ class DeviceProfileDialog(QDialog):
     def register_map(self, *, order: str | None = None) -> ModbusRegisterMap:
         return self._register_map_from_ui(order=order or self._last_order)
 
+    def register_map_binding(self) -> tuple[str | None, str | None, str | None]:
+        register_map_id = self.registerMapIdLineEdit.text().strip()
+        version = self.registerMapVersionLineEdit.text().strip()
+        display_name = self.registerMapNameLineEdit.text().strip()
+        if not register_map_id:
+            return None, None, display_name or None
+        return register_map_id or None, version or None, display_name or None
+
     def set_status(self, message: str) -> None:
         self.statusLabel.setText(message)
 
+    def _register_map_selection_changed(self) -> None:
+        key = self.registerMapCombo.currentData()
+        if not isinstance(key, str) or "@" not in key:
+            self._prepare_new_register_map()
+            return
+        register_map_id, version = key.split("@", 1)
+        entry = self._catalog_entries.get((register_map_id, version))
+        if entry is not None:
+            self._apply_catalog_entry(entry)
+
+    def _apply_catalog_entry(self, entry: ModbusRegisterMapCatalogEntry) -> None:
+        self._last_order = _orders_to_order(entry.register_map)
+        self._initial_register_map = entry.register_map
+        self._populate_register_map(entry.register_map)
+        self._set_register_map_identity(
+            register_map_id=entry.register_map_id,
+            display_name=entry.display_name,
+            version=entry.version,
+            editable=False,
+        )
+        self.set_status("")
+
+    def _prepare_new_register_map(self) -> None:
+        current_map = self._register_map_from_ui(order=self._last_order)
+        self.registerMapCombo.blockSignals(True)
+        self.registerMapCombo.setCurrentIndex(0)
+        self.registerMapCombo.blockSignals(False)
+        self._initial_register_map = current_map
+        self._set_register_map_identity(
+            register_map_id=suggest_custom_register_map_id(current_map),
+            display_name="",
+            version="1.0.0",
+            editable=True,
+        )
+        self.set_status("")
+
+    def _set_register_map_identity(
+        self,
+        *,
+        register_map_id: str,
+        display_name: str,
+        version: str,
+        editable: bool,
+    ) -> None:
+        self.registerMapIdLineEdit.setText(register_map_id)
+        self.registerMapNameLineEdit.setText(display_name)
+        self.registerMapVersionLineEdit.setText(version)
+        self.registerMapIdLineEdit.setReadOnly(not editable)
+        self.registerMapNameLineEdit.setReadOnly(not editable)
+        self.registerMapVersionLineEdit.setReadOnly(not editable)
+
+    def _preview_register_map_changes(self) -> None:
+        self.set_status(self.register_map_change_summary())
+
+    def register_map_change_summary(self) -> str:
+        if self._initial_register_map is None:
+            return "Register list preview: no baseline."
+        current = self._register_map_from_ui(order=self._last_order)
+        baseline_by_name = {
+            item.name: _editable_register_signature(item)
+            for item in self._initial_register_map.registers
+        }
+        current_by_name = {
+            item.name: _editable_register_signature(item)
+            for item in current.registers
+        }
+        added = current_by_name.keys() - baseline_by_name.keys()
+        removed = baseline_by_name.keys() - current_by_name.keys()
+        modified = {
+            name
+            for name in current_by_name.keys() & baseline_by_name.keys()
+            if current_by_name[name] != baseline_by_name[name]
+        }
+        return (
+            "Register list preview: "
+            f"added={len(added)}, removed={len(removed)}, modified={len(modified)}."
+        )
+
     def _populate_register_map(self, register_map: ModbusRegisterMap) -> None:
-        registers = _ui_registers_from_map(register_map)
+        registers = list(register_map.registers)
         self.mapTable.setRowCount(len(registers))
         for row, register in enumerate(registers):
             self._populate_register_map_row(
@@ -540,8 +704,19 @@ class DeviceProfileDialog(QDialog):
         self.mapTable.setItem(row, column, item)
 
     def _register_from_row(self, row: int) -> ModbusRegister:
+        name = _required_table_text(self.mapTable, row, 0)
+        baseline = None
+        if self._initial_register_map is not None:
+            baseline = next(
+                (
+                    item
+                    for item in self._initial_register_map.registers
+                    if item.name == name
+                ),
+                None,
+            )
         return ModbusRegister(
-            name=_required_table_text(self.mapTable, row, 0),
+            name=name,
             kind=RegisterKind(_combo_text(self.mapTable, row, 1)),
             address=int(_required_table_text(self.mapTable, row, 2)),
             word_count=int(_required_table_text(self.mapTable, row, 3)),
@@ -549,11 +724,16 @@ class DeviceProfileDialog(QDialog):
             writable=_combo_text(self.mapTable, row, 7) == "true",
             scale=float(_required_table_text(self.mapTable, row, 5)),
             unit=_table_text(self.mapTable, row, 6) or None,
-            metadata={
-                "source": "modbus_module_ui_custom"
-                if self._is_variable_name_editable(row)
-                else "modbus_module_ui"
-            },
+            word_order=baseline.word_order if baseline is not None else WordOrder.BIG,
+            byte_order=baseline.byte_order if baseline is not None else ByteOrder.BIG,
+            minimum=baseline.minimum if baseline is not None else None,
+            maximum=baseline.maximum if baseline is not None else None,
+            description=baseline.description if baseline is not None else None,
+            metadata=(
+                dict(baseline.metadata)
+                if baseline is not None
+                else {"source": "modbus_module_ui_custom"}
+            ),
         )
 
     def _register_map_from_ui(self, *, order: str) -> ModbusRegisterMap:
@@ -582,6 +762,9 @@ class DeviceProfileDialog(QDialog):
                     unit=register.unit,
                     word_order=word_order,
                     byte_order=byte_order,
+                    minimum=register.minimum,
+                    maximum=register.maximum,
+                    description=register.description,
                     metadata=register.metadata,
                 )
             )
@@ -3792,6 +3975,14 @@ class CalibrationHistoryFlowPlotDialog(QDialog):
             self._plot_alignment_changed
         )
         controls.addWidget(self.plotAlignmentCombo)
+        self.segmentLabel = QLabel("Segment")
+        self.segmentCombo = QComboBox()
+        self.segmentCombo.setObjectName("modbusHistoryFlowPlotSegmentCombo")
+        self.segmentCombo.currentIndexChanged.connect(self._redraw)
+        self.segmentLabel.hide()
+        self.segmentCombo.hide()
+        controls.addWidget(self.segmentLabel)
+        controls.addWidget(self.segmentCombo)
         controls.addStretch(1)
         root.addLayout(controls)
 
@@ -3838,6 +4029,27 @@ class CalibrationHistoryFlowPlotDialog(QDialog):
             self._clear_plot_panel()
             self.variableTable.setRowCount(0)
             return
+        segment_ids = tuple(
+            dict.fromkeys(
+                segment
+                for _label, series in series_items
+                for segment in series.segment_ids()
+            )
+        )
+        self.segmentCombo.blockSignals(True)
+        self.segmentCombo.clear()
+        if segment_ids:
+            self.segmentCombo.addItem("All", "all")
+            for segment in segment_ids:
+                self.segmentCombo.addItem(f"Segment {segment}", segment)
+            self.segmentCombo.setCurrentIndex(self.segmentCombo.count() - 1)
+        self.segmentCombo.blockSignals(False)
+        show_segments = any(series.segment_variable for _label, series in series_items)
+        self.segmentLabel.setVisible(show_segments)
+        self.segmentCombo.setVisible(show_segments)
+        self.plotAlignmentCombo.setEnabled(
+            not any(series.x_axis_variable for _label, series in series_items)
+        )
         self._populate_variable_table(series_items)
         self._redraw()
 
@@ -3923,6 +4135,17 @@ class CalibrationHistoryFlowPlotDialog(QDialog):
             return
 
         units = _series_units(series_items)
+        uses_device_axis = any(
+            series.x_axis_variable for _label, series in series_items
+        )
+        x_axis_unit = next(
+            (
+                series.x_axis_unit or ""
+                for _label, series in series_items
+                if series.x_axis_variable
+            ),
+            "",
+        )
         selected_units = {units.get(name, "") for name in selected_variables if units.get(name, "")}
         left_unit = selected_units.pop() if len(selected_units) == 1 else ""
         overlay_axis_by_variable: dict[str, str] = {}
@@ -3938,7 +4161,11 @@ class CalibrationHistoryFlowPlotDialog(QDialog):
                 )
                 unit = units.get(variable_name, "")
                 plot_widget.setTitle(variable_name)
-                plot_widget.setLabel("bottom", "Aligned Time", units="s")
+                plot_widget.setLabel(
+                    "bottom",
+                    "Device Time" if uses_device_axis else "Aligned Time",
+                    units=x_axis_unit or ("s" if not uses_device_axis else None),
+                )
                 plot_widget.setLabel("left", variable_name, units=unit or None)
                 self._plot_widgets[variable_name] = plot_widget
                 self._plot_legends[variable_name] = plot_widget.addLegend(
@@ -3952,7 +4179,11 @@ class CalibrationHistoryFlowPlotDialog(QDialog):
             self.flowPlot = plot_widget
             self._plot_widgets["overlay"] = plot_widget
             self._plot_legends["overlay"] = plot_widget.addLegend(offset=(8, 8))
-            plot_widget.setLabel("bottom", "Aligned Time", units="s")
+            plot_widget.setLabel(
+                "bottom",
+                "Device Time" if uses_device_axis else "Aligned Time",
+                units=x_axis_unit or ("s" if not uses_device_axis else None),
+            )
             if len(selected_variables) == 2:
                 left_variable, right_variable = selected_variables
                 plot_widget.setLabel(
@@ -3981,43 +4212,57 @@ class CalibrationHistoryFlowPlotDialog(QDialog):
             timestamps = [sample.captured_at for sample in series.points]
             if not timestamps:
                 continue
-            start = _flow_alignment_timestamp(series, self._plot_alignment) or timestamps[0]
-            x_values = [
-                (timestamp - start).total_seconds()
-                for timestamp in timestamps
-            ]
-            if x_values:
-                max_elapsed = max(max_elapsed, max(x_values) - min(x_values))
+            if series.x_axis_variable:
+                x_values = list(series.x_values())
+            else:
+                start = _flow_alignment_timestamp(series, self._plot_alignment) or timestamps[0]
+                x_values = [
+                    (timestamp - start).total_seconds()
+                    for timestamp in timestamps
+                ]
+            numeric_x = [value for value in x_values if value is not None]
+            if numeric_x:
+                max_elapsed = max(max_elapsed, max(numeric_x) - min(numeric_x))
             sample_count += len(timestamps)
+            segment_values = series.segment_values()
+            selected_segment = self.segmentCombo.currentData() if series.segment_variable else "all"
+            available_segments = series.segment_ids() or ("1",)
             for variable_name in selected_variables:
                 y_values = series.values_for(variable_name)
-                valid_x = [
-                    x_value
-                    for x_value, y_value in zip(x_values, y_values)
-                    if y_value is not None
-                ]
-                valid_y = [
-                    y_value
-                    for y_value in y_values
-                    if y_value is not None
-                ]
-                if not valid_y:
-                    continue
-                pen = pg.mkPen(colors[curve_index % len(colors)], width=2)
-                color = colors[curve_index % len(colors)]
-                curve_index += 1
-                curve_label = (
-                    label
-                    if len(selected_variables) == 1
-                    else f"{label} - {variable_name}"
-                )
-                plot_key = (
-                    variable_name
-                    if self._plot_layout == PLOT_LAYOUT_SEPARATE
-                    else "overlay"
-                )
-                plot_widget = self._plot_widgets.get(plot_key)
-                if plot_widget is not None:
+                for segment in available_segments:
+                    if selected_segment not in (None, "all", segment):
+                        continue
+                    indexes = [
+                        point_index
+                        for point_index, segment_value in enumerate(segment_values)
+                        if segment_value == segment
+                        and point_index < len(x_values)
+                        and point_index < len(y_values)
+                        and x_values[point_index] is not None
+                        and y_values[point_index] is not None
+                    ]
+                    if not indexes:
+                        continue
+                    valid_x = [float(x_values[point_index]) for point_index in indexes]
+                    valid_y = [float(y_values[point_index]) for point_index in indexes]
+                    pen = pg.mkPen(colors[curve_index % len(colors)], width=2)
+                    color = colors[curve_index % len(colors)]
+                    curve_index += 1
+                    curve_label = (
+                        label
+                        if len(selected_variables) == 1
+                        else f"{label} - {variable_name}"
+                    )
+                    if series.segment_variable and len(available_segments) > 1:
+                        curve_label += f" - segment {segment}"
+                    plot_key = (
+                        variable_name
+                        if self._plot_layout == PLOT_LAYOUT_SEPARATE
+                        else "overlay"
+                    )
+                    plot_widget = self._plot_widgets.get(plot_key)
+                    if plot_widget is None:
+                        continue
                     axis_side = overlay_axis_by_variable.get(variable_name, "left")
                     self._plot_history_curve(
                         plot_widget,
@@ -4027,28 +4272,23 @@ class CalibrationHistoryFlowPlotDialog(QDialog):
                         name=curve_label,
                         axis_side=axis_side,
                     )
-                    spots = []
                     unit = units.get(variable_name, "")
-                    for sample_index, (timestamp, x_value, y_value) in enumerate(
-                        zip(timestamps, x_values, y_values),
-                        start=1,
-                    ):
-                        if y_value is None:
-                            continue
-                        spots.append(
-                            {
-                                "pos": (x_value, y_value),
-                                "data": {
-                                    "label": label,
-                                    "variable": variable_name,
-                                    "elapsed_s": x_value,
-                                    "captured_at": timestamp,
-                                    "value": y_value,
-                                    "unit": unit,
-                                    "sample_index": sample_index,
-                                },
-                            }
-                        )
+                    spots = [
+                        {
+                            "pos": (float(x_values[point_index]), float(y_values[point_index])),
+                            "data": {
+                                "label": label,
+                                "variable": variable_name,
+                                "elapsed_s": x_values[point_index],
+                                "captured_at": timestamps[point_index],
+                                "value": y_values[point_index],
+                                "unit": unit,
+                                "sample_index": point_index + 1,
+                                "segment": segment,
+                            },
+                        }
+                        for point_index in indexes
+                    ]
                     point_item = self._new_point_item(color=color)
                     point_item.setData(spots)
                     self._point_items.append(point_item)
@@ -4071,7 +4311,8 @@ class CalibrationHistoryFlowPlotDialog(QDialog):
                     unit = f" {units.get(variable_name, '')}" if units.get(variable_name, "") else ""
                     latest_parts.append(f"{variable_name}={values[-1]:.6g}{unit}")
             self.summaryLabel.setText(
-                f"{len(series.points)} samples | elapsed {max_elapsed:.3g} s | "
+                f"{len(series.points)} samples | span {max_elapsed:.3g} "
+                f"{x_axis_unit or 's'} | "
                 f"{_plot_layout_label(self._plot_layout)} | "
                 f"aligned at {_plot_alignment_label(self._plot_alignment).lower()} | "
                 "latest "
@@ -4451,6 +4692,7 @@ class CalibrationHistoryDialog(QDialog):
     OPERATIONS = (
         ("All", "all"),
         ("Variable Sampling", "modbus_variable_sampling"),
+        ("Zero Monitor", "modbus_zero_monitor"),
         ("Zero Calibration", "zero_calibration"),
         ("K Factor", "k_factor_calibration"),
         ("Repeatability", "manual_error_repeatability"),
@@ -5141,6 +5383,7 @@ class ModbusModuleWindow(QDialog):
         self._pending_k_factor_load_error: str | None = None
         self._pending_repeatability_load_error: str | None = None
         self._pending_variable_sampling_load_error: str | None = None
+        self._saved_zero_monitor_configuration: dict[str, object] = {}
         self._zero_snapshot_variable_names: tuple[str, ...] | None = None
         self._saved_variable_sampling_configuration: dict[str, object] = {}
         self._variable_sampling_variable_names: tuple[str, ...] | None = None
@@ -5149,6 +5392,8 @@ class ModbusModuleWindow(QDialog):
         self._k_factor_snapshot_variable_names: tuple[str, ...] | None = None
         self._k_factor_cancel_event: Event | None = None
         self._variable_sampling_cancel_event: Event | None = None
+        self._zero_monitor_stop_event: Event | None = None
+        self._zero_monitor_cancel_event: Event | None = None
         self._saved_repeatability_configuration: dict[str, object] = {}
         self._repeatability_snapshot_variable_names: tuple[str, ...] | None = None
         self._repeatability_sample_variable_names: tuple[str, ...] | None = None
@@ -5160,6 +5405,7 @@ class ModbusModuleWindow(QDialog):
         self._poll_timer.timeout.connect(self._poll_selected_variables)
         self.connectionDialog: ModbusConnectionDialog | None = None
         self.variableSamplingDialog: VariableSamplingDialog | None = None
+        self.zeroMonitorDialog: ZeroMonitorDialog | None = None
         self.zeroCalibrationDialog: ZeroCalibrationDialog | None = None
         self.kFactorDialog: KFactorCalibrationDialog | None = None
         self.repeatabilityDialog: RepeatabilityTestDialog | None = None
@@ -5173,6 +5419,7 @@ class ModbusModuleWindow(QDialog):
         legacy_profile_count = self.runtime.delete_legacy_port_profiles()
         self._load_saved_register_map()
         self._load_saved_variable_sampling_configuration()
+        self._load_saved_zero_monitor_configuration()
         self._load_saved_zero_calibration_configuration()
         self._load_saved_k_factor_configuration()
         self._load_saved_repeatability_configuration()
@@ -5182,6 +5429,13 @@ class ModbusModuleWindow(QDialog):
         self._sync_status()
         self._set_connected_controls(False)
         self._log("Ready. This module connection is independent from simulator channels.")
+        for error in self.runtime.register_map_install_errors:
+            self._log(f"Official register list ignored: {error}")
+        if self.runtime.zero_monitor_recovered_run_ids:
+            self._log(
+                "Recovered interrupted zero monitor run(s): "
+                + ", ".join(self.runtime.zero_monitor_recovered_run_ids)
+            )
         if legacy_profile_count:
             self._log(
                 f"Removed {legacy_profile_count} legacy port-derived device profile(s)."
@@ -5218,6 +5472,8 @@ class ModbusModuleWindow(QDialog):
         self.operationsMenu = self.menuBar.addMenu("Operations")
         self.sampleVariablesAction = QAction("Variable Sampling", self)
         self.sampleVariablesAction.setObjectName("modbusSampleVariablesAction")
+        self.zeroMonitorAction = QAction("Zero Monitor", self)
+        self.zeroMonitorAction.setObjectName("modbusZeroMonitorAction")
         self.zeroCalibrationAction = QAction("Zero Cal", self)
         self.zeroCalibrationAction.setObjectName("modbusZeroCalibrationAction")
         self.kFactorAction = QAction("K Factor", self)
@@ -5235,6 +5491,7 @@ class ModbusModuleWindow(QDialog):
         self.calibrationHistoryAction = self.allHistoryAction
         for action in (
             self.sampleVariablesAction,
+            self.zeroMonitorAction,
             self.zeroCalibrationAction,
             self.kFactorAction,
             self.repeatabilityAction,
@@ -5468,6 +5725,7 @@ class ModbusModuleWindow(QDialog):
         self.tubeModelLineEdit.textChanged.connect(self._update_profile_summary)
         self.transmitterModelLineEdit.textChanged.connect(self._update_profile_summary)
         self.sampleVariablesAction.triggered.connect(self._sample_variables)
+        self.zeroMonitorAction.triggered.connect(self._zero_monitor)
         self.zeroCalibrationAction.triggered.connect(self._zero_calibration)
         self.kFactorAction.triggered.connect(self._k_factor)
         self.repeatabilityAction.triggered.connect(self._repeatability)
@@ -5488,7 +5746,9 @@ class ModbusModuleWindow(QDialog):
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override name
         self._closing = True
         self._stop_polling()
-        if self._busy and self._k_factor_cancel_event is not None:
+        if self._busy and self._zero_monitor_cancel_event is not None:
+            self._cancel_zero_monitor()
+        elif self._busy and self._k_factor_cancel_event is not None:
             self._cancel_k_factor_capture()
         elif self._busy and self._repeatability_cancel_event is not None:
             self._cancel_repeatability_capture()
@@ -5556,6 +5816,7 @@ class ModbusModuleWindow(QDialog):
     def _device_profile_selection_changed(self) -> None:
         if self._loading_profiles:
             return
+        self._clear_zero_monitor_confirmation()
         device_id = self._selected_profile_device_id()
         if not device_id:
             self.deviceIdLineEdit.clear()
@@ -5586,6 +5847,7 @@ class ModbusModuleWindow(QDialog):
             self._populate_variable_map()
         self._sync_operation_metadata()
         self._load_saved_variable_sampling_configuration(device_id=profile.device_id)
+        self._load_saved_zero_monitor_configuration(device_id=profile.device_id)
         self._load_saved_zero_calibration_configuration(device_id=profile.device_id)
         self._load_saved_k_factor_configuration(device_id=profile.device_id)
         self._load_saved_repeatability_configuration(device_id=profile.device_id)
@@ -5665,6 +5927,11 @@ class ModbusModuleWindow(QDialog):
             metadata=metadata,
             register_map=register_map,
             order=self._last_order,
+            register_maps=self.runtime.list_register_maps(),
+            register_map_id=(profile.register_map_id if selected_profile_id else ""),
+            register_map_version=(
+                profile.register_map_version if selected_profile_id else ""
+            ),
         )
         self.deviceProfileDialog.show()
         self.deviceProfileDialog.raise_()
@@ -5711,11 +5978,17 @@ class ModbusModuleWindow(QDialog):
             return
         try:
             register_map = dialog.register_map(order=self._last_order)
+            register_map_id, register_map_version, register_map_display_name = (
+                dialog.register_map_binding()
+            )
             metadata = dialog.metadata()
             profile = self.runtime.save_device_profile(
                 device_id=dialog.device_id(),
                 metadata=metadata,
                 register_map=register_map,
+                register_map_id=register_map_id,
+                register_map_version=register_map_version,
+                register_map_display_name=register_map_display_name,
                 select=True,
             )
         except Exception as exc:
@@ -5726,7 +5999,7 @@ class ModbusModuleWindow(QDialog):
         self.deviceModelLineEdit.setText(profile.device_model)
         self.tubeModelLineEdit.setText(profile.tube_model)
         self.transmitterModelLineEdit.setText(profile.transmitter_model)
-        self.runtime.configure_register_map(register_map)
+        self.runtime.configure_register_map(profile.register_map or register_map)
         self._refresh_device_profiles()
         index = self.deviceProfileCombo.findData(profile.device_id)
         if index >= 0:
@@ -5850,6 +6123,11 @@ class ModbusModuleWindow(QDialog):
         ):
             if value:
                 parts.append(value)
+        profile = self.runtime.get_device_profile(device_id)
+        if profile is not None and profile.register_map_id:
+            parts.append(
+                f"{profile.register_map_id}@{profile.register_map_version}"
+            )
         self.profileSummaryLabel.setText(" | ".join(parts))
 
     def _load_saved_register_map(self) -> None:
@@ -5881,6 +6159,7 @@ class ModbusModuleWindow(QDialog):
         except Exception as exc:
             self._log(f"Save map failed: {exc}")
             return
+        self._clear_zero_monitor_confirmation()
         self._log(f"Variable map saved: {path}")
 
     def _saved_register_map_path(self) -> Path | None:
@@ -5965,6 +6244,67 @@ class ModbusModuleWindow(QDialog):
             / "devices"
             / _safe_config_name(device_id)
             / "modbus_variable_sampling.json"
+        )
+
+    def _load_saved_zero_monitor_configuration(
+        self,
+        *,
+        device_id: str | None = None,
+    ) -> None:
+        self._saved_zero_monitor_configuration = {}
+        path = self._saved_zero_monitor_configuration_path(device_id=device_id)
+        if path is None or not path.exists():
+            return
+        try:
+            settings = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(settings, dict):
+                raise ValueError("configuration root must be an object")
+            self._saved_zero_monitor_configuration = settings
+        except Exception as exc:
+            self._log(f"Saved zero monitor configuration ignored: {exc}")
+
+    def _save_zero_monitor_configuration(self) -> None:
+        dialog = self._ensure_zero_monitor_dialog()
+        path = self._saved_zero_monitor_configuration_path(
+            device_id=self._operation_configuration_device_id()
+        )
+        if path is None:
+            dialog.set_error("select a device profile before saving configuration")
+            return
+        try:
+            settings = dialog.capture_settings()
+            if any(
+                isinstance(item, dict) and item.get("test_only")
+                for item in dict(settings.get("thresholds") or {}).values()
+            ):
+                raise ValueError("Test-only thresholds cannot be saved as a device profile.")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(settings, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            dialog.set_error(str(exc))
+            self._log(f"Save zero monitor configuration failed: {exc}")
+            return
+        self._saved_zero_monitor_configuration = dict(settings)
+        dialog.statusLabel.setText("Configuration saved for current device")
+        self._log(f"Zero monitor configuration saved: {path}")
+
+    def _saved_zero_monitor_configuration_path(
+        self,
+        *,
+        device_id: str | None = None,
+    ) -> Path | None:
+        if self._data_root is None or not device_id:
+            return None
+        return (
+            self._data_root
+            / "config"
+            / "workflow_templates"
+            / "devices"
+            / _safe_config_name(device_id)
+            / "modbus_zero_monitor.json"
         )
 
     def _load_saved_zero_calibration_configuration(
@@ -6397,6 +6737,8 @@ class ModbusModuleWindow(QDialog):
 
     def _disconnect(self) -> None:
         self._stop_polling()
+        if self._zero_monitor_cancel_event is not None:
+            self._zero_monitor_cancel_event.set()
         if self._variable_sampling_cancel_event is not None:
             self._variable_sampling_cancel_event.set()
         status = self.runtime.disconnect()
@@ -6404,6 +6746,7 @@ class ModbusModuleWindow(QDialog):
         if self.connectionDialog is not None and isValid(self.connectionDialog):
             self.connectionDialog.set_status(status.message)
         self._set_controls_enabled(True)
+        self._clear_zero_monitor_confirmation()
         self._log("Disconnected")
 
     def _sample_variables(self) -> None:
@@ -6419,6 +6762,108 @@ class ModbusModuleWindow(QDialog):
             dialog.set_canceling()
         else:
             dialog.set_ready(connected=self.runtime.status.connected and not self._busy)
+
+    def _zero_monitor(self) -> None:
+        dialog = self._ensure_zero_monitor_dialog()
+        self._load_saved_zero_monitor_configuration(
+            device_id=self._operation_configuration_device_id()
+        )
+        if self._saved_zero_monitor_configuration and not self._busy:
+            try:
+                dialog.apply_configuration(self._saved_zero_monitor_configuration)
+            except Exception as exc:
+                dialog.set_error(str(exc))
+        dialog.zeroFlowCheckBox.setChecked(False)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        if self._zero_monitor_stop_event is None:
+            dialog.set_ready(connected=self.runtime.status.connected and not self._busy)
+
+    def _ensure_zero_monitor_dialog(self) -> ZeroMonitorDialog:
+        if self.zeroMonitorDialog is None or not isValid(self.zeroMonitorDialog):
+            self.zeroMonitorDialog = ZeroMonitorDialog(parent=self)
+            self.zeroMonitorDialog.startRequested.connect(self._start_zero_monitor)
+            self.zeroMonitorDialog.stopRequested.connect(self._stop_zero_monitor)
+            self.zeroMonitorDialog.cancelRequested.connect(self._cancel_zero_monitor)
+            self.zeroMonitorDialog.saveRequested.connect(
+                self._save_zero_monitor_configuration
+            )
+            self.zeroMonitorDialog.zeroCalRequested.connect(self._zero_calibration)
+        return self.zeroMonitorDialog
+
+    def _start_zero_monitor(self) -> None:
+        dialog = self._ensure_zero_monitor_dialog()
+        if self._busy:
+            dialog.set_error("another Modbus operation is running")
+            return
+        if not self.runtime.status.connected:
+            dialog.set_error("connect the Modbus module first")
+            return
+        try:
+            config = dialog.capture_configuration()
+        except Exception as exc:
+            dialog.set_error(str(exc))
+            return
+        self._stop_polling()
+        self._sync_operation_metadata()
+        stop_event = Event()
+        cancel_event = Event()
+        self._zero_monitor_stop_event = stop_event
+        self._zero_monitor_cancel_event = cancel_event
+        confirmed = dialog.zeroFlowCheckBox.isChecked()
+        confirmed_at = datetime.now(UTC) if confirmed else None
+        dialog.set_running()
+
+        def run(progress):
+            return self.runtime.run_zero_monitor(
+                config,
+                zero_flow_confirmed=confirmed,
+                zero_flow_confirmed_at=confirmed_at,
+                stop_requested=stop_event.is_set,
+                cancel_requested=cancel_event.is_set,
+                update_callback=progress,
+            )
+
+        self._run_task(
+            "Zero monitor",
+            run,
+            self._zero_monitor_finished,
+            requires_connection=True,
+            on_progress=self._zero_monitor_progress,
+        )
+
+    def _stop_zero_monitor(self) -> None:
+        if self._zero_monitor_stop_event is None:
+            return
+        self._zero_monitor_stop_event.set()
+        if self.zeroMonitorDialog is not None and isValid(self.zeroMonitorDialog):
+            self.zeroMonitorDialog.set_stopping()
+
+    def _cancel_zero_monitor(self) -> None:
+        if self._zero_monitor_cancel_event is not None:
+            self._zero_monitor_cancel_event.set()
+
+    def _zero_monitor_progress(self, message: object) -> None:
+        if not isinstance(message, ZeroMonitorLiveUpdate):
+            return
+        if self.zeroMonitorDialog is not None and isValid(self.zeroMonitorDialog):
+            self.zeroMonitorDialog.add_update(message)
+
+    def _zero_monitor_finished(self, result: object) -> None:
+        self._zero_monitor_stop_event = None
+        self._zero_monitor_cancel_event = None
+        if not isinstance(result, ZeroMonitorRunResult):
+            self._log(f"Zero monitor finished: {result}")
+            return
+        if self.zeroMonitorDialog is not None and isValid(self.zeroMonitorDialog):
+            self.zeroMonitorDialog.set_result(result)
+            self.zeroMonitorDialog.set_ready(connected=self.runtime.status.connected)
+        self._refresh_history_dialogs()
+        self._log(
+            f"Zero monitor {result.run_status.value}: "
+            f"{result.run_id or result.attempt_id}, polls={result.counters.get('logical_poll_count', 0)}"
+        )
 
     def _ensure_variable_sampling_dialog(self) -> VariableSamplingDialog:
         if (
@@ -7660,7 +8105,12 @@ class ModbusModuleWindow(QDialog):
         self._set_controls_enabled(True)
         if self.connectionDialog is not None:
             self.connectionDialog.set_status(message)
+        self._clear_zero_monitor_confirmation()
         self._log(message)
+
+    def _clear_zero_monitor_confirmation(self) -> None:
+        if self.zeroMonitorDialog is not None and isValid(self.zeroMonitorDialog):
+            self.zeroMonitorDialog.zeroFlowCheckBox.setChecked(False)
 
     def _connection_ports_finished(self, ports: object) -> None:
         if self.connectionDialog is None or not isValid(self.connectionDialog):
@@ -8249,6 +8699,12 @@ class ModbusModuleWindow(QDialog):
         ):
             self.variableSamplingDialog.set_error(message)
             self.variableSamplingDialog.set_ready(connected=self.runtime.status.connected)
+        if label == "Zero monitor":
+            self._zero_monitor_stop_event = None
+            self._zero_monitor_cancel_event = None
+            if self.zeroMonitorDialog is not None and isValid(self.zeroMonitorDialog):
+                self.zeroMonitorDialog.set_error(message)
+                self.zeroMonitorDialog.set_ready(connected=self.runtime.status.connected)
         if (
             label in {"K factor", "K factor write"}
             and self.kFactorDialog is not None
@@ -8284,6 +8740,7 @@ class ModbusModuleWindow(QDialog):
         self.saveDeviceProfileButton.setEnabled((not connected) and bool(self._selected_profile_device_id()))
         for action in (
             self.sampleVariablesAction,
+            self.zeroMonitorAction,
             self.zeroCalibrationAction,
             self.kFactorAction,
             self.repeatabilityAction,
@@ -8340,6 +8797,7 @@ class ModbusModuleWindow(QDialog):
             self.connectionDialog.set_controls_enabled(enabled and not connected)
         for action in (
             self.sampleVariablesAction,
+            self.zeroMonitorAction,
             self.zeroCalibrationAction,
             self.kFactorAction,
             self.repeatabilityAction,
@@ -8515,6 +8973,24 @@ def _is_ui_register(register: ModbusRegister) -> bool:
 
 def _is_custom_ui_register(register: ModbusRegister) -> bool:
     return register.metadata.get("source") == "modbus_module_ui_custom"
+
+
+def _editable_register_signature(register: ModbusRegister) -> tuple[object, ...]:
+    return (
+        register.kind,
+        register.address,
+        register.word_count,
+        register.data_type,
+        register.writable,
+        register.scale,
+        register.unit,
+        register.word_order,
+        register.byte_order,
+    )
+
+
+def _register_map_combo_key(register_map_id: str, version: str) -> str:
+    return f"{register_map_id}@{version}"
 
 
 def _default_zero_snapshot_names(
@@ -9041,6 +9517,7 @@ def _parse_datetime(value: str) -> datetime | None:
 def _operation_label(value: str) -> str:
     labels = {
         "zero_calibration": "Zero Calibration",
+        "modbus_zero_monitor": "Zero Monitor",
         "k_factor_calibration": "K Factor",
         "modbus_variable_sampling": "Variable Sampling",
         "manual_error_repeatability": "Repeatability",
@@ -9097,6 +9574,18 @@ def _history_parameter_summary(entry: ModbusCalibrationHistoryEntry) -> str:
                 if len(names) > 3:
                     label += ", ..."
                 values.append(f"variables={label}")
+        return ", ".join(values)
+    if entry.operation == "modbus_zero_monitor":
+        values = []
+        state = metrics.get("analysis_state")
+        if state:
+            values.append(f"state={state}")
+        polls = metrics.get("logical_poll_count")
+        if polls not in (None, ""):
+            values.append(f"polls={polls}")
+        rate = metrics.get("achieved_poll_rate_hz")
+        if isinstance(rate, (int, float)):
+            values.append(f"rate={rate:.3g} Hz")
         return ", ".join(values)
     if entry.operation == "k_factor_calibration_capture":
         values = []

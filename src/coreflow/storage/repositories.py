@@ -20,6 +20,7 @@ from coreflow.storage.models import (
     FillingTrialRecord,
     ModbusDeviceProfileRecord,
     ModbusOperationAttemptRecord,
+    ModbusRegisterMapRecord,
     ModbusTestSessionRecord,
     ModbusTrialRecord,
     RunSummary,
@@ -111,9 +112,9 @@ class StorageRepository:
                 INSERT INTO modbus_device_profiles (
                     profile_id, device_id, display_name, device_model, tube_model,
                     transmitter_model, connection_settings_json, register_map_json,
-                    notes, created_at, updated_at
+                    register_map_id, register_map_version, notes, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(profile_id) DO UPDATE SET
                     device_id=excluded.device_id,
                     display_name=excluded.display_name,
@@ -122,6 +123,8 @@ class StorageRepository:
                     transmitter_model=excluded.transmitter_model,
                     connection_settings_json=excluded.connection_settings_json,
                     register_map_json=excluded.register_map_json,
+                    register_map_id=excluded.register_map_id,
+                    register_map_version=excluded.register_map_version,
                     notes=excluded.notes,
                     updated_at=excluded.updated_at
                 """,
@@ -134,6 +137,8 @@ class StorageRepository:
                     record.transmitter_model,
                     _to_json(record.connection_settings),
                     _to_json(record.register_map),
+                    record.register_map_id,
+                    record.register_map_version,
                     record.notes,
                     _dt(created_at),
                     _dt(updated_at),
@@ -167,6 +172,75 @@ class StorageRepository:
                 """
             ).fetchall()
         return tuple(_modbus_device_profile_from_row(row) for row in rows)
+
+    def save_modbus_register_map(self, record: ModbusRegisterMapRecord) -> None:
+        now = _utc_now()
+        created_at = record.created_at or now
+        updated_at = record.updated_at or now
+        with self._database.connect() as connection:
+            existing = connection.execute(
+                """
+                SELECT checksum
+                FROM modbus_register_maps
+                WHERE register_map_id = ? AND version = ?
+                """,
+                (record.register_map_id, record.version),
+            ).fetchone()
+            if existing is not None:
+                if existing["checksum"] != record.checksum:
+                    raise ValueError(
+                        "Register map "
+                        f"{record.register_map_id}@{record.version} already exists "
+                        "with different content. Create a new version."
+                    )
+                return
+            connection.execute(
+                """
+                INSERT INTO modbus_register_maps (
+                    register_map_id, version, display_name, source, checksum,
+                    register_map_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.register_map_id,
+                    record.version,
+                    record.display_name,
+                    record.source,
+                    record.checksum,
+                    _to_json(record.register_map),
+                    _dt(created_at),
+                    _dt(updated_at),
+                ),
+            )
+
+    def get_modbus_register_map(
+        self,
+        register_map_id: str,
+        version: str,
+    ) -> ModbusRegisterMapRecord | None:
+        with self._database.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM modbus_register_maps
+                WHERE register_map_id = ? AND version = ?
+                """,
+                (register_map_id, version),
+            ).fetchone()
+        if row is None:
+            return None
+        return _modbus_register_map_from_row(row)
+
+    def list_modbus_register_maps(self) -> tuple[ModbusRegisterMapRecord, ...]:
+        with self._database.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM modbus_register_maps
+                ORDER BY display_name, register_map_id, version
+                """
+            ).fetchall()
+        return tuple(_modbus_register_map_from_row(row) for row in rows)
 
     def delete_modbus_device_profile(self, device_id: str) -> bool:
         with self._database.connect() as connection:
@@ -1410,7 +1484,22 @@ def _modbus_device_profile_from_row(
         transmitter_model=row["transmitter_model"],
         connection_settings=_from_json(row["connection_settings_json"], {}),
         register_map=_from_json(row["register_map_json"], {}),
+        register_map_id=row["register_map_id"],
+        register_map_version=row["register_map_version"],
         notes=row["notes"],
+        created_at=_parse_dt(row["created_at"]),
+        updated_at=_parse_dt(row["updated_at"]),
+    )
+
+
+def _modbus_register_map_from_row(row: sqlite3.Row) -> ModbusRegisterMapRecord:
+    return ModbusRegisterMapRecord(
+        register_map_id=row["register_map_id"],
+        version=row["version"],
+        display_name=row["display_name"],
+        source=row["source"],
+        checksum=row["checksum"],
+        register_map=_from_json(row["register_map_json"], {}),
         created_at=_parse_dt(row["created_at"]),
         updated_at=_parse_dt(row["updated_at"]),
     )

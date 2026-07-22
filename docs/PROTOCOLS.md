@@ -119,6 +119,18 @@ The application should not hard-code production register addresses in workflow c
 
 Initial register-map files should be JSON or YAML and versioned as configuration artifacts. Each workflow run must store the register-map version or snapshot used for device communication.
 
+The client register-map catalog identifies a map by stable ID plus version.
+Device Profiles bind to that pair; transmitter, tube, sensor, and device-model
+strings do not select a map. Client updates may add official map versions but
+must not silently change an existing Device Profile binding. A different
+payload under the same official ID/version is a release conflict.
+
+Current firmware does not expose a stable discovery block, so the operator
+selects the list before connection. A future read-only discovery block should
+provide a protocol marker, map ID, map version, and firmware version at fixed
+addresses. Only map ID/version may drive automatic selection; model fields are
+read afterward for metadata and consistency checks.
+
 The UI-facing variable editor should allow users to add, edit, and remove logical variables before connecting to hardware. Edits must update a configuration artifact or runtime snapshot; they must not patch protocol code.
 
 ## Measurement Register Groups
@@ -139,6 +151,8 @@ The first register-map template should reserve logical names for:
 - K factor.
 - Low threshold.
 - Zero-calibration start/status coil or parameter.
+- Zero-monitor snapshot begin/end sequence, status, device tick, 100 ms base
+  statistics, 600 ms live/dispersion statistics, and valid-count variables.
 
 These names are logical placeholders until firmware documentation provides addresses and scaling.
 
@@ -225,10 +239,110 @@ Port discovery is advisory only. The persisted device record should include the 
 The Modbus master module supports these headless workflow contracts before UI wiring:
 
 - Variable sampling: read configured logical variables and persist the value, timestamp, device identity, source channel, and optional run/step reference.
+- Real-time zero monitor: validate the configured zero-snapshot map, read the
+  complete block as one contiguous request every 100 ms, preserve sequence,
+  device-time, validity, gap, and restart evidence, and calculate long-window
+  metrics without writing the device.
 - Zero calibration: record `zero_offset` and `delta_t` before start, write the configured start coil/parameter through the write guard, poll until the configured completion state is read, then record `zero_offset`, `delta_t`, completion state, and timestamps.
 - K factor calibration: capture selected pre-operation variables, read accumulated mass `m1` and current K factor, poll the configured flow-rate variable until a non-zero flow segment starts and then returns to zero, record the instantaneous flow sample and ending accumulated mass `m2`, accept standard mass from the operator, calculate `k_s = k_r / m_r * m_s`, and apply the new value only through the write guard with readback verification when requested.
 - Error/repeatability: in Three Flow Ranges mode, run three configured target-flow ranges with three trials per range. Each trial first reads the operator-selected pre-trial variables plus the configured K factor variable, notifies the operator that the trial can start, captures accumulated mass before/after one reusable non-zero-to-zero flow segment, records the automatically read original K, `v1`, `v_mean`, and flow start/instant/end timestamps, accepts the operator's standard-scale mass, calculates trial percent error `e = (delta_m - standard_mass) / standard_mass * 100%`, and stores the trial when the operator clicks `Calculate Trial Error`; the trial Test Records timestamp is the earlier `Capture Trial` click time, while the calculation/save timestamp and the flow-segment timestamps remain stored as trial metrics. Extra trials may be appended after the base 9 trials and must not delete or overwrite earlier trial records. `Calculate Repeatability` lets the operator choose one flow point and one consecutive three-trial window from the current operation; the displayed `mean` is `(e1 + e2 + e3) / 3` for that selected flow point, repeatability is the sample standard deviation of those three errors, and the repeatability Test Records timestamp is the calculation/save time while selected trial time range metrics remain traceable. `Calculate Final K` uses three selected flow points and 9 selected trials. For each flow point, `measurement_error` is the mean of that point's selected three trial errors; `average_error = (max(measurement_errors) + min(measurement_errors)) / 2`; `adjusted_error = measurement_error - average_error`; `intermediate_k = original_k / (1 + measurement_error / 100)`; and `new_k = (max(intermediate_k_values) + min(intermediate_k_values)) / 2`. Recalculation overwrites only the previous final-K record. `Write New K...` is a separate operator-confirmed action after the preview exists; it writes through the write guard, reads back the K factor variable, records verification status and audit ID, and updates the same final-K record. Single Flow Range mode uses one configured target-flow range, allows the operator to append more trials at any time, and refreshes the current error/repeatability summary after each calculated trial. Advanced mode is reserved for future multi-run or fitting logic.
 - Lab-only PC flow simulation: K factor and repeatability captures may replace the flow-segment state and calculated accumulated-mass delta with operator-entered PC values while still issuing the configured Modbus reads to the connected slave. This path is explicit, does not write the flow-rate variable to the slave, and marks captured history with `flow_rate_source=pc_simulated`.
+
+### Real-Time Zero Snapshot Contract
+
+The required logical variables are:
+
+```text
+zero_snapshot_sequence_begin
+zero_monitor_status
+zero_monitor_tick_ms
+zero_base_mean_100ms
+zero_base_std_100ms
+zero_live_600ms
+zero_trim_std_600ms
+zero_trim_range_600ms
+zero_raw_p2p_600ms
+zero_window_valid_count
+zero_snapshot_sequence_end
+```
+
+All variables must come from one configured, exact-layout, read-only block with
+a single register kind. The absolute block start is profile configuration, but
+the logical fields have fixed relative offsets 0, 1, 2, 4, 6, 8, 10, 12, 14,
+16, and 17 with word counts 1, 1, 2, 2, 2, 2, 2, 2, 2, 1, and 1. Their
+non-overlapping union must be exactly 18 words; gaps, aliases, reordered fields,
+and unrelated mappings overlapping the block are invalid. The known
+`Krohne_prj` firmware profile reads 18 input registers at PDU address `0x005F`
+with FC04; the absolute address belongs in the device register-map profile and
+is not a protocol constant.
+
+The approved firmware PC baseline also reports the same block readable through
+the holding-register access path and rejects writes. CoreFlow Studio does not
+probe and silently switch functions: it uses the register kind configured in
+the active Device Profile, with the initial Krohne profile selecting input
+registers/FC04. Production firmware compatibility with both read functions is a
+hardware-acceptance item.
+
+The reviewed ABCD-default full DSP profile is committed at
+`config/register_maps/krohne_prj_main.json` and records the firmware source
+HEAD in its metadata. Snapshot scale is exactly 1.0, float
+amplitudes use `us`, device tick uses `ms`, and an available `zero_offset` is
+float32 with scale 1.0 and unit `us`. Profile validation rejects incompatible
+scale/unit metadata before device I/O; the runtime performs no implicit unit
+conversion.
+
+Snapshot-map validation completes before any device I/O. Failure reports all
+structured mapping errors and records an unlinked error attempt; it never tries
+partial/per-variable reads or an FC03/FC04 fallback. The optional
+`zero_offset` lives outside the snapshot block and does not invalidate capture
+when absent, but offset checking is then unavailable.
+
+If configured, the 16-bit `modbus_byte_order` enum is read after structural map
+validation and before run creation. Values 0, 1, 2, and 3 map to ABCD, BADC,
+CDAB, and DCBA respectively and must match every 32-bit snapshot field plus
+available `zero_offset`. Mismatch, invalid value, or read failure blocks start
+without a snapshot request or run. An absent enum register permits diagnostics
+with `BYTE_ORDER_UNVERIFIED` but blocks `STABLE`/pass-fail. This startup read
+uses normal connection retries; the monitor never rewrites either side.
+The current firmware maps `modbus_byte_order` as a readable/writable FC03
+holding register. Its writable profile flag is valid and does not grant this
+read-only monitor a write path.
+
+The application accepts a statistical sample only when the leading and
+trailing sequences match, base/live-ready and data-valid bits are set, the valid
+count is 60, numeric fields are finite, zero-calibration/internal-error bits are
+clear, and reserved bits are zero. Sequence and 32-bit device-time wraps must be
+distinguished from gaps and restarts. Hard faults mark the event row DATA_GAP;
+the next unique valid row starts a new NOT_READY segment. Zero calibration and
+unknown reserved bits pause statistics in EVALUATING and isolate segments.
+Duplicates and continuity-preserving overruns remain advisories. Generic
+variable sampling may share lower-level facilities but must not replace the
+one-request snapshot read.
+
+A sequence duplicate requires identical tick and all 18 words. Modular deltas
+use the lower half-range as forward and upper half as rollback/restart. For a
+forward sequence delta `d`, device tick must advance exactly `d * 100 ms` in the
+firmware baseline. Device time unwrap is segment-local, and persisted plots use
+it with explicit segment breaks rather than connecting across discontinuities.
+
+The zero monitor overrides transport retries to zero for this high-rate read,
+independent of the connection's retry setting. A successful or failed logical
+poll therefore performs one physical request. Only a mismatched leading and
+trailing sequence permits one immediate complete-block reread, for an absolute
+maximum of two physical requests in that logical poll. A timeout, CRC error,
+exception response, or failed reread is recorded and left for the next 100 ms
+schedule opportunity; it does not start another same-slot transport retry.
+Requests are serialized, and elapsed schedule slots are skipped rather than
+issued as a catch-up burst.
+
+M16 fixes the host target interval at 100 ms. It is a versioned zero-monitor
+protocol constant, not a Device Profile or per-device setting. Runtime records
+monotonic start-to-start mean/P50/P95/P99/maximum periods and achieved rate. A
+slow device reports timing degradation but does not trigger automatic interval,
+candidate, or threshold changes.
+
+See `docs/MODBUS_ZERO_MONITOR.zh-CN.md` for the complete design and safety
+boundary.
 
 ## Modbus Listener Diagnostics
 

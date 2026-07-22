@@ -50,7 +50,12 @@ a = Analysis(
         (src, "PySide6") for src, _dest in collect_dynamic_libs("shiboken6")
     ]
     + collect_conda_qt_binaries(),
-    datas=[],
+    datas=[
+        (
+            str(project_root / "config" / "register_maps"),
+            "config/register_maps",
+        )
+    ],
     hiddenimports=[
         "PySide6.QtCore",
         "PySide6.QtGui",

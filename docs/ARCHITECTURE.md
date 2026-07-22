@@ -38,6 +38,9 @@ Application services coordinate user actions and domain operations:
 - `ExperimentService`: manages flexible experiment definitions and module execution.
 - `WriteGuardService`: validates safety-sensitive device write requests before they reach any device adapter.
 - `VariableSamplingService`: reads configured device variables and stores timestamped values with device/run/step traceability.
+- `ModbusZeroMonitorService`: performs coherent read-only zero-snapshot polling,
+  sequence/timestamp validation, continuous-segment tracking, raw artifact
+  persistence, and handoff to pure zero-stability analysis.
 - `FillingTrialService`: owns shared-device selection, filling-group state,
   validation, trial/analysis persistence, immutable advance profiles, history,
   and the atomic Set Advance transition.
@@ -63,6 +66,7 @@ Initial workflows:
 - Error analysis workflow.
 - Manual mass-total error and repeatability workflow.
 - Stability capture workflow.
+- Modbus real-time zero-monitor operation.
 - Flexible experiment workflow.
 
 ### Device Abstraction Layer
@@ -114,6 +118,36 @@ The Modbus master UI should expose configuration in focused dialogs rather than 
 - Serial/channel setup: port identification, baud rate, parity, stop bits, timeout, retries, and unit ID.
 - Variable editor: logical variable name, Modbus table type, address, word count, data type, endianness, scale, unit, writable flag, and valid range.
 - Calibration dialogs: zero calibration control/status, K factor simple/advanced modes, and repeatability trials in three-flow-range or single-flow-range modes.
+- Zero-monitor dialog: read-only acquisition state, zero-flow context,
+  configurable analysis windows/thresholds, live traces, quality counters, and
+  a link to the separate guarded zero-calibration dialog.
+
+The real-time zero monitor is a specialized block-read consumer. Its configured
+sequence, status, timestamp, statistics, valid-count, and trailing-sequence
+variables must be read as one contiguous Modbus request. Generic per-variable
+sampling can share the transport, worker, plotting, artifact, and history
+infrastructure, but it must not replace this coherent-read contract.
+
+The block start remains profile configuration, while field offsets, data types,
+word counts, and sequence-at-both-ends ordering are protocol invariants. The
+mapping validator rejects missing/duplicate variables, gaps, overlaps, aliases,
+unrelated mappings inside the block, mixed register kinds, writable fields, and
+wrong data types/counts/scales/units before any device request is made.
+
+After structural validation, an optional 16-bit device ByteOrder enum is read
+by a read-only preflight. The underlying DSP register may itself be writable;
+that profile property does not authorize a monitor write. A mismatch, invalid
+value, or read failure prevents run
+creation; an absent enum register allows diagnostic capture only. Verification
+metadata is immutable run/attempt provenance, and no monitor path mutates the
+device or Device Profile to resolve a mismatch.
+
+The application service depends on a narrow `ModbusConfigurationBlockReader`
+typing protocol rather than adding Modbus-specific methods to the generic
+`FlowmeterDevice` ABC. `ModbusRtuFlowmeterDevice` and deterministic fakes expose
+the existing merged configuration read through that capability, including a
+per-call transport-retry override. The zero monitor sets the override to zero;
+other Modbus operations retain their configured retry behavior.
 
 ### ASIO/IIS Frame Stream Layer
 The ASIO/IIS module is a headless hardware I/O boundary for a USB sound-card module that appears in Windows Device Manager as `BRAVO-HD Device Control`.
@@ -176,6 +210,8 @@ Data processing handles:
 - Error calculations against reference values.
 - Repeatability and stability metrics.
 - Drift and noise estimates.
+- Modbus zero-monitor independent-window repeatability, robust range, trend,
+  maximum-step, adjacent-difference, and explainable stability-state metrics.
 - Filtering and signal-processing transforms.
 - Future ML inference modules.
 
@@ -200,6 +236,7 @@ SQLite stores:
 - File artifact references.
 - Audit log entries.
 - Filling trial records and immutable filling advance profiles.
+- Versioned Modbus register-map catalog entries and Device Profile bindings.
 
 Files store:
 
@@ -209,8 +246,84 @@ Files store:
 - Exported CSV files.
 - Generated reports.
 - Replay and simulator scenario files.
+- Long-running Modbus zero-monitor snapshot CSV artifacts, including sequence,
+  device time, validity, communication-gap, and zero-flow-context evidence.
 
 See `docs/DATA_MODEL.md` for detailed direction.
+
+### Modbus Register Map Library Boundary
+
+The register-map library is independent from transmitter, tube, sensor, and
+device-model classification. The storage layer owns immutable map ID/version
+records and profile bindings. The Modbus application service resolves a bound
+catalog entry into the effective `ModbusRegisterMap`; protocol code receives
+only that resolved map. Qt may select, clone, edit, and preview lists while
+disconnected, but it does not write catalog SQL directly.
+
+Application updates may install additional official map versions. They never
+silently rebind a Device ID or rewrite run/session/attempt snapshots. A future
+DSP discovery block may identify map ID/version before full map use, but model
+strings are metadata rather than map-selection keys.
+
+The `krohne-prj-main` official list is generated from the active address,
+access, width, and register-kind declarations in the Krohne DSP source. The
+extractor fails when a mapped DSP symbol has no reviewed client semantic or
+when width/access tables disagree. Human-reviewed logical names, units, enum
+labels, workflow aliases, and write-safety metadata remain explicit inputs to
+the extractor because those meanings cannot be inferred safely from C macros.
+
+### Modbus Zero Monitor Boundary
+
+The M16 zero monitor remains inside the existing Modbus Module and is not a new
+top-level application module. It uses these ownership boundaries:
+
+- `coreflow.protocols.modbus` performs the configured contiguous register read
+  and existing type/word/byte-order decoding.
+- `coreflow.app.modbus_zero_monitor` owns mapping validation, polling,
+  sequence/time unwrapping, continuous segments, cancellation, and persistence
+  orchestration.
+- `coreflow.analysis.zero_monitor` owns pure short/long calculations, threshold
+  evaluation, states, and reason codes.
+- `coreflow.ui.modbus_zero_monitor` renders controls, status, metrics, and live
+  traces without protocol calls, formulas, SQL, or device writes.
+
+The monitor owns the connected Modbus channel while active. Normal table
+polling and other Modbus operations pause instead of issuing overlapping
+requests. Formal zero calibration remains a separate write-capable workflow
+through `WriteGuardService`; no monitor state or calculated value may directly
+write `ZeroOffset`.
+
+Each scheduled zero-monitor poll makes one physical block request on success or
+transport failure. A mismatched begin/end sequence may make exactly one
+immediate full-block reread within the same logical poll. Requests never
+overlap, and a late poll skips elapsed schedule slots instead of issuing a
+catch-up burst.
+
+The service owns an explicit continuity state machine. Hard communication/data
+faults produce an event-row DATA_GAP and force the next valid unique snapshot
+to begin a NOT_READY segment. Device zero-calibration and unknown reserved
+status bits pause analysis in EVALUATING and isolate pre/post samples.
+Duplicates and continuity-preserving overruns are non-breaking advisories, and
+cumulative quality counters survive live-state recovery.
+
+The shared curve artifact/viewer contract supports optional numeric x-axis and
+segment metadata. Zero-monitor history selects unwrapped device tick and
+continuous-segment boundaries, while older curve artifacts retain captured-at
+fallback behavior. This extends the existing viewer instead of introducing a
+zero-monitor-specific plot implementation.
+
+The M16 100 ms target interval is a versioned zero-monitor service constant and
+read-only UI value, not per-device configuration. Observed monotonic poll-period
+distribution and achieved rate are persisted; candidate selection remains
+device-sequence based and is not resampled when host timing degrades.
+
+Zero-monitor raw rows stream to a same-directory partial CSV through a narrow
+artifact-staging writer; they are not accumulated for the whole run. The writer
+flushes and fsyncs at least once per second, atomically finalizes the file, then
+registers its checksum and metadata. Startup recovery converts a nonempty
+partial file belonging to an interrupted running zero-monitor run into an
+explicit incomplete/recovered artifact and error run. UI plot rings and
+analysis candidate deques remain bounded by their configured windows.
 
 ### Simulation Layer
 The simulator provides virtual transmitters that obey the same device interface as real hardware.
@@ -229,8 +342,9 @@ See `docs/SIMULATION.md` for details.
 The independent Filling Trial Module is split across four owned boundaries:
 
 - `coreflow.analysis` implements the pure formulas and numerical validation.
-- `coreflow.storage` persists schema v5 filling trials and advance profiles,
-  reusing run sessions, workflow steps, and analysis results for provenance.
+- `coreflow.storage` persists filling trials and advance profiles introduced in
+  schema v5 and retained in the current schema v6, reusing run sessions,
+  workflow steps, and analysis results for provenance.
 - `coreflow.app.FillingTrialService` is the headless state machine and the only
   layer allowed to coordinate calculations and persistence.
 - `coreflow.ui` collects operator input and renders service snapshots/history.

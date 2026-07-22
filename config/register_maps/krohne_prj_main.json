@@ -1,0 +1,1809 @@
+{
+  "name": "krohne-prj-main",
+  "version": "1.0.0+f0a1b39",
+  "registers": [
+    {
+      "name": "pulse_output_max_frequency",
+      "kind": "holding",
+      "address": 0,
+      "word_count": 1,
+      "data_type": "uint16",
+      "writable": true,
+      "scale": 1.0,
+      "unit": "Hz",
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Maximum pulse output frequency.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x01",
+        "firmware_symbol": "MbAddr_PulseOut_MaxFreq_40000",
+        "group": "pulse_output",
+        "native_access": "RW",
+        "readable_via": [
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "write_requires": "explicit guarded Modbus operation workflow"
+      }
+    },
+    {
+      "name": "pulse_output_variable",
+      "kind": "holding",
+      "address": 2,
+      "word_count": 1,
+      "data_type": "uint16",
+      "writable": true,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Pulse output source selection.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x03",
+        "firmware_symbol": "MbAddr_PulseOut_Variable_40001",
+        "group": "pulse_output",
+        "native_access": "RW",
+        "readable_via": [
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "enum_values": {
+          "0": "mass",
+          "1": "volume"
+        },
+        "write_requires": "explicit guarded Modbus operation workflow"
+      }
+    },
+    {
+      "name": "pulse_output_quantity_per_pulse",
+      "kind": "holding",
+      "address": 4,
+      "word_count": 2,
+      "data_type": "float32",
+      "writable": true,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Quantity represented by one output pulse.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x05",
+        "firmware_symbol": "MbAddr_PulseOut_QualityPerPulse_40002",
+        "group": "pulse_output",
+        "native_access": "RW",
+        "readable_via": [
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "write_requires": "explicit guarded Modbus operation workflow"
+      }
+    },
+    {
+      "name": "mass_flow",
+      "kind": "input",
+      "address": 6,
+      "word_count": 2,
+      "data_type": "float32",
+      "writable": false,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Live mass flow in the unit selected by mass_flow_unit.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x07",
+        "firmware_symbol": "MbAddr_MassFlow",
+        "group": "measurement",
+        "native_access": "RO",
+        "readable_via": [
+          "input",
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "unit_selector": "mass_flow_unit"
+      }
+    },
+    {
+      "name": "mass_rate",
+      "kind": "input",
+      "address": 6,
+      "word_count": 2,
+      "data_type": "float32",
+      "writable": false,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Client workflow alias for mass_flow.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x07",
+        "firmware_symbol": "MbAddr_MassFlow",
+        "group": "measurement",
+        "native_access": "RO",
+        "readable_via": [
+          "input",
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "unit_selector": "mass_flow_unit",
+        "alias_for": "mass_flow"
+      }
+    },
+    {
+      "name": "temperature",
+      "kind": "input",
+      "address": 8,
+      "word_count": 2,
+      "data_type": "float32",
+      "writable": false,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Live temperature in the unit selected by temperature_unit.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x09",
+        "firmware_symbol": "MbAddr_Temperature",
+        "group": "measurement",
+        "native_access": "RO",
+        "readable_via": [
+          "input",
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "unit_selector": "temperature_unit"
+      }
+    },
+    {
+      "name": "mass_acc",
+      "kind": "input",
+      "address": 10,
+      "word_count": 2,
+      "data_type": "float32",
+      "writable": false,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Accumulated mass in the unit selected by mass_total_unit.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x0B",
+        "firmware_symbol": "MbAddr_MassTotal",
+        "group": "measurement",
+        "native_access": "RO",
+        "readable_via": [
+          "input",
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "unit_selector": "mass_total_unit"
+      }
+    },
+    {
+      "name": "delta_t",
+      "kind": "input",
+      "address": 12,
+      "word_count": 2,
+      "data_type": "float32",
+      "writable": false,
+      "scale": 1.0,
+      "unit": "us",
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Measured tube time difference.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x0D",
+        "firmware_symbol": "MbAddr_deltaT_us",
+        "group": "measurement",
+        "native_access": "RO",
+        "readable_via": [
+          "input",
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj"
+      }
+    },
+    {
+      "name": "frequency",
+      "kind": "input",
+      "address": 14,
+      "word_count": 2,
+      "data_type": "float32",
+      "writable": false,
+      "scale": 1.0,
+      "unit": "Hz",
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Measured tube signal frequency.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x0F",
+        "firmware_symbol": "MbAddr_signal_freq",
+        "group": "measurement",
+        "native_access": "RO",
+        "readable_via": [
+          "input",
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj"
+      }
+    },
+    {
+      "name": "low_threshold",
+      "kind": "holding",
+      "address": 18,
+      "word_count": 2,
+      "data_type": "float32",
+      "writable": true,
+      "scale": 1.0,
+      "unit": "g/s",
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Low-flow cutoff threshold in the internal mass-flow unit.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x13",
+        "firmware_symbol": "MbAddr_LowThreshold",
+        "group": "flow_configuration",
+        "native_access": "RW",
+        "readable_via": [
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "write_requires": "explicit guarded Modbus operation workflow"
+      }
+    },
+    {
+      "name": "zero_offset",
+      "kind": "holding",
+      "address": 20,
+      "word_count": 2,
+      "data_type": "float32",
+      "writable": true,
+      "scale": 1.0,
+      "unit": "us",
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Official zero offset used by the DSP flow calculation.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x15",
+        "firmware_symbol": "MbAddr_ZeroOffset",
+        "group": "flow_configuration",
+        "native_access": "RW",
+        "readable_via": [
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "write_requires": "explicit guarded Modbus operation workflow"
+      }
+    },
+    {
+      "name": "mass_flow_factor",
+      "kind": "holding",
+      "address": 22,
+      "word_count": 2,
+      "data_type": "float32",
+      "writable": true,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Mass-flow scale factor.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x17",
+        "firmware_symbol": "MbAddr_MassFlowFactor",
+        "group": "flow_configuration",
+        "native_access": "RW",
+        "readable_via": [
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "write_requires": "explicit guarded Modbus operation workflow"
+      }
+    },
+    {
+      "name": "k_factor",
+      "kind": "holding",
+      "address": 24,
+      "word_count": 2,
+      "data_type": "float32",
+      "writable": true,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "K flow-rate calibration factor.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x19",
+        "firmware_symbol": "MbAddr_K_Flow_Rate",
+        "group": "flow_configuration",
+        "native_access": "RW",
+        "readable_via": [
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "write_requires": "explicit guarded Modbus operation workflow"
+      }
+    },
+    {
+      "name": "mass_flow_filter_width",
+      "kind": "holding",
+      "address": 26,
+      "word_count": 2,
+      "data_type": "uint32",
+      "writable": true,
+      "scale": 1.0,
+      "unit": "samples",
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Mass-flow moving-average filter width.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x1B",
+        "firmware_symbol": "MbAddr_MF_wide",
+        "group": "flow_configuration",
+        "native_access": "RW",
+        "readable_via": [
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "write_requires": "explicit guarded Modbus operation workflow"
+      }
+    },
+    {
+      "name": "mass_flow_unit",
+      "kind": "holding",
+      "address": 38,
+      "word_count": 1,
+      "data_type": "uint16",
+      "writable": true,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Mass-flow output unit code.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x27",
+        "firmware_symbol": "MbAddr_MassFlowUnit",
+        "group": "unit_configuration",
+        "native_access": "RW",
+        "readable_via": [
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "enum_values": {
+          "70": "g/s",
+          "71": "g/min",
+          "72": "g/h",
+          "73": "kg/s",
+          "74": "kg/min",
+          "75": "kg/h",
+          "76": "kg/day",
+          "77": "t/min",
+          "78": "t/h",
+          "79": "t/day"
+        },
+        "write_requires": "explicit guarded Modbus operation workflow"
+      }
+    },
+    {
+      "name": "density_unit",
+      "kind": "holding",
+      "address": 39,
+      "word_count": 1,
+      "data_type": "uint16",
+      "writable": true,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Density output unit code.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x28",
+        "firmware_symbol": "MbAddr_DensityUnit",
+        "group": "unit_configuration",
+        "native_access": "RW",
+        "readable_via": [
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "enum_values": {
+          "91": "g/cc",
+          "92": "kg/m3",
+          "95": "g/ml",
+          "96": "kg/L",
+          "97": "g/L"
+        },
+        "write_requires": "explicit guarded Modbus operation workflow"
+      }
+    },
+    {
+      "name": "temperature_unit",
+      "kind": "holding",
+      "address": 40,
+      "word_count": 1,
+      "data_type": "uint16",
+      "writable": true,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Temperature output unit code.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x29",
+        "firmware_symbol": "MbAddr_TemperatureUnit",
+        "group": "unit_configuration",
+        "native_access": "RW",
+        "readable_via": [
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "enum_values": {
+          "32": "deg C",
+          "33": "deg F"
+        },
+        "write_requires": "explicit guarded Modbus operation workflow"
+      }
+    },
+    {
+      "name": "volume_flow_unit",
+      "kind": "holding",
+      "address": 41,
+      "word_count": 1,
+      "data_type": "uint16",
+      "writable": true,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Volume-flow output unit code.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x2A",
+        "firmware_symbol": "MbAddr_VolumeFlowUnit",
+        "group": "unit_configuration",
+        "native_access": "RW",
+        "readable_via": [
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "enum_values": {
+          "0": "ml/s",
+          "17": "L/min",
+          "19": "m3/h",
+          "24": "L/s",
+          "25": "L/day",
+          "28": "m3/s",
+          "29": "m3/day",
+          "131": "m3/min",
+          "138": "L/h"
+        },
+        "write_requires": "explicit guarded Modbus operation workflow"
+      }
+    },
+    {
+      "name": "mass_total_unit",
+      "kind": "holding",
+      "address": 44,
+      "word_count": 1,
+      "data_type": "uint16",
+      "writable": true,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Accumulated-mass output unit code.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x2D",
+        "firmware_symbol": "MbAddr_MassTotalUnit",
+        "group": "unit_configuration",
+        "native_access": "RW",
+        "readable_via": [
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "enum_values": {
+          "11": "kg",
+          "60": "g",
+          "62": "t"
+        },
+        "write_requires": "explicit guarded Modbus operation workflow"
+      }
+    },
+    {
+      "name": "volume_total_unit",
+      "kind": "holding",
+      "address": 45,
+      "word_count": 1,
+      "data_type": "uint16",
+      "writable": true,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Accumulated-volume output unit code.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x2E",
+        "firmware_symbol": "MbAddr_VolumeTotalUnit",
+        "group": "unit_configuration",
+        "native_access": "RW",
+        "readable_via": [
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "enum_values": {
+          "0": "ml",
+          "41": "L",
+          "43": "m3"
+        },
+        "write_requires": "explicit guarded Modbus operation workflow"
+      }
+    },
+    {
+      "name": "modbus_baud_rate",
+      "kind": "holding",
+      "address": 47,
+      "word_count": 2,
+      "data_type": "uint32",
+      "writable": true,
+      "scale": 1.0,
+      "unit": "bit/s",
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Requested Modbus RTU baud rate.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x30",
+        "firmware_symbol": "MbAddr_Modbus_BaudRate",
+        "group": "communication",
+        "native_access": "RW",
+        "readable_via": [
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "enum_values": {
+          "1200": "1200",
+          "2400": "2400",
+          "4800": "4800",
+          "9600": "9600",
+          "19200": "19200",
+          "38400": "38400",
+          "57600": "57600",
+          "115200": "115200"
+        },
+        "write_requires": "separate guarded communication workflow"
+      }
+    },
+    {
+      "name": "modbus_parity",
+      "kind": "holding",
+      "address": 49,
+      "word_count": 1,
+      "data_type": "uint16",
+      "writable": true,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": 0,
+      "maximum": 2,
+      "description": "Requested Modbus parity.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x32",
+        "firmware_symbol": "MbAddr_Modbus_Parity",
+        "group": "communication",
+        "native_access": "RW",
+        "readable_via": [
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "enum_values": {
+          "0": "none",
+          "1": "odd",
+          "2": "even"
+        },
+        "write_requires": "separate guarded communication workflow"
+      }
+    },
+    {
+      "name": "modbus_data_bits",
+      "kind": "holding",
+      "address": 50,
+      "word_count": 1,
+      "data_type": "uint16",
+      "writable": true,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": 8,
+      "maximum": 8,
+      "description": "Requested Modbus RTU data bits.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x33",
+        "firmware_symbol": "MbAddr_Modbus_DataBits",
+        "group": "communication",
+        "native_access": "RW",
+        "readable_via": [
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "write_requires": "separate guarded communication workflow"
+      }
+    },
+    {
+      "name": "modbus_stop_bits",
+      "kind": "holding",
+      "address": 51,
+      "word_count": 1,
+      "data_type": "uint16",
+      "writable": true,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": 1,
+      "maximum": 2,
+      "description": "Requested Modbus stop bits.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x34",
+        "firmware_symbol": "MbAddr_Modbus_StopBits",
+        "group": "communication",
+        "native_access": "RW",
+        "readable_via": [
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "write_requires": "separate guarded communication workflow"
+      }
+    },
+    {
+      "name": "modbus_byte_order",
+      "kind": "holding",
+      "address": 52,
+      "word_count": 1,
+      "data_type": "uint16",
+      "writable": true,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": 0,
+      "maximum": 3,
+      "description": "Order used for every 32-bit Modbus value.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x35",
+        "firmware_symbol": "MbAddr_Modbus_ByteOrder",
+        "group": "communication",
+        "native_access": "RW",
+        "readable_via": [
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "enum_values": {
+          "0": "ABCD",
+          "1": "BADC",
+          "2": "CDAB",
+          "3": "DCBA"
+        },
+        "write_requires": "separate guarded communication workflow"
+      }
+    },
+    {
+      "name": "modbus_apply",
+      "kind": "holding",
+      "address": 53,
+      "word_count": 1,
+      "data_type": "uint16",
+      "writable": true,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Write 1 to apply validated communication settings after the response.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x36",
+        "firmware_symbol": "MbAddr_Modbus_Apply",
+        "group": "communication",
+        "native_access": "RW",
+        "readable_via": [
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "write_requires": "separate guarded communication workflow"
+      }
+    },
+    {
+      "name": "modbus_status",
+      "kind": "holding",
+      "address": 54,
+      "word_count": 1,
+      "data_type": "uint16",
+      "writable": false,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": 0,
+      "maximum": 6,
+      "description": "Communication configuration status code.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x37",
+        "firmware_symbol": "MbAddr_Modbus_Status",
+        "group": "communication",
+        "native_access": "RO",
+        "readable_via": [
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "enum_values": {
+          "0": "ok",
+          "1": "pending",
+          "2": "invalid_baudrate",
+          "3": "invalid_parity",
+          "4": "invalid_stop_bits",
+          "5": "invalid_data_bits",
+          "6": "invalid_byte_order"
+        }
+      }
+    },
+    {
+      "name": "volume_flow",
+      "kind": "input",
+      "address": 55,
+      "word_count": 2,
+      "data_type": "float32",
+      "writable": false,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Live volume flow in the unit selected by volume_flow_unit.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x38",
+        "firmware_symbol": "MbAddr_VolumeFlow",
+        "group": "measurement",
+        "native_access": "RO",
+        "readable_via": [
+          "input",
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "unit_selector": "volume_flow_unit"
+      }
+    },
+    {
+      "name": "volume_acc",
+      "kind": "input",
+      "address": 57,
+      "word_count": 2,
+      "data_type": "float32",
+      "writable": false,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Accumulated volume in the unit selected by volume_total_unit.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x3A",
+        "firmware_symbol": "MbAddr_VolumeTotal",
+        "group": "measurement",
+        "native_access": "RO",
+        "readable_via": [
+          "input",
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "unit_selector": "volume_total_unit"
+      }
+    },
+    {
+      "name": "density",
+      "kind": "input",
+      "address": 59,
+      "word_count": 2,
+      "data_type": "float32",
+      "writable": false,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Live density in the unit selected by density_unit.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x3C",
+        "firmware_symbol": "MbAddr_Density",
+        "group": "measurement",
+        "native_access": "RO",
+        "readable_via": [
+          "input",
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "unit_selector": "density_unit"
+      }
+    },
+    {
+      "name": "tube_period",
+      "kind": "input",
+      "address": 61,
+      "word_count": 2,
+      "data_type": "float32",
+      "writable": false,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Measured tube vibration period.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x3E",
+        "firmware_symbol": "MbAddr_TubePeriod",
+        "group": "measurement",
+        "native_access": "RO",
+        "readable_via": [
+          "input",
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj"
+      }
+    },
+    {
+      "name": "density_enable",
+      "kind": "holding",
+      "address": 63,
+      "word_count": 1,
+      "data_type": "uint16",
+      "writable": true,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Enable density and volume calculations.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x40",
+        "firmware_symbol": "MbAddr_DensityEnable",
+        "group": "density_configuration",
+        "native_access": "RW",
+        "readable_via": [
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "write_requires": "explicit guarded Modbus operation workflow"
+      }
+    },
+    {
+      "name": "density_slope",
+      "kind": "holding",
+      "address": 64,
+      "word_count": 2,
+      "data_type": "float32",
+      "writable": true,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Density calibration slope.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x41",
+        "firmware_symbol": "MbAddr_DensitySlope",
+        "group": "density_configuration",
+        "native_access": "RW",
+        "readable_via": [
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "write_requires": "explicit guarded Modbus operation workflow"
+      }
+    },
+    {
+      "name": "density_offset",
+      "kind": "holding",
+      "address": 66,
+      "word_count": 2,
+      "data_type": "float32",
+      "writable": true,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Density calibration offset.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x43",
+        "firmware_symbol": "MbAddr_DensityOffset",
+        "group": "density_configuration",
+        "native_access": "RW",
+        "readable_via": [
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "write_requires": "explicit guarded Modbus operation workflow"
+      }
+    },
+    {
+      "name": "density_temperature_coefficient",
+      "kind": "holding",
+      "address": 68,
+      "word_count": 2,
+      "data_type": "float32",
+      "writable": true,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Density temperature compensation coefficient.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x45",
+        "firmware_symbol": "MbAddr_DensityTemperatureCoefficient",
+        "group": "density_configuration",
+        "native_access": "RW",
+        "readable_via": [
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "write_requires": "explicit guarded Modbus operation workflow"
+      }
+    },
+    {
+      "name": "density_factor",
+      "kind": "holding",
+      "address": 70,
+      "word_count": 2,
+      "data_type": "float32",
+      "writable": true,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Density scale factor.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x47",
+        "firmware_symbol": "MbAddr_DensityFactor",
+        "group": "density_configuration",
+        "native_access": "RW",
+        "readable_via": [
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "write_requires": "explicit guarded Modbus operation workflow"
+      }
+    },
+    {
+      "name": "density_pressure_factor",
+      "kind": "holding",
+      "address": 72,
+      "word_count": 2,
+      "data_type": "float32",
+      "writable": true,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Density pressure compensation factor.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x49",
+        "firmware_symbol": "MbAddr_DensityPressureFactor",
+        "group": "density_configuration",
+        "native_access": "RW",
+        "readable_via": [
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "write_requires": "explicit guarded Modbus operation workflow"
+      }
+    },
+    {
+      "name": "density_system_offset",
+      "kind": "holding",
+      "address": 74,
+      "word_count": 2,
+      "data_type": "float32",
+      "writable": true,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Density system offset.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x4B",
+        "firmware_symbol": "MbAddr_DensitySystemOffset",
+        "group": "density_configuration",
+        "native_access": "RW",
+        "readable_via": [
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "write_requires": "explicit guarded Modbus operation workflow"
+      }
+    },
+    {
+      "name": "density_cutoff",
+      "kind": "holding",
+      "address": 76,
+      "word_count": 2,
+      "data_type": "float32",
+      "writable": true,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Density cutoff threshold.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x4D",
+        "firmware_symbol": "MbAddr_DensityCutoff",
+        "group": "density_configuration",
+        "native_access": "RW",
+        "readable_via": [
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "write_requires": "explicit guarded Modbus operation workflow"
+      }
+    },
+    {
+      "name": "volume_factor",
+      "kind": "holding",
+      "address": 78,
+      "word_count": 2,
+      "data_type": "float32",
+      "writable": true,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Volume-flow scale factor.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x4F",
+        "firmware_symbol": "MbAddr_VolumeFactor",
+        "group": "density_configuration",
+        "native_access": "RW",
+        "readable_via": [
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "write_requires": "explicit guarded Modbus operation workflow"
+      }
+    },
+    {
+      "name": "volume_flow_cutoff",
+      "kind": "holding",
+      "address": 80,
+      "word_count": 2,
+      "data_type": "float32",
+      "writable": true,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Volume-flow cutoff threshold.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x51",
+        "firmware_symbol": "MbAddr_VolumeFlowCutoff",
+        "group": "density_configuration",
+        "native_access": "RW",
+        "readable_via": [
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "write_requires": "explicit guarded Modbus operation workflow"
+      }
+    },
+    {
+      "name": "signal_frequency_scale",
+      "kind": "holding",
+      "address": 82,
+      "word_count": 2,
+      "data_type": "float32",
+      "writable": true,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Signal-frequency scale used by density calculation.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x53",
+        "firmware_symbol": "MbAddr_SignalFreqScale",
+        "group": "density_configuration",
+        "native_access": "RW",
+        "readable_via": [
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "write_requires": "explicit guarded Modbus operation workflow"
+      }
+    },
+    {
+      "name": "lpo_voltage",
+      "kind": "input",
+      "address": 84,
+      "word_count": 2,
+      "data_type": "float32",
+      "writable": false,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Left pickup signal magnitude reported by the DSP.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x55",
+        "firmware_symbol": "MbAddr_LPOVoltage",
+        "group": "measurement",
+        "native_access": "RO",
+        "readable_via": [
+          "input",
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj"
+      }
+    },
+    {
+      "name": "rpo_voltage",
+      "kind": "input",
+      "address": 86,
+      "word_count": 2,
+      "data_type": "float32",
+      "writable": false,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Right pickup signal magnitude reported by the DSP.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x57",
+        "firmware_symbol": "MbAddr_RPOVoltage",
+        "group": "measurement",
+        "native_access": "RO",
+        "readable_via": [
+          "input",
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj"
+      }
+    },
+    {
+      "name": "zero_snapshot_sequence_begin",
+      "kind": "input",
+      "address": 95,
+      "word_count": 1,
+      "data_type": "uint16",
+      "writable": false,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Coherent zero-monitor snapshot begin sequence.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x60",
+        "firmware_symbol": "MbAddr_ZeroSnapshotSequenceBegin",
+        "group": "zero_monitor",
+        "native_access": "RO",
+        "readable_via": [
+          "input",
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj"
+      }
+    },
+    {
+      "name": "zero_monitor_status",
+      "kind": "input",
+      "address": 96,
+      "word_count": 1,
+      "data_type": "uint16",
+      "writable": false,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": 0,
+      "maximum": 31,
+      "description": "Zero-monitor readiness and validity bit field.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x61",
+        "firmware_symbol": "MbAddr_ZeroMonitorStatus",
+        "group": "zero_monitor",
+        "native_access": "RO",
+        "readable_via": [
+          "input",
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "bit_flags": {
+          "0": "base_ready",
+          "1": "window_full",
+          "2": "window_all_valid",
+          "3": "zero_calibration_running",
+          "4": "internal_error"
+        }
+      }
+    },
+    {
+      "name": "zero_monitor_tick_ms",
+      "kind": "input",
+      "address": 97,
+      "word_count": 2,
+      "data_type": "uint32",
+      "writable": false,
+      "scale": 1.0,
+      "unit": "ms",
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Device-side zero-monitor time.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x62",
+        "firmware_symbol": "MbAddr_ZeroMonitorTickMs",
+        "group": "zero_monitor",
+        "native_access": "RO",
+        "readable_via": [
+          "input",
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj"
+      }
+    },
+    {
+      "name": "zero_base_mean_100ms",
+      "kind": "input",
+      "address": 99,
+      "word_count": 2,
+      "data_type": "float32",
+      "writable": false,
+      "scale": 1.0,
+      "unit": "us",
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Zero-monitor 100 ms base mean.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x64",
+        "firmware_symbol": "MbAddr_ZeroBaseMean100ms",
+        "group": "zero_monitor",
+        "native_access": "RO",
+        "readable_via": [
+          "input",
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj"
+      }
+    },
+    {
+      "name": "zero_base_std_100ms",
+      "kind": "input",
+      "address": 101,
+      "word_count": 2,
+      "data_type": "float32",
+      "writable": false,
+      "scale": 1.0,
+      "unit": "us",
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Zero-monitor 100 ms population standard deviation.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x66",
+        "firmware_symbol": "MbAddr_ZeroBaseStd100ms",
+        "group": "zero_monitor",
+        "native_access": "RO",
+        "readable_via": [
+          "input",
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj"
+      }
+    },
+    {
+      "name": "zero_live_600ms",
+      "kind": "input",
+      "address": 103,
+      "word_count": 2,
+      "data_type": "float32",
+      "writable": false,
+      "scale": 1.0,
+      "unit": "us",
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Live trimmed zero value over the current 600 ms window.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x68",
+        "firmware_symbol": "MbAddr_ZeroLive600ms",
+        "group": "zero_monitor",
+        "native_access": "RO",
+        "readable_via": [
+          "input",
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj"
+      }
+    },
+    {
+      "name": "zero_trim_std_600ms",
+      "kind": "input",
+      "address": 105,
+      "word_count": 2,
+      "data_type": "float32",
+      "writable": false,
+      "scale": 1.0,
+      "unit": "us",
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Trimmed 600 ms population standard deviation.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x6A",
+        "firmware_symbol": "MbAddr_ZeroTrimStd600ms",
+        "group": "zero_monitor",
+        "native_access": "RO",
+        "readable_via": [
+          "input",
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj"
+      }
+    },
+    {
+      "name": "zero_trim_range_600ms",
+      "kind": "input",
+      "address": 107,
+      "word_count": 2,
+      "data_type": "float32",
+      "writable": false,
+      "scale": 1.0,
+      "unit": "us",
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Trimmed 600 ms range.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x6C",
+        "firmware_symbol": "MbAddr_ZeroTrimRange600ms",
+        "group": "zero_monitor",
+        "native_access": "RO",
+        "readable_via": [
+          "input",
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj"
+      }
+    },
+    {
+      "name": "zero_raw_p2p_600ms",
+      "kind": "input",
+      "address": 109,
+      "word_count": 2,
+      "data_type": "float32",
+      "writable": false,
+      "scale": 1.0,
+      "unit": "us",
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Raw 600 ms peak-to-peak range.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x6E",
+        "firmware_symbol": "MbAddr_ZeroRawP2P600ms",
+        "group": "zero_monitor",
+        "native_access": "RO",
+        "readable_via": [
+          "input",
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj"
+      }
+    },
+    {
+      "name": "zero_window_valid_count",
+      "kind": "input",
+      "address": 111,
+      "word_count": 1,
+      "data_type": "uint16",
+      "writable": false,
+      "scale": 1.0,
+      "unit": "samples",
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": 0,
+      "maximum": 60,
+      "description": "Valid sample count in the current 600 ms window.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x70",
+        "firmware_symbol": "MbAddr_ZeroWindowValidCount",
+        "group": "zero_monitor",
+        "native_access": "RO",
+        "readable_via": [
+          "input",
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj"
+      }
+    },
+    {
+      "name": "zero_snapshot_sequence_end",
+      "kind": "input",
+      "address": 112,
+      "word_count": 1,
+      "data_type": "uint16",
+      "writable": false,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Coherent zero-monitor snapshot end sequence.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x71",
+        "firmware_symbol": "MbAddr_ZeroSnapshotSequenceEnd",
+        "group": "zero_monitor",
+        "native_access": "RO",
+        "readable_via": [
+          "input",
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj"
+      }
+    },
+    {
+      "name": "pi_drive_gain",
+      "kind": "input",
+      "address": 113,
+      "word_count": 2,
+      "data_type": "uint32",
+      "writable": false,
+      "scale": 1.0,
+      "unit": "raw counts",
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Non-negative saturated raw PI drive gain reported at 500 Hz.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x72",
+        "firmware_symbol": "MbAddr_PIDriveGain",
+        "group": "measurement",
+        "native_access": "RO",
+        "readable_via": [
+          "input",
+          "holding"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj"
+      }
+    },
+    {
+      "name": "zero_calibration_start",
+      "kind": "coil",
+      "address": 16,
+      "word_count": 1,
+      "data_type": "bool",
+      "writable": true,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Write true to start zero calibration; firmware clears it when complete.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x11",
+        "firmware_symbol": "MbAddr_ZERO_CALIBRATION_TRIGGER",
+        "group": "operation",
+        "native_access": "RW",
+        "readable_via": [
+          "coil"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "write_requires": "explicit guarded Modbus operation workflow"
+      }
+    },
+    {
+      "name": "mass_total_reset",
+      "kind": "coil",
+      "address": 17,
+      "word_count": 1,
+      "data_type": "bool",
+      "writable": true,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Write true to clear accumulated mass; firmware clears it afterward.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x12",
+        "firmware_symbol": "MbAddr_MASS_TOTAL_RESET_TRIGGER",
+        "group": "operation",
+        "native_access": "RW",
+        "readable_via": [
+          "coil"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "write_requires": "explicit guarded Modbus operation workflow"
+      }
+    },
+    {
+      "name": "volume_total_reset",
+      "kind": "coil",
+      "address": 18,
+      "word_count": 1,
+      "data_type": "bool",
+      "writable": true,
+      "scale": 1.0,
+      "unit": null,
+      "word_order": "big",
+      "byte_order": "big",
+      "minimum": null,
+      "maximum": null,
+      "description": "Write true to clear accumulated volume; firmware clears it afterward.",
+      "metadata": {
+        "address_basis": "zero-based-pdu",
+        "firmware_map_index": "0x13",
+        "firmware_symbol": "MbAddr_VOLUME_TOTAL_RESET_TRIGGER",
+        "group": "operation",
+        "native_access": "RW",
+        "readable_via": [
+          "coil"
+        ],
+        "source_file": "module/modbus_handler/mb_map.c",
+        "source_head": "f0a1b39ba1f4394253ee0adf7d0aee47c123ff9a",
+        "source_project": "Krohne_prj",
+        "write_requires": "explicit guarded Modbus operation workflow"
+      }
+    }
+  ]
+}

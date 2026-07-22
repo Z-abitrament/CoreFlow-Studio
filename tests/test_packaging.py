@@ -288,6 +288,8 @@ def test_windows_packaging_files_are_present() -> None:
     ):
         assert f'"{hidden_import}"' in spec_text
     assert "collect_conda_qt_binaries" in spec_text
+    assert '"config" / "register_maps"' in spec_text
+    assert '"config/register_maps"' in spec_text
     assert "Library\" / \"bin\"" in spec_text
     assert "shiboken6*.dll" in spec_text
     assert "pyside6*.dll" in spec_text
